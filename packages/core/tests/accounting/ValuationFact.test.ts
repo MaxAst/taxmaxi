@@ -89,7 +89,7 @@ describe("ValuationFact", () => {
   })
   it("preserves exact resolved user totals and their own evidence kind", () => {
     for (const amount of ["0", "1", "9007199254740993", "0.000000000000000001"]) {
-      const value = Schema.decodeUnknownSync(ValuationFact)({
+      const value = Schema.decodeSync(ValuationFact)({
         _tag: "user_valuation",
         eventId: "11111111-1111-4111-8111-111111111111",
         amount: { amount, currency: "EUR" },

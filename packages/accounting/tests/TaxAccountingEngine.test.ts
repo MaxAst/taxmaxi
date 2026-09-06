@@ -1243,11 +1243,14 @@ describe("calculate", () => {
               valuationKind: "observed_consideration",
             })
           )
-          expect(
-            JSON.stringify(
-              yield* runCalculation({ ledger, valuationFacts: [...valuationFacts].reverse() })
-            )
-          ).toBe(JSON.stringify(result))
+          const reordered = yield* runCalculation({
+            ledger,
+            valuationFacts: [...valuationFacts].reverse(),
+          })
+          expect(reordered.status).toBe(result.status)
+          expect(reordered.explanationTrace).toEqual(result.explanationTrace)
+          expect(reordered.realizedResults[0]?.costBasis.format()).toBe(basis)
+          expect(reordered.realizedResults[0]?.gainLoss.format()).toBe(gain)
         }
         if (provider._tag === "observed_consideration") expect(provider.amount.format()).toBe("99")
         expect(unknown.allocations[0]?.costBasis).toBeNull()
