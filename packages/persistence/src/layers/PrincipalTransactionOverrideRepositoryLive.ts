@@ -320,18 +320,18 @@ const loadContext = ({
                 ? undefined
                 : decisions.sourceRepresentationUseDecisionById.get(leg.sourceRepresentationUseId)
             // These are identity facts, not permission to bypass inclusion or technical withholding.
-            // A required but unavailable link cannot be repaired with the stored leg asset.
+            // A required but unavailable exact link cannot use either the provider or stored asset.
             const economicAssetId =
               leg.sourceRepresentationUseId !== null
                 ? (exact?.identityReplacementAssetId ?? exact?.systemAssetId ?? null)
-                : leg.providerAssetRowId !== null
-                  ? (decisions.providerAssetDecisionById.get(leg.providerAssetRowId)
-                      ?.effectiveAssetId ?? null)
-                  : leg.sourceRawRecordId !== null ||
-                      leg.assetRepresentationId !== null ||
-                      leg.originKind !== "none"
-                    ? null
-                    : leg.assetId
+                : leg.assetRepresentationId !== null
+                  ? null
+                  : leg.providerAssetRowId !== null
+                    ? (decisions.providerAssetDecisionById.get(leg.providerAssetRowId)
+                        ?.effectiveAssetId ?? null)
+                    : leg.sourceRawRecordId !== null || leg.originKind !== "none"
+                      ? null
+                      : leg.assetId
             const system: MovementSystemEvidence = {
               occurredAt: leg.occurredAt,
               legKind: leg.kind,

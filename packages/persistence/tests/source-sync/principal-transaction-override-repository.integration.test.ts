@@ -683,4 +683,148 @@ describe("movement correction history reader", () => {
       })
     )
   }
+  for (const hasRepresentation of [false, true]) {
+    for (const sourceUse of ["absent", "resolved", "unresolved"] as const) {
+      for (const hasProvider of [false, true]) {
+        it.effect(
+          `retains exact-link precedence: representation=${hasRepresentation}, sourceUse=${sourceUse}, provider=${hasProvider}`,
+          () =>
+            Effect.gen(function* () {
+              const fixture = yield* Effect.promise(() =>
+                context.runPg(seedIdentityContext({ kind: "provider", state: "overridden" }))
+              )
+              yield* Effect.promise(() =>
+                context.runPg(
+                  Effect.gen(function* () {
+                    const db = yield* drizzle
+                    const [leg] = yield* db
+                      .select({ providerAssetRowId: schema.transactionLegs.providerAssetRowId })
+                      .from(schema.transactionLegs)
+                      .where(eq(schema.transactionLegs.id, fixture.legId))
+                    if (leg === undefined) return yield* Effect.die("Missing synthetic leg")
+                    let sourceRepresentationUseId: string | null = null
+                    if (sourceUse !== "absent") {
+                      const [use] = yield* db
+                        .insert(schema.sourceRepresentationUses)
+                        .values({
+                          sourceId: SOURCE_ID,
+                          blockchainId: fixture.bitcoinBlockchainId,
+                          representationType: "token",
+                          contractAddress:
+                            sourceUse === "resolved"
+                              ? "sync-engine-btc-fixture"
+                              : "synthetic-unresolved-exact",
+                        })
+                        .returning({ id: schema.sourceRepresentationUses.id })
+                      if (use === undefined) return yield* Effect.die("Missing source-use fixture")
+                      sourceRepresentationUseId = use.id
+                    }
+                    yield* db
+                      .update(schema.transactionLegs)
+                      .set({
+                        assetRepresentationId: hasRepresentation
+                          ? TEST_BTC_REPRESENTATION_ID
+                          : null,
+                        sourceRepresentationUseId,
+                        providerAssetRowId: hasProvider ? leg.providerAssetRowId : null,
+                      })
+                      .where(eq(schema.transactionLegs.id, fixture.legId))
+                  })
+                )
+              )
+              const expectedAssetId =
+                sourceUse === "resolved"
+                  ? TEST_BTC_ASSET_ID
+                  : sourceUse === "unresolved" || hasRepresentation
+                    ? null
+                    : hasProvider
+                      ? EFFECTIVE_ASSET_ID
+                      : TEST_BTC_ASSET_ID
+              const found = yield* read()
+              if (Option.isNone(found) || found.value.current === null)
+                return yield* Effect.die("Missing current context")
+              expect(found.value.current.facts.economicAssetId).toBe(expectedAssetId)
+              const revision = found.value.current.facts.systemRevision
+              for (const input of [
+                {
+                  _tag: "price",
+                  input: { _tag: "total_value", amount: "1", currency: CurrencyCode.make("EUR") },
+                },
+                { _tag: "classification", input: { _tag: "inbound", cause: "purchase" } },
+              ] as const) {
+                const accepted = yield* context.runWithLayer({
+                  layer: PrincipalTransactionOverrideRepositoryLive,
+                  effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
+                    repo.create({
+                      principalId: ownedPrincipal,
+                      actorUserId: AuthUserId.make(TEST_USER_ID),
+                      targetId: TARGET_ID,
+                      expectedSystemRevision: revision,
+                      expectedLeafId: null,
+                      reason: "Synthetic exact-link evidence",
+                      reportingCurrency: CurrencyCode.make("EUR"),
+                      input,
+                    })
+                  ),
+                })
+                if (Option.isNone(accepted)) return yield* Effect.die("Missing accepted correction")
+                expect(
+                  accepted.value.context[input._tag].active?.inspectedFacts.economicAssetId
+                ).toBe(expectedAssetId)
+              }
+            })
+        )
+      }
+    }
+  }
+
+  for (const invalidUse of ["missing", "foreign_source"] as const) {
+    it.effect(
+      `rejects a ${invalidUse} source-use link before it can replace inspected identity`,
+      () =>
+        Effect.gen(function* () {
+          const fixture = yield* Effect.promise(() =>
+            context.runPg(seedIdentityContext({ kind: "provider", state: "overridden" }))
+          )
+          const invalidUseId = "00000000-0000-4000-8000-000000008698"
+          if (invalidUse === "foreign_source")
+            yield* Effect.promise(() =>
+              context.runPg(
+                Effect.gen(function* () {
+                  const db = yield* drizzle
+                  const other = yield* seedSyncEngineRepositoryFixture({
+                    principalId: "00000000-0000-4000-8000-000000008695",
+                    userId: "00000000-0000-4000-8000-000000008696",
+                    sourceId: "00000000-0000-4000-8000-000000008697",
+                  })
+                  yield* db.insert(schema.sourceRepresentationUses).values({
+                    id: invalidUseId,
+                    sourceId: other.sourceId,
+                    blockchainId: fixture.bitcoinBlockchainId,
+                    representationType: "token",
+                    contractAddress: "sync-engine-btc-fixture",
+                  })
+                })
+              )
+            )
+          const refused = yield* Effect.promise(() =>
+            context.runPg(
+              Effect.gen(function* () {
+                const db = yield* drizzle
+                return yield* db
+                  .update(schema.transactionLegs)
+                  .set({ sourceRepresentationUseId: invalidUseId })
+                  .where(eq(schema.transactionLegs.id, fixture.legId))
+                  .pipe(Effect.result)
+              })
+            )
+          )
+          expect(refused._tag).toBe("Failure")
+          const found = yield* read()
+          if (Option.isNone(found)) return yield* Effect.die("Missing context")
+          expect(found.value.current?.facts.economicAssetId).toBe(EFFECTIVE_ASSET_ID)
+          expect(found.value.history).toEqual([])
+        })
+    )
+  }
 })
