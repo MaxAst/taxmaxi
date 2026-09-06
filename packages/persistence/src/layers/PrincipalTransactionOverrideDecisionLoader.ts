@@ -136,17 +136,26 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
       const superseded = new Set(
         rows.flatMap((row) => (row.supersedesOverrideId === null ? [] : [row.supersedesOverrideId]))
       )
+      const streamKey = (row: (typeof rows)[number]) => `${row.targetId}:${row.kind}`
+      const relevantStreams = new Set(
+        rows
+          .filter((row) => {
+            if (occurredBefore === undefined || row.inspectedOccurredAt < occurredBefore)
+              return true
+            const current = contextByTarget.get(row.targetId)
+            if (current === undefined) return false
+            if (eventsByTarget.has(row.targetId)) return true
+            return current.custody.length > 0
+              ? current.custody.some((selection) => selection.outcome !== "outside_period")
+              : current.occurredAt < occurredBefore.toISOString()
+          })
+          .map(streamKey)
+      )
       const captured: CalculationRunCorrectionInput[] = []
       for (const row of rows) {
+        if (!relevantStreams.has(streamKey(row))) continue
         const current = contextByTarget.get(row.targetId) ?? null
         const event = current === null ? undefined : eventsByTarget.get(current.targetId)
-        if (
-          event === undefined &&
-          occurredBefore !== undefined &&
-          row.inspectedOccurredAt.getTime() >= occurredBefore.getTime() &&
-          (current === null || current.occurredAt >= occurredBefore.toISOString())
-        )
-          continue
         const system = {
           event: event === undefined ? null : yield* Schema.encodeEffect(AccountingEvent)(event),
           valuationFacts: yield* Effect.forEach(
@@ -167,9 +176,14 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
               ? "included"
               : current === null
                 ? "absent"
-                : occurredBefore !== undefined && current.occurredAt >= occurredBefore.toISOString()
-                  ? "outside_period"
-                  : "withheld",
+                : current.custody.length > 0
+                  ? current.custody.every((selection) => selection.outcome === "outside_period")
+                    ? "outside_period"
+                    : "withheld"
+                  : occurredBefore !== undefined &&
+                      current.occurredAt >= occurredBefore.toISOString()
+                    ? "outside_period"
+                    : "withheld",
           streamState,
           application: streamState === "active" ? "not_applied" : "inactive",
           reportingCurrency,

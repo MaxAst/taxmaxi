@@ -110,6 +110,23 @@ export type CapturedMovementCorrectionHistory = Omit<
   readonly recordedAt: string
 }
 
+/** Exact selected custody relationship, retained even when no event enters the engine. */
+export interface MovementCorrectionCustodyContext {
+  readonly reconciliationId: string
+  readonly canonicalTransferId: string
+  readonly providerTransferId: string
+  readonly canonicalTransactionId: string | null
+  readonly providerTransactionId: string
+  readonly canonicalSourceId: string
+  readonly providerSourceId: string
+  readonly occurredAt: string
+  readonly quantity: string
+  readonly canonicalStoredAssetId: string
+  readonly providerStoredAssetId: string
+  readonly providerDirection: "inbound" | "outbound"
+  readonly outcome: "included" | "withheld" | "outside_period"
+}
+
 /** Recorded current movement context, including facts withheld from the engine. */
 export interface MovementCorrectionLegContext {
   readonly targetId: string
@@ -134,6 +151,7 @@ export interface MovementCorrectionLegContext {
   readonly originKind: "none" | "canonical_transfer" | "provider_transfer"
   readonly sourceTransferId: string | null
   readonly providerTransferId: string | null
+  readonly custody: ReadonlyArray<MovementCorrectionCustodyContext>
 }
 
 /** Exact event and valuation inputs passed to the engine for a target, or honest absence. */
