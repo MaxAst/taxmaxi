@@ -1677,20 +1677,23 @@ const make = Effect.gen(function* () {
         if (event !== undefined) eventsByTarget.set(context.targetId, event)
         return { ...context, custody, effectiveAssetId: event?.assetId ?? context.effectiveAssetId }
       })
-      const correctionInputs = yield* movementCorrectionLoader.load({
+      const movementCorrections = yield* movementCorrectionLoader.load({
         principalId,
         reportingCurrency: supportedReportingCurrency,
         occurredBefore,
         legContexts: correctionLegContexts,
+        custodyUnitIdBySource,
         eventsByTarget,
         valuationFacts,
       })
       return {
-        correctionInputs,
+        correctionInputs: movementCorrections.correctionInputs,
         events,
-        valuationFacts,
+        valuationFacts: movementCorrections.valuationFacts.sort(compareValuationFacts),
         custodyUnitMembership,
-        inputBlockers,
+        inputBlockers: [...inputBlockers, ...movementCorrections.inputBlockers].sort(
+          (left, right) => blockerKey(left).localeCompare(blockerKey(right))
+        ),
         principalAssetOverrideRevision: decisions.revision,
       }
     })

@@ -12,7 +12,6 @@ import type {
   JurisdictionCode,
   TaxYear,
 } from "@my/core/accounting"
-import type { PrincipalAssetTechnicalBlocker } from "@my/core/assets"
 import { CurrencyCode } from "@my/core/currency"
 import type { PrincipalId } from "@my/core/ownership"
 import * as Context from "effect/Context"
@@ -22,6 +21,7 @@ import type { PersistenceError } from "../errors/RepositoryError.ts"
 import type {
   CustodyUnitMembership,
   CalculationRunCorrectionInput,
+  FactualLedgerInputBlockerCode,
 } from "./FactualLedgerRepository.ts"
 
 /** Stable, caller-assigned identity of one immutable calculation run. */
@@ -72,7 +72,7 @@ export class CalculationRunCurrencyMismatchError extends Schema.TaggedError<Calc
 ) {}
 
 /** Fact-layer blocker codes that remain outside the pure accounting engine. */
-export type CalculationRunFactBlockerCode = PrincipalAssetTechnicalBlocker | "unresolved_identity"
+export type CalculationRunFactBlockerCode = FactualLedgerInputBlockerCode
 
 /** At least one stored target that tells the principal which fact must be fixed. */
 export type CalculationRunFactBlockerTarget =

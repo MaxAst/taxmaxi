@@ -599,7 +599,14 @@ describe("CalculationRunServiceLive", () => {
           for (const input of [after, providerCapture]) {
             expect(input?.captured).toMatchObject({
               currentOutcome: expectedOutcome,
-              application: "not_applied",
+              application: custodyCase === "outside_period" ? "not_applied" : "needs_attention",
+              applicationProblem:
+                custodyCase === "outside_period"
+                  ? null
+                  : custodyCase === "included"
+                    ? "structure_changed"
+                    : "target_ineligible",
+              resolvedPrice: null,
               current: {
                 structure: "custody",
                 custody: [
@@ -635,6 +642,9 @@ describe("CalculationRunServiceLive", () => {
             const fee = inputs.find(({ captured }) => captured.current?.legKind === "fee")
             expect(fee?.captured).toMatchObject({
               currentOutcome: "included",
+              application: "applied",
+              applicationProblem: null,
+              effective: { valuationFacts: [{ _tag: "user_valuation" }] },
               current: {
                 custody: [],
                 structure: "fee",
@@ -672,7 +682,7 @@ describe("CalculationRunServiceLive", () => {
   }
 
   it.effect(
-    "captures independent inactive history and changes revision for equal-valued replacement without applying it",
+    "captures independent inactive history and changes revision for equal-valued replacement",
     () =>
       Effect.gen(function* () {
         const fixture = yield* Effect.promise(() => runPg(seedCorrectionMovement))
@@ -701,7 +711,7 @@ describe("CalculationRunServiceLive", () => {
           expect(captured).toMatchObject({
             currentOutcome: "included",
             streamState: "active",
-            application: "not_applied",
+            application: captured.history.kind === "price" ? "applied" : "not_applied",
             reportingCurrency: "EUR",
             current: { legId: fixture.legId, targetId: fixture.targetId },
             system: {
@@ -712,7 +722,10 @@ describe("CalculationRunServiceLive", () => {
             },
           })
           expect(storedDecimalEquals(captured.current?.quantity, "3")).toBe(true)
-          expect(captured.effective).toEqual(captured.system)
+          expect(captured.effective.event).toEqual(captured.system.event)
+          expect(captured.effective.valuationFacts).toContainEqual(
+            expect.objectContaining({ _tag: "user_valuation" })
+          )
           expect(captured.history.actorUserId).toBe(fixture.draft.actorUserId)
           expect(captured.history.inspectedFacts.quantity).toBe("3")
         }
@@ -755,7 +768,7 @@ describe("CalculationRunServiceLive", () => {
         expect(factualContentHash(second.inputLedgerRevision)).not.toBe(
           factualContentHash(first.inputLedgerRevision)
         )
-        expect(second.valuationRevision).toBe(first.valuationRevision)
+        expect(second.valuationRevision).not.toBe(first.valuationRevision)
         expect(yield* Effect.promise(() => readCorrectionInputs(FIRST_RUN_ID))).toEqual(original)
       })
   )
@@ -780,7 +793,7 @@ describe("CalculationRunServiceLive", () => {
         const [captured] = yield* Effect.promise(() => readCorrectionInputs(FIRST_RUN_ID))
         expect(withheld.status).toBe("partial")
         expect(captured?.captured).toMatchObject({
-          application: "not_applied",
+          application: "needs_attention",
           currentOutcome: "withheld",
           current: { legId: fixture.legId },
           system: { event: null, valuationFacts: [] },
@@ -801,7 +814,7 @@ describe("CalculationRunServiceLive", () => {
         expect(absent?.captured).toMatchObject({
           current: null,
           currentOutcome: "absent",
-          application: "not_applied",
+          application: "needs_attention",
           history: { id: fixture.historyId, targetId: fixture.targetId },
         })
         expect(yield* Effect.promise(() => readCorrectionInputs(FIRST_RUN_ID))).toEqual([captured])
