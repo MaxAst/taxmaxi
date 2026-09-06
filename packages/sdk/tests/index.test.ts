@@ -1,3 +1,4 @@
+import { TransactionOverrideScopeQuery } from "@my/rest-api/contracts"
 import { describe, expect, it } from "@effect/vitest"
 import { vi } from "vitest"
 import * as Data from "effect/Data"
@@ -1446,6 +1447,37 @@ describe("TaxMaxi Promise client", () => {
           }),
         }),
       ])
+    })
+  )
+})
+
+describe("public movement correction client registration", () => {
+  it.effect("exposes recorded target discovery through the public generated client", () =>
+    Effect.gen(function* () {
+      const capturedRequests: CapturedRequest[] = []
+      const client = yield* TaxMaxi.makeEffectClient({
+        apiKey: "synthetic-movement-token",
+        baseUrl: "https://sdk.example.test",
+        fetch: makeBodyCapturingFetch({
+          capturedRequests,
+          responseBodies: ['{"targets":[]}'],
+          fallbackBody: "{}",
+        }),
+      })
+      const query = yield* Schema.decodeEffect(TransactionOverrideScopeQuery)({ taxYear: "2025" })
+      expect(
+        yield* client.transactionOverrides.getTransactionOverrideTargets({
+          params: { transactionId: "00000000-0000-4000-8000-000000009505" },
+          query,
+        })
+      ).toEqual({ targets: [] })
+      expect(capturedRequests).toHaveLength(1)
+      expect(capturedRequests[0]?.url).toBe(
+        "https://sdk.example.test/v1/transaction-overrides/transactions/00000000-0000-4000-8000-000000009505/targets?taxYear=2025"
+      )
+      expect(capturedRequests[0]?.headers).toMatchObject({
+        authorization: "Bearer synthetic-movement-token",
+      })
     })
   )
 })
