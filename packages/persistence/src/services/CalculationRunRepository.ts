@@ -19,7 +19,10 @@ import * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import type { PersistenceError } from "../errors/RepositoryError.ts"
-import type { CustodyUnitMembership } from "./FactualLedgerRepository.ts"
+import type {
+  CustodyUnitMembership,
+  CalculationRunCorrectionInput,
+} from "./FactualLedgerRepository.ts"
 
 /** Stable, caller-assigned identity of one immutable calculation run. */
 export const CalculationRunId = Schema.String.check(Schema.isUUID()).pipe(
@@ -105,6 +108,7 @@ export interface PersistCalculationRunParams {
   readonly reportingCurrency: CurrencyCode
   readonly inputLedgerRevision: InputLedgerRevision
   readonly valuationRevision: ValuationRevision
+  readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
   readonly result: CalculationRunResult
 }
 
@@ -119,6 +123,7 @@ export interface StartCalculationRunParams {
   readonly ruleSetVersion: string
   readonly inputLedgerRevision: InputLedgerRevision
   readonly valuationRevision: ValuationRevision
+  readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
   readonly custodyUnitMembership: ReadonlyArray<CustodyUnitMembership>
 }
 
@@ -222,7 +227,8 @@ export interface CalculationRunRepositoryShape {
    * Persist every row of a complete or partial engine result, then activate it
    * only when its factual snapshot is newer than the current active run.
    *
-   * A run started through `start` keeps its committed custody snapshot. Direct
+   * A run started through `start` keeps its committed correction and custody snapshots.
+   * Both paths require explicitly captured correction inputs; they never reload current history. Direct
    * persistence snapshots live custody membership for the legacy atomic path.
    * A run ID is single-use after it reaches a terminal status.
    */

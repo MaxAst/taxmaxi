@@ -280,6 +280,7 @@ const persistResult = ({
     const sequence = inputSequence ?? (id.slice(-12).replace(/^0+/, "") || "0")
 
     return repository.persist({
+      correctionInputs: [],
       id,
       principalId,
       reportingCurrency,
@@ -394,6 +395,63 @@ const seedCalculationRunFixture = ({
         sourceId: OTHER_SOURCE_ID,
       })
     }
+  })
+
+const seedCorrectionRunInput = Effect.gen(function* () {
+  yield* seedCalculationRunFixture({ includeOtherPrincipal: true })
+  yield* seedAcquisitionFact({
+    eventId: ACQUISITION_EVENT_ID,
+    externalId: "synthetic-run-correction",
+    providerFiatAmount: "10",
+  })
+  const db = yield* drizzle
+  const [leg] = yield* db
+    .select({ targetId: schema.transactionLegs.movementCorrectionTargetId })
+    .from(schema.transactionLegs)
+    .where(eq(schema.transactionLegs.id, ACQUISITION_EVENT_ID))
+  const [principal] = yield* db
+    .select({ userId: schema.principals.userId })
+    .from(schema.principals)
+    .where(eq(schema.principals.id, TEST_PRINCIPAL_ID))
+  if (leg === undefined || principal?.userId === null || principal?.userId === undefined)
+    return yield* Effect.die("Missing synthetic input owner")
+  const draft = {
+    principalId: TEST_PRINCIPAL_ID,
+    sourceId: TEST_SOURCE_ID,
+    targetId: leg.targetId,
+    kind: "price",
+    operation: "create",
+    inspectedSystemRevision: "synthetic-inspected-revision",
+    inspectedSourceRecordKey: "synthetic-run-correction-leg",
+    inspectedComponentKey: "movement",
+    inspectedQuantity: "1",
+    inspectedEconomicAssetId: TEST_BTC_ASSET_ID,
+    inspectedDirection: "inbound",
+    inspectedStructure: "ownership_change",
+    inspectedOccurredAt: date("2025-02-03T10:00:00Z"),
+    inspectedLegKind: "acquisition",
+    inspectedFiatAmount: null,
+    inspectedFiatCurrency: null,
+    inspectedTransactionType: "buy_fiat",
+    inspectedProviderTransactionType: null,
+    inspectedDerivationRule: null,
+    inspectedFeeForSourceRecordKey: null,
+    priceInput: { _tag: "total_value", amount: "0", currency: EUR },
+    classificationInput: null,
+    actorUserId: principal.userId,
+    reason: "Synthetic run input",
+    supersedesOverrideId: null,
+  } satisfies typeof schema.principalTransactionOverrides.$inferInsert
+  yield* db.insert(schema.principalTransactionOverrides).values(draft)
+  return draft
+})
+
+const captureCorrectionInputs = () =>
+  context.runWithLayer({
+    layer: FactualLedgerRepositoryLive,
+    effect: Effect.flatMap(FactualLedgerRepository, (repository) =>
+      repository.load({ principalId: TEST_PRINCIPAL_ID, reportingCurrency: EUR })
+    ).pipe(Effect.map((ledger) => ledger.correctionInputs)),
   })
 
 const readLiveAndStoredMembership = (runId: CalculationRunId = RUN_ID) =>
@@ -528,6 +586,241 @@ beforeEach(() =>
 )
 
 describe("CalculationRunRepositoryLive", () => {
+  it.effect(
+    "writes supplied correction inputs atomically and rejects a different snapshot on completion",
+    () =>
+      Effect.gen(function* () {
+        yield* runPgEffect(seedCorrectionRunInput)
+        const correctionInputs = yield* captureCorrectionInputs()
+        const result = completeResult()
+        const params = {
+          id: RUN_ID,
+          principalId: TEST_PRINCIPAL_ID,
+          reportingCurrency: EUR,
+          inputLedgerRevision: InputLedgerRevision.make(`v2:801:1.2.:${"a".repeat(64)}`),
+          valuationRevision: ValuationRevision.make(`sha256:${"b".repeat(64)}`),
+          correctionInputs,
+        }
+        yield* runRepository(
+          Effect.flatMap(CalculationRunRepository, (repository) =>
+            repository.start({
+              ...params,
+              jurisdiction: result.jurisdiction,
+              taxYear: result.taxYear,
+              engineVersion: result.engineVersion,
+              ruleSetVersion: result.ruleSetVersion,
+              custodyUnitMembership: [
+                { custodyUnitId: TEST_CUSTODY_UNIT_ID, sourceId: SourceId.make(TEST_SOURCE_ID) },
+              ],
+            })
+          )
+        )
+        const storedBefore = yield* runPgEffect(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return yield* db
+              .select({ captured: schema.calculationRunCorrectionInputs.captured })
+              .from(schema.calculationRunCorrectionInputs)
+              .where(eq(schema.calculationRunCorrectionInputs.runId, RUN_ID))
+          })
+        )
+        expect(storedBefore).toEqual(correctionInputs.map((captured) => ({ captured })))
+        const rejected = yield* runRepository(
+          Effect.flatMap(CalculationRunRepository, (repository) =>
+            repository.persist({ ...params, correctionInputs: [], result })
+          )
+        ).pipe(Effect.result)
+        expect(rejected).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "CalculationRunAlreadyStoredError" },
+        })
+        expect((yield* readRunSettlement(RUN_ID)).run).toEqual({
+          status: "running",
+          failureCode: null,
+        })
+        yield* runRepository(
+          Effect.flatMap(CalculationRunRepository, (repository) =>
+            repository.persist({ ...params, result })
+          )
+        )
+        expect((yield* readRunSettlement(RUN_ID)).run).toEqual({
+          status: "complete",
+          failureCode: null,
+        })
+        yield* runPgEffect(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const [stored] = yield* db
+              .select({ captured: schema.calculationRunCorrectionInputs.captured })
+              .from(schema.calculationRunCorrectionInputs)
+              .where(eq(schema.calculationRunCorrectionInputs.runId, RUN_ID))
+            expect(stored?.captured).toEqual(correctionInputs[0])
+            expect(
+              (yield* db
+                .update(schema.calculationRunCorrectionInputs)
+                .set({ captured: sql`captured || '{"application":"applied"}'::jsonb` })
+                .where(eq(schema.calculationRunCorrectionInputs.runId, RUN_ID))
+                .pipe(Effect.result))._tag
+            ).toBe("Failure")
+            expect(
+              (yield* db
+                .delete(schema.calculationRunCorrectionInputs)
+                .where(eq(schema.calculationRunCorrectionInputs.runId, RUN_ID))
+                .pipe(Effect.result))._tag
+            ).toBe("Failure")
+            expect(
+              (yield* db
+                .delete(schema.calculationRuns)
+                .where(eq(schema.calculationRuns.id, RUN_ID))
+                .pipe(Effect.result))._tag
+            ).toBe("Failure")
+          })
+        )
+      })
+  )
+
+  it.effect(
+    "rolls back invalid ownership or currency inputs and keeps failed-run inputs immutable",
+    () =>
+      Effect.gen(function* () {
+        const draft = yield* runPgEffect(seedCorrectionRunInput)
+        const correctionInputs = yield* captureCorrectionInputs()
+        const result = completeResult()
+        const first = correctionInputs[0]
+        if (first === undefined) return yield* Effect.die("Missing captured input")
+        const params = {
+          id: RUN_ID,
+          principalId: TEST_PRINCIPAL_ID,
+          reportingCurrency: EUR,
+          jurisdiction: result.jurisdiction,
+          taxYear: result.taxYear,
+          engineVersion: result.engineVersion,
+          ruleSetVersion: result.ruleSetVersion,
+          inputLedgerRevision: InputLedgerRevision.make(`v2:801:1.2.:${"a".repeat(64)}`),
+          valuationRevision: ValuationRevision.make(`sha256:${"b".repeat(64)}`),
+          custodyUnitMembership: [],
+          correctionInputs,
+        }
+        for (const invalid of [
+          { ...params, principalId: OTHER_PRINCIPAL_ID },
+          { ...params, correctionInputs: [{ ...first, reportingCurrency: USD }] },
+          { ...params, correctionInputs: [first, first] },
+        ]) {
+          expect(
+            (yield* runRepository(
+              Effect.flatMap(CalculationRunRepository, (repository) => repository.start(invalid))
+            ).pipe(Effect.result))._tag
+          ).toBe("Failure")
+          expect((yield* readRunSettlement(RUN_ID)).run).toBeUndefined()
+        }
+        yield* runPgEffect(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db.insert(schema.principalTransactionOverrides).values({
+              ...draft,
+              kind: "classification",
+              priceInput: null,
+              classificationInput: { _tag: "inbound", cause: "gift" },
+            })
+          })
+        )
+        const laterInputs = yield* captureCorrectionInputs()
+        const laterInput = laterInputs.find((input) => input.history.kind === "classification")
+        if (laterInput === undefined) return yield* Effect.die("Missing later correction input")
+        yield* runRepository(
+          Effect.flatMap(CalculationRunRepository, (repository) => repository.start(params))
+        )
+        yield* runRepository(
+          Effect.flatMap(CalculationRunRepository, (repository) =>
+            repository.fail({
+              id: RUN_ID,
+              principalId: TEST_PRINCIPAL_ID,
+              failureCode: "synthetic_failure",
+            })
+          )
+        )
+        yield* runPgEffect(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const [stored] = yield* db
+              .select({ captured: schema.calculationRunCorrectionInputs.captured })
+              .from(schema.calculationRunCorrectionInputs)
+              .where(eq(schema.calculationRunCorrectionInputs.runId, RUN_ID))
+            expect(stored?.captured).toEqual(first)
+            expect(
+              (yield* db
+                .delete(schema.calculationRunCorrectionInputs)
+                .where(eq(schema.calculationRunCorrectionInputs.runId, RUN_ID))
+                .pipe(Effect.result))._tag
+            ).toBe("Failure")
+            const row = {
+              runId: RUN_ID,
+              principalId: TEST_PRINCIPAL_ID,
+              jurisdiction: result.jurisdiction,
+              taxYear: result.taxYear,
+              reportingCurrency: EUR,
+              sourceId: laterInput.history.sourceId,
+              targetId: laterInput.history.targetId,
+              overrideId: laterInput.history.id,
+              kind: laterInput.history.kind,
+              captured: laterInput,
+            }
+            const late = yield* db
+              .insert(schema.calculationRunCorrectionInputs)
+              .values(row)
+              .pipe(Effect.result)
+            expect(late._tag).toBe("Failure")
+          })
+        )
+      })
+  )
+
+  it.effect(
+    "direct persistence saves the explicit capture without re-reading later correction history",
+    () =>
+      Effect.gen(function* () {
+        const draft = yield* runPgEffect(seedCorrectionRunInput)
+        const correctionInputs = yield* captureCorrectionInputs()
+        const result = completeResult()
+        const first = correctionInputs[0]
+        if (first === undefined) return yield* Effect.die("Missing captured input")
+        yield* runPgEffect(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db.insert(schema.principalTransactionOverrides).values({
+              ...draft,
+              operation: "withdraw",
+              supersedesOverrideId: first.history.id,
+              priceInput: null,
+            })
+          })
+        )
+        yield* runRepository(
+          Effect.flatMap(CalculationRunRepository, (repository) =>
+            repository.persist({
+              id: RUN_ID,
+              principalId: TEST_PRINCIPAL_ID,
+              reportingCurrency: EUR,
+              inputLedgerRevision: InputLedgerRevision.make(`v2:801:1.2.:${"a".repeat(64)}`),
+              valuationRevision: ValuationRevision.make(`sha256:${"b".repeat(64)}`),
+              correctionInputs,
+              result,
+            })
+          )
+        )
+        const stored = yield* runPgEffect(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return yield* db
+              .select({ captured: schema.calculationRunCorrectionInputs.captured })
+              .from(schema.calculationRunCorrectionInputs)
+              .where(eq(schema.calculationRunCorrectionInputs.runId, RUN_ID))
+          })
+        )
+        expect(stored).toEqual(correctionInputs.map((captured) => ({ captured })))
+      })
+  )
+
   it.effect("fails stale runs once and leaves fresh runs running", () =>
     Effect.gen(function* () {
       yield* runPgEffect(seedCalculationRunFixture({ includeOtherPrincipal: true }))
@@ -559,6 +852,7 @@ describe("CalculationRunRepositoryLive", () => {
         Effect.flatMap(CalculationRunRepository, (repository) =>
           Effect.gen(function* () {
             yield* repository.start({
+              correctionInputs: [],
               id: RECOMPUTE_RUN_ID,
               principalId: TEST_PRINCIPAL_ID,
               jurisdiction: JurisdictionCode.make("DE"),
@@ -576,6 +870,7 @@ describe("CalculationRunRepositoryLive", () => {
               ],
             })
             yield* repository.start({
+              correctionInputs: [],
               id: OTHER_MAINTENANCE_RUN_ID,
               principalId: OTHER_PRINCIPAL_ID,
               jurisdiction: JurisdictionCode.make("DE"),
@@ -628,6 +923,7 @@ describe("CalculationRunRepositoryLive", () => {
       yield* runRepository(
         Effect.flatMap(CalculationRunRepository, (repository) =>
           repository.start({
+            correctionInputs: [],
             id: FIFTH_RUN_ID,
             principalId: TEST_PRINCIPAL_ID,
             jurisdiction: JurisdictionCode.make("DE"),
@@ -842,6 +1138,7 @@ describe("CalculationRunRepositoryLive", () => {
         Effect.flatMap(CalculationRunRepository, (repository) =>
           Effect.gen(function* () {
             yield* repository.start({
+              correctionInputs: [],
               id: RECOMPUTE_RUN_ID,
               principalId: TEST_PRINCIPAL_ID,
               jurisdiction: JurisdictionCode.make("DE"),
@@ -1731,6 +2028,7 @@ describe("CalculationRunRepositoryLive", () => {
           const write = () =>
             Effect.match(
               repository.persist({
+                correctionInputs: [],
                 id: RUN_ID,
                 principalId: TEST_PRINCIPAL_ID,
                 reportingCurrency: EUR,

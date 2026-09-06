@@ -41,6 +41,7 @@ import {
 import {
   FactualLedgerRepository,
   type CustodyUnitMembership,
+  type CalculationRunCorrectionInput,
   type FactualLedgerInputBlocker,
   type PrincipalAssetOverrideRevisionRecord,
 } from "../services/FactualLedgerRepository.ts"
@@ -116,7 +117,9 @@ const makeLedgerRevision = ({
   inputBlockers,
   custodyUnitMembership,
   principalAssetOverrideRevision,
+  correctionInputs,
 }: {
+  readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
   readonly snapshotTransactionId: string
   readonly snapshotVisibility: string
   readonly events: ReadonlyArray<AccountingEvent>
@@ -135,6 +138,7 @@ const makeLedgerRevision = ({
         custodyUnitId,
       ]),
       principalAssetOverrideRevision,
+      correctionInputs,
     })}`
   )
 
@@ -188,6 +192,7 @@ const make = Effect.gen(function* () {
             inputBlockers: factualLedger.inputBlockers,
             custodyUnitMembership: factualLedger.custodyUnitMembership,
             principalAssetOverrideRevision: factualLedger.principalAssetOverrideRevision,
+            correctionInputs: factualLedger.correctionInputs,
           })
           const valuationRevision = makeValuationRevision(factualLedger.valuationFacts)
           return { factualLedger, inputLedgerRevision, valuationRevision }
@@ -222,6 +227,7 @@ const make = Effect.gen(function* () {
         inputLedgerRevision: snapshot.inputLedgerRevision,
         valuationRevision: snapshot.valuationRevision,
         custodyUnitMembership: snapshot.factualLedger.custodyUnitMembership,
+        correctionInputs: snapshot.factualLedger.correctionInputs,
       })
 
       return yield* calculate({
@@ -249,6 +255,7 @@ const make = Effect.gen(function* () {
             inputLedgerRevision: snapshot.inputLedgerRevision,
             valuationRevision: snapshot.valuationRevision,
             result: combinedResult,
+            correctionInputs: snapshot.factualLedger.correctionInputs,
           })
         }),
         Effect.onError((originalCause) =>

@@ -13,6 +13,7 @@ import * as blockchains from "./BlockchainsTable.ts"
 import * as billing from "./BillingTables.ts"
 import * as cex from "./CexTable.ts"
 import * as cexAccount from "./CexAccountTable.ts"
+import * as calculationRunCorrectionInputs from "./CalculationRunCorrectionInputsTable.ts"
 import * as calculationRunResults from "./CalculationRunResultsTables.ts"
 import * as calculationRuns from "./CalculationRunsTables.ts"
 import * as custodyUnits from "./CustodyUnitsTables.ts"
@@ -77,6 +78,7 @@ export const schema = {
   ...billing,
   ...cex,
   ...cexAccount,
+  ...calculationRunCorrectionInputs,
   ...calculationRunResults,
   ...calculationRuns,
   ...custodyUnits,

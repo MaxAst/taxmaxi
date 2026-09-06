@@ -34,7 +34,10 @@ import {
   type FactualLedgerInputBlocker,
   type FactualLedgerInputBlockerTarget,
   type FactualLedgerRepositoryShape,
+  type MovementCorrectionLegContext,
+  type MovementCorrectionCustodyContext,
 } from "../services/FactualLedgerRepository.ts"
+import { makePrincipalTransactionOverrideDecisionLoader } from "./PrincipalTransactionOverrideDecisionLoader.ts"
 import { drizzle } from "./PgClientLive.ts"
 import {
   makePrincipalAssetOverrideDecisionLoader,
@@ -447,6 +450,7 @@ const closeWithheldTransactionPairs = ({
 const make = Effect.gen(function* () {
   const db = yield* drizzle
   const principalAssetOverrideDecisionLoader = yield* makePrincipalAssetOverrideDecisionLoader
+  const movementCorrectionLoader = yield* makePrincipalTransactionOverrideDecisionLoader
   const feeTransactionTable = aliasedTable(schema.transactions, "fee_transaction")
   const providerTransactionTable = aliasedTable(schema.transactions, "provider_transaction")
   const canonicalTransactionTable = aliasedTable(schema.transactions, "canonical_transaction")
@@ -481,6 +485,9 @@ const make = Effect.gen(function* () {
       const rows = yield* db
         .select({
           id: schema.transactionLegs.id,
+          targetId: schema.transactionLegs.movementCorrectionTargetId,
+          fiatAmount: schema.transactionLegs.fiatAmount,
+          fiatCurrency: schema.transactionLegs.fiatCurrency,
           sourceId: schema.transactionLegs.sourceId,
           providerKey: schema.sources.providerKey,
           timestamp: schema.transactionLegs.timestamp,
@@ -763,7 +770,37 @@ const make = Effect.gen(function* () {
         eventRows.push({ event, row })
       }
 
-      return { events, eventRows, eventCountByTransactionId }
+      const legContexts: MovementCorrectionLegContext[] = rows.map((row) => ({
+        custody: [],
+        targetId: row.targetId,
+        legId: row.id,
+        sourceId: row.sourceId,
+        transactionId: row.transactionId,
+        occurredAt: row.timestamp.toISOString(),
+        quantity: row.amount,
+        storedAssetId: row.assetId,
+        effectiveAssetId: effectiveAssetByLegId.get(row.id) ?? null,
+        direction: row.kind === "acquisition" || row.kind === "income" ? "inbound" : "outbound",
+        structure:
+          row.kind === "fee"
+            ? "fee"
+            : isReconciledEconomicLeg(row)
+              ? "custody"
+              : "ownership_change",
+        legKind: row.kind,
+        transactionType: row.transactionType,
+        providerTransactionType: row.providerTransactionType,
+        recordedFiatAmount: row.fiatAmount,
+        recordedFiatCurrency: row.fiatCurrency,
+        providerFiatAmount: row.providerFiatAmount,
+        providerFiatCurrency: row.providerFiatCurrency,
+        derivationRule: row.derivationRule,
+        feeForSourceRecordKey: row.feeExternalId,
+        originKind: row.originKind,
+        sourceTransferId: row.sourceTransferId,
+        providerTransferId: row.providerTransferId,
+      }))
+      return { events, eventRows, eventCountByTransactionId, legContexts }
     })
 
   type LoadedLegEvents = Effect.Success<ReturnType<typeof loadLegEvents>>
@@ -1068,9 +1105,12 @@ const make = Effect.gen(function* () {
 
       const eventRows: Array<{
         readonly event: AccountingEvent
+        readonly canonicalTransferId: string
+        readonly providerTransferId: string
         readonly canonicalTransactionId: string | null
         readonly providerTransactionId: string
       }> = []
+      const custodyContexts: MovementCorrectionCustodyContext[] = []
       const reconciledCanonicalTransferIds = new Set<string>()
       const reconciledProviderTransferIds = new Set<string>()
       const handledProviderTransferIds = new Set<string>()
@@ -1081,6 +1121,23 @@ const make = Effect.gen(function* () {
       }> = []
       for (const row of rows) {
         if (row.canonicalTransferId === null) continue
+        custodyContexts.push({
+          reconciliationId: row.id,
+          canonicalTransferId: row.canonicalTransferId,
+          providerTransferId: row.providerTransferId,
+          canonicalTransactionId: row.canonicalTransactionId,
+          providerTransactionId: row.providerTransactionId,
+          canonicalSourceId: row.canonicalSourceId,
+          providerSourceId: row.providerSourceId,
+          occurredAt: row.canonicalTimestamp.toISOString(),
+          quantity: row.amount,
+          canonicalStoredAssetId: row.assetId,
+          providerStoredAssetId: row.providerInventoryAssetId,
+          providerDirection: row.providerDirection,
+          outcome: isBeforeCutoff(row.canonicalTimestamp, occurredBefore)
+            ? "withheld"
+            : "outside_period",
+        })
         handledProviderTransferIds.add(row.providerTransferId)
         reconciledCanonicalTransferIds.add(row.canonicalTransferId)
         reconciledProviderTransferIds.add(row.providerTransferId)
@@ -1237,6 +1294,8 @@ const make = Effect.gen(function* () {
             },
             operation: "factualLedgerRepository.load.event",
           }),
+          canonicalTransferId: row.canonicalTransferId,
+          providerTransferId: row.providerTransferId,
           canonicalTransactionId: row.canonicalTransactionId,
           providerTransactionId: row.providerTransactionId,
         })
@@ -1246,6 +1305,7 @@ const make = Effect.gen(function* () {
 
       return {
         eventRows,
+        custodyContexts,
         handledProviderTransferIds,
         pairs,
         reconciledCanonicalTransferIds,
@@ -1538,13 +1598,12 @@ const make = Effect.gen(function* () {
         reconciledProviderTransferIds: custodyMovementEvents.reconciledProviderTransferIds,
         withheldTransactionIds,
       })
-      const custodyEvents = custodyMovementEvents.eventRows
-        .filter(
-          ({ canonicalTransactionId, providerTransactionId }) =>
-            !withheldTransactionIds.has(providerTransactionId) &&
-            (canonicalTransactionId === null || !withheldTransactionIds.has(canonicalTransactionId))
-        )
-        .map(({ event }) => event)
+      const custodyEventRows = custodyMovementEvents.eventRows.filter(
+        ({ canonicalTransactionId, providerTransactionId }) =>
+          !withheldTransactionIds.has(providerTransactionId) &&
+          (canonicalTransactionId === null || !withheldTransactionIds.has(canonicalTransactionId))
+      )
+      const custodyEvents = custodyEventRows.map(({ event }) => event)
       const events = [...legEvents.events, ...custodyEvents].sort(compareEvents)
       const valuationEvents = events.filter((event) => event._tag !== "custody_movement")
       const observedValuationFacts = yield* makeObservedValuationFacts({
@@ -1573,7 +1632,61 @@ const make = Effect.gen(function* () {
         blockerKey(left).localeCompare(blockerKey(right))
       )
 
+      // Keep selections made before cutoff/technical checks even when no event was emitted.
+      // All associations use the exact IDs read by the custody writer above.
+      const custodyEventById = new Map<string, AccountingEvent>(
+        custodyEvents.map((event) => [event.id, event])
+      )
+      const custodyByCanonicalTransfer = new Map<string, MovementCorrectionCustodyContext[]>()
+      const custodyByProviderTransfer = new Map<string, MovementCorrectionCustodyContext[]>()
+      for (const selection of custodyMovementEvents.custodyContexts) {
+        const context: MovementCorrectionCustodyContext = custodyEventById.has(
+          selection.reconciliationId
+        )
+          ? { ...selection, outcome: "included" }
+          : selection
+        const canonical = custodyByCanonicalTransfer.get(context.canonicalTransferId)
+        if (canonical === undefined)
+          custodyByCanonicalTransfer.set(context.canonicalTransferId, [context])
+        else canonical.push(context)
+        const provider = custodyByProviderTransfer.get(context.providerTransferId)
+        if (provider === undefined)
+          custodyByProviderTransfer.set(context.providerTransferId, [context])
+        else provider.push(context)
+      }
+      const eventByLegId = new Map<string, AccountingEvent>(
+        legEvents.events.map((event) => [event.id, event])
+      )
+      const eventsByTarget = new Map<string, AccountingEvent>()
+      const correctionLegContexts = legEvents.legContexts.map((context) => {
+        const custody =
+          context.structure !== "custody"
+            ? []
+            : context.originKind === "canonical_transfer" && context.sourceTransferId !== null
+              ? (custodyByCanonicalTransfer.get(context.sourceTransferId) ?? [])
+              : context.originKind === "provider_transfer" && context.providerTransferId !== null
+                ? (custodyByProviderTransfer.get(context.providerTransferId) ?? [])
+                : []
+        const includedCustody = custody.find((selection) => selection.outcome === "included")
+        const event =
+          context.structure === "custody"
+            ? includedCustody === undefined
+              ? undefined
+              : custodyEventById.get(includedCustody.reconciliationId)
+            : eventByLegId.get(context.legId)
+        if (event !== undefined) eventsByTarget.set(context.targetId, event)
+        return { ...context, custody, effectiveAssetId: event?.assetId ?? context.effectiveAssetId }
+      })
+      const correctionInputs = yield* movementCorrectionLoader.load({
+        principalId,
+        reportingCurrency: supportedReportingCurrency,
+        occurredBefore,
+        legContexts: correctionLegContexts,
+        eventsByTarget,
+        valuationFacts,
+      })
       return {
+        correctionInputs,
         events,
         valuationFacts,
         custodyUnitMembership,
