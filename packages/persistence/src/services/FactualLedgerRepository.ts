@@ -45,8 +45,8 @@ export type FactualLedgerInputBlockerCode =
   | "movement_correction_needs_attention"
   | "movement_price_currency_mismatch"
 
-/** Reason an active movement price could not supply the current calculation input. */
-export type MovementPriceApplicationProblem =
+/** Reason an active movement correction could not supply the current calculation input. */
+export type MovementCorrectionApplicationProblem =
   | "target_unavailable"
   | "target_ineligible"
   | "target_changed"
@@ -171,6 +171,11 @@ export interface MovementCorrectionLegContext {
 
 /** Exact event and valuation inputs passed to the engine for a target, or honest absence. */
 export interface MovementCorrectionEngineInputs {
+  /** User assertion source, only when this effective cause came from that retained history record. */
+  readonly classificationEvidence?: {
+    readonly _tag: "user_assertion"
+    readonly overrideId: string
+  }
   readonly event: Schema.Codec.Encoded<typeof AccountingEvent> | null
   readonly valuationFacts: ReadonlyArray<Schema.Codec.Encoded<typeof ValuationFact>>
 }
@@ -183,8 +188,8 @@ export interface CalculationRunCorrectionInput {
   readonly streamState: "active" | "withdrawn" | "superseded"
   readonly application: "inactive" | "not_applied" | "applied" | "needs_attention"
   readonly reportingCurrency: CurrencyCode
-  /** Null when no active price was rejected for this run. */
-  readonly applicationProblem: MovementPriceApplicationProblem | null
+  /** Null when no active correction was rejected for this run. */
+  readonly applicationProblem: MovementCorrectionApplicationProblem | null
   /** Exact selected total and display-only unit preview, present only for an applied price. */
   readonly resolvedPrice: Pick<
     ResolvedMovementPrice,
