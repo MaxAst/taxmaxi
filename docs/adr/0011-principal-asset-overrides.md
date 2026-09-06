@@ -53,7 +53,7 @@ A principal asset override is an append-only record owned by one principal that 
 
 ## Consequences
 
-- Price, classification, and tax-treatment overrides (#150 and later) reuse the same target model, history shape, compare-and-set rules, and replay scheduling instead of adding subsystems.
+- Movement-specific price and factual-classification corrections reuse the history shape, compare-and-set rules, and replay scheduling. Their movement targets are distinct from these asset-wide targets; ADR 0013 defines that boundary. Direct tax-treatment overrides are outside the confirmed scope of #150 — feat(tax): apply audited user overrides to transaction calculations.
 - Reports (#151) can disclose every override because each run names the override history it read.
 - Facts must carry the links the loader needs; see ADR 0012.
 - Two principals sharing one representation can receive different effective results from identical raw data. Tests for any fact-layer change must keep proving that isolation.

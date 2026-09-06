@@ -46,6 +46,14 @@ _Avoid_: User mapping, custom asset, principal-scoped mapping
 What an override points at. The exact representation target is a blockchain plus representation type plus canonical contract, mint, or native identity, and needs no global representation row. The provider-asset target is the principal plus one provider observation row, used only for facts with no exact chain identity.
 _Avoid_: Asset ID (as the target), symbol
 
+**Movement correction**:
+One principal's append-only replacement of the valuation or supported factual classification of one recorded token movement. It preserves the original facts; the accounting engine derives tax treatment from the effective inputs (ADR 0013).
+_Avoid_: Tax-result override, asset override (when only one occurrence is meant)
+
+**Movement correction target**:
+The stable identity of the particular source movement a correction applies to, retained across replay. It identifies one occurrence rather than every occurrence of an asset.
+_Avoid_: Leg ID, token symbol, transaction total
+
 **System conclusion**:
 What TaxMaxi currently decides for a target, with the revision the user inspected when they overrode it. When the system conclusion moves on, the override stays active and the projection marks it as made against a stale system revision.
 _Avoid_: Global mapping (when the projection field is meant), default
