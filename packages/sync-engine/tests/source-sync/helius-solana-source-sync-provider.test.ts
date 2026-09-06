@@ -35,6 +35,8 @@ import {
 import type { SourceRawRecord, SourceSyncSource } from "../../src/services/SourceSyncModels.ts"
 import { FetchProviderRawBatchParams } from "../../src/shared/SourceProviderRawBatch.ts"
 
+const isPrincipalTransferMetadata = Schema.is(Schema.Struct({ role: Schema.Literal("principal") }))
+
 const WALLET_ADDRESS = "So11111111111111111111111111111111111111112"
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 const NATIVE_SOL_PSEUDO_MINT = "So11111111111111111111111111111111111111111"
@@ -1188,7 +1190,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
         ])
         expect(result.providerTransfers).toHaveLength(2)
         const principalProviderTransfer = result.providerTransfers.find((transfer) =>
-          transfer.externalId?.includes(":provider:principal:")
+          isPrincipalTransferMetadata(transfer.metadata)
         )
         expect(principalProviderTransfer).toMatchObject({
           observedBlockchainId: "solana-blockchain-id",
@@ -1275,13 +1277,23 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
       expect(prepared.legDerivationStrategy).toBe("derive")
       expect(prepared.legPlans).toEqual([
         {
-          transferExternalId: `${signature}:principal:0`,
+          transferExternalId: `${signature}:component:native_balance:${WALLET_ADDRESS}`,
+          movementIdentity: {
+            _tag: "identified",
+            sourceRecordKey: signature,
+            componentKey: `native_balance:${WALLET_ADDRESS}`,
+          },
           kind: "disposal",
           role: "principal",
           derivationRule: "helius_solana_outbound",
         },
         {
-          transferExternalId: `${signature}:fee:1`,
+          transferExternalId: `${signature}:component:meta.fee`,
+          movementIdentity: {
+            _tag: "identified",
+            sourceRecordKey: signature,
+            componentKey: "meta.fee",
+          },
           kind: "fee",
           role: "fee",
           derivationRule: "helius_solana_fee",
@@ -1289,7 +1301,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
       ])
       expect(legs).toHaveLength(2)
       expect(legs[0]).toMatchObject({
-        externalId: `${signature}:principal:0:leg`,
+        externalId: `${signature}:movement:native_balance:${WALLET_ADDRESS}:leg`,
         kind: "disposal",
         amount: "0.5",
         assetId: "asset-sol",
@@ -1301,7 +1313,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
         feeForTransactionId: null,
       })
       expect(legs[1]).toMatchObject({
-        externalId: `${signature}:fee:1:leg`,
+        externalId: `${signature}:movement:meta.fee:leg`,
         kind: "fee",
         amount: "0.000005",
         assetId: "asset-sol",
@@ -1498,7 +1510,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
 
       const principalProviderTransfers = result.providerTransfers.filter(
         (transfer) =>
-          transfer.externalId?.includes(":provider:principal:") &&
+          isPrincipalTransferMetadata(transfer.metadata) &&
           transfer.observedBlockchainId !== null &&
           transfer.observedBlockchainId !== undefined
       )
@@ -1654,7 +1666,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
 
       const principalProviderTransfers = result.providerTransfers.filter(
         (transfer) =>
-          transfer.externalId?.includes(":provider:principal:") &&
+          isPrincipalTransferMetadata(transfer.metadata) &&
           transfer.observedBlockchainId !== null &&
           transfer.observedBlockchainId !== undefined
       )
@@ -1822,7 +1834,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
 
       const principalProviderTransfers = result.providerTransfers.filter(
         (transfer) =>
-          transfer.externalId?.includes(":provider:principal:") &&
+          isPrincipalTransferMetadata(transfer.metadata) &&
           transfer.observedBlockchainId !== null &&
           transfer.observedBlockchainId !== undefined
       )
@@ -1849,8 +1861,8 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
       expect(
         result.providerTransfers.find(
           (transfer) =>
-            transfer.externalId?.includes(":provider:principal:") &&
-            !transfer.externalId.includes(":evidence:")
+            isPrincipalTransferMetadata(transfer.metadata) &&
+            transfer.processingMode !== "evidence_only"
         )
       ).toMatchObject({
         amount: "0.75",
@@ -1929,7 +1941,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
 
       const observedPrincipalTransfers = result.providerTransfers.filter(
         (transfer) =>
-          transfer.externalId?.includes(":provider:principal:") &&
+          isPrincipalTransferMetadata(transfer.metadata) &&
           transfer.observedBlockchainId !== null &&
           transfer.observedBlockchainId !== undefined
       )
@@ -2066,7 +2078,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
 
       const principalProviderTransfers = result.providerTransfers.filter(
         (transfer) =>
-          transfer.externalId?.includes(":provider:principal:") &&
+          isPrincipalTransferMetadata(transfer.metadata) &&
           transfer.observedBlockchainId !== null &&
           transfer.observedBlockchainId !== undefined
       )
@@ -2393,8 +2405,8 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
         },
       })
       expect(result.providerTransfers.map((transfer) => transfer.externalId)).toEqual([
-        "signature-spl-normalized:provider:fee:1",
-        "signature-spl-normalized:provider:principal:1",
+        "signature-spl-normalized:component:meta.fee:provider",
+        "signature-spl-normalized:unidentified:parsed_transfer:1:provider",
       ])
       const splProviderTransfer = result.providerTransfers.find(
         (transfer) => transfer.providerAssetId === `provider-asset-${USDC_MINT}`
@@ -3112,8 +3124,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
       expect(
         result.providerTransfers.filter(
           (transfer) =>
-            transfer.externalId?.includes(":provider:principal:") &&
-            transfer.observedBlockchainId === null
+            isPrincipalTransferMetadata(transfer.metadata) && transfer.observedBlockchainId === null
         )
       ).toEqual([
         expect.objectContaining({
@@ -3739,7 +3750,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
 
       const principalProviderTransfers = result.providerTransfers.filter(
         (transfer) =>
-          transfer.externalId?.includes(":provider:principal:") &&
+          isPrincipalTransferMetadata(transfer.metadata) &&
           transfer.observedBlockchainId !== null &&
           transfer.observedBlockchainId !== undefined
       )
@@ -4011,7 +4022,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
 
       const principalProviderTransfers = result.providerTransfers.filter(
         (transfer) =>
-          transfer.externalId?.includes(":provider:principal:") &&
+          isPrincipalTransferMetadata(transfer.metadata) &&
           transfer.observedBlockchainId !== null &&
           transfer.observedBlockchainId !== undefined
       )
@@ -4990,7 +5001,7 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
       expect(result.providerTransfers).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            externalId: "signature-close-account-rent-refund:provider:rent:0",
+            externalId: `signature-close-account-rent-refund:component:native_balance:${WALLET_ADDRESS}:provider`,
             observedRepresentationType: "native",
             observedDecimals: 9,
             processingMode: "accounting_and_evidence",
@@ -5002,7 +5013,9 @@ describe("HeliusSolanaSourceSyncProviderLive", () => {
       )
       expect(
         result.providerTransfers.filter(
-          (transfer) => transfer.externalId?.includes(":provider:principal:evidence:") === true
+          (transfer) =>
+            isPrincipalTransferMetadata(transfer.metadata) &&
+            transfer.processingMode === "evidence_only"
         )
       ).toEqual([])
     })
