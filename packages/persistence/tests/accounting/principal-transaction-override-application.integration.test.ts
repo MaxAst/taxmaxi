@@ -776,6 +776,81 @@ describe("effective movement price application", () => {
       })
   )
   for (const targetKind of ["exact", "provider"] as const) {
+    it.effect(`applies classification alongside an existing ${targetKind} identity override`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* runPg(seedExistingIdentity(targetKind))
+        yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .update(schema.transactions)
+              .set({ transactionType: null })
+              .where(eq(schema.transactions.id, fixture.purchaseId))
+          })
+        )
+        const price = yield* changePrice({
+          operation: "create",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "total_value", amount: "20", currency: EUR },
+        })
+        expect((yield* recompute(1)).status).toBe("partial")
+        const before = yield* readRun(1)
+        const classification = yield* changeClassification({
+          operation: "create",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "inbound", cause: "purchase" },
+        })
+        expect(classification.context.classification.active?.inspectedFacts.economicAssetId).toBe(
+          fixture.replacementAssetId
+        )
+        expect((yield* recompute(2)).status).toBe("complete")
+        const run = yield* readRun(2)
+        expect(moneyEquals(run.results[0]?.basis, "20")).toBe(true)
+        expect(moneyEquals(run.results[0]?.gain, "10")).toBe(true)
+        expect(run.blockers).toEqual([])
+        expect(run.inputs.map(({ captured }) => captured.history.id).sort()).toEqual(
+          [price.overrideId, classification.overrideId].sort()
+        )
+        for (const { captured } of run.inputs) {
+          expect(captured).toMatchObject({
+            application: "applied",
+            current: {
+              storedAssetId: TEST_BTC_ASSET_ID,
+              effectiveAssetId: fixture.replacementAssetId,
+            },
+            history: { inspectedFacts: { economicAssetId: fixture.replacementAssetId } },
+            system: { event: { assetId: fixture.replacementAssetId, cause: "unknown" } },
+            effective: {
+              event: { assetId: fixture.replacementAssetId, cause: "purchase" },
+              classificationEvidence: {
+                _tag: "user_assertion",
+                overrideId: classification.overrideId,
+              },
+            },
+          })
+        }
+        expect(run.inputs[0]?.captured.effective).toEqual(run.inputs[1]?.captured.effective)
+        const original = yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return yield* db
+              .select({
+                storedAssetId: schema.transactionLegs.assetId,
+                providerCause: schema.transactions.transactionType,
+              })
+              .from(schema.transactionLegs)
+              .innerJoin(
+                schema.transactions,
+                eq(schema.transactions.id, schema.transactionLegs.transactionId)
+              )
+              .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+          })
+        )
+        expect(original).toEqual([{ storedAssetId: TEST_BTC_ASSET_ID, providerCause: null }])
+        expect(yield* readRun(1)).toEqual(before)
+      })
+    )
+
     it.effect(`applies a price accepted after an existing ${targetKind} identity override`, () =>
       Effect.gen(function* () {
         const fixture = yield* runPg(seedExistingIdentity(targetKind))
