@@ -1721,6 +1721,87 @@ describe("effective movement price application", () => {
     })
   )
 
+  for (const earlierKind of ["price", "classification"] as const) {
+    for (const withdrawn of [false, true]) {
+      it.effect(
+        `keeps absent mixed-period ${earlierKind} ${withdrawn ? "withdrawal" : "active"} coverage independent`,
+        () =>
+          Effect.gen(function* () {
+            const fixture = yield* runPg(seed())
+            const laterKind = earlierKind === "price" ? "classification" : "price"
+            const accept = (kind: "price" | "classification") =>
+              kind === "price"
+                ? changePrice({
+                    operation: "create",
+                    targetId: fixture.acquisition.targetId,
+                    input: { _tag: "total_value", amount: "20", currency: EUR },
+                  })
+                : changeClassification({
+                    operation: "create",
+                    targetId: fixture.acquisition.targetId,
+                    input: { _tag: "inbound", cause: "purchase" },
+                  })
+            const withdraw = (kind: "price" | "classification") =>
+              kind === "price"
+                ? changePrice({ operation: "withdraw", targetId: fixture.acquisition.targetId })
+                : changeClassification({
+                    operation: "withdraw",
+                    targetId: fixture.acquisition.targetId,
+                  })
+            const earlier = yield* accept(earlierKind)
+            const earlierLeaf = withdrawn ? yield* withdraw(earlierKind) : earlier
+            yield* runPg(
+              Effect.gen(function* () {
+                const db = yield* drizzle
+                const future = DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z"))
+                yield* db
+                  .update(schema.transactionLegs)
+                  .set({ timestamp: future })
+                  .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+                yield* db
+                  .update(schema.transactions)
+                  .set({ timestamp: future })
+                  .where(eq(schema.transactions.id, fixture.purchaseId))
+              })
+            )
+            const later = yield* accept(laterKind)
+            const laterLeaf = withdrawn ? yield* withdraw(laterKind) : later
+            yield* runPg(
+              Effect.gen(function* () {
+                const db = yield* drizzle
+                yield* db.delete(schema.transactionLegs)
+              })
+            )
+            yield* completeReplay(laterLeaf.processingJobId)
+            expect((yield* recompute(1)).status).toBe("complete")
+            const projected = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+            expect(projected.inputs.currentOutcome).toBe("absent")
+            expect(projected[earlierKind]).toMatchObject({
+              coverageStatus: "covered",
+              coverage: {
+                overrideId: earlierLeaf.overrideId,
+                runId: runId(1),
+                status: "complete",
+                input: { application: withdrawn ? "inactive" : "needs_attention" },
+              },
+            })
+            expect(projected[laterKind]).toMatchObject({
+              coverageStatus: "outside_period",
+              coverage: null,
+              leaf: { id: laterLeaf.overrideId },
+            })
+            expect(
+              (yield* readRun(1)).inputs.every(
+                (input) => input.captured.history.kind === earlierKind
+              )
+            ).toBe(true)
+            if (!withdrawn)
+              expect(projected[earlierKind].applicationProblem).toBe("target_unavailable")
+          })
+      )
+    }
+  }
+
   it.effect("keeps stale facts and absent attention separate from completed run status", () =>
     Effect.gen(function* () {
       const fixture = yield* runPg(seed())

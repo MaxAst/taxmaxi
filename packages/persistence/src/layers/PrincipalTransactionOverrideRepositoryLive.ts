@@ -744,18 +744,19 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
           effective: { event: null, valuationFacts: [] },
           corrections: [],
         }
-        const outsidePeriod =
-          inputs.currentOutcome === "outside_period" ||
-          (inputs.current === null &&
-            context.history.length > 0 &&
-            context.history.every(
-              (record) =>
-                record.inspectedSystem.occurredAt >=
-                germanTaxYearEndExclusive(scope.taxYear).toDate()
-            ))
         const streams = yield* Effect.forEach(["price", "classification"] as const, (kind) =>
           Effect.gen(function* () {
             const stream = context[kind]
+            const periodHistory = context.history.filter((record) => record.kind === kind)
+            const outsidePeriod =
+              inputs.currentOutcome === "outside_period" ||
+              (inputs.current === null &&
+                periodHistory.length > 0 &&
+                periodHistory.every(
+                  (record) =>
+                    record.inspectedSystem.occurredAt >=
+                    germanTaxYearEndExclusive(scope.taxYear).toDate()
+                ))
             const capture = inputs.corrections.find((input) => input.history.id === stream.leaf?.id)
             const { replay, coverage } = yield* loadCoverage({ tx, context, kind, scope })
             const inspectedCurrency = stream.active?.inspectedValuationEvidence.reportingCurrency
