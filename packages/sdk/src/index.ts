@@ -41,6 +41,12 @@ import {
   type AssetOverridesEffectResource,
   type AssetOverridesPromiseResource,
 } from "./asset-overrides/index.ts"
+import {
+  makeTransactionOverridesEffectResource,
+  makeTransactionOverridesPromiseResource,
+  type TransactionOverridesEffectResource,
+  type TransactionOverridesPromiseResource,
+} from "./transaction-overrides/index.ts"
 import { toTaxMaxiError } from "./errors.ts"
 import {
   makeBillingEffectResource,
@@ -137,6 +143,30 @@ export type {
   TaxMaxiAssetOverrideError,
 } from "./asset-overrides/index.ts"
 export type {
+  TransactionOverrideCurrent,
+  TransactionOverrideHistory,
+  TransactionOverrideTargets,
+  TransactionOverrideMutationResult,
+  TransactionOverrideSet,
+  TransactionOverrideWithdrawal,
+  TransactionOverridePriceInput,
+  TransactionOverrideClassificationInput,
+  TransactionOverrideReadInput,
+  TransactionOverrideDiscoveryInput,
+  TransactionOverrideCreateInput,
+  TransactionOverrideReplaceInput,
+  TransactionOverrideWithdrawInput,
+  TransactionOverrideTargetsError,
+  TransactionOverrideCurrentError,
+  TransactionOverrideHistoryError,
+  TransactionOverrideCreateError,
+  TransactionOverrideReplaceError,
+  TransactionOverrideWithdrawError,
+  TaxMaxiTransactionOverrideError,
+  TransactionOverridesEffectResource,
+  TransactionOverridesPromiseResource,
+} from "./transaction-overrides/index.ts"
+export type {
   Account,
   AuthAuthorizeRedirectResponse,
   AuthEffectResource,
@@ -147,6 +177,7 @@ export type {
 export {
   TaxMaxiError,
   getTaxMaxiAssetOverrideError,
+  getTaxMaxiTransactionOverrideError,
   getTaxMaxiAssetDecisionConflict,
   getTaxMaxiAssetDecisionErrorCode,
   getTaxMaxiAssetLookupErrorCode,
@@ -227,6 +258,7 @@ export type TaxMaxiEffectResources = {
   readonly portfolio: PortfolioEffectResource
   readonly sources: SourcesEffectResource
   readonly transactions: TransactionsEffectResource
+  readonly transactionOverrides: TransactionOverridesEffectResource
 }
 
 export type TaxMaxiPromiseResources = {
@@ -239,6 +271,7 @@ export type TaxMaxiPromiseResources = {
   readonly portfolio: PortfolioPromiseResource
   readonly sources: SourcesPromiseResource
   readonly transactions: TransactionsPromiseResource
+  readonly transactionOverrides: TransactionOverridesPromiseResource
 }
 
 const makeTaxMaxiEffectResources = (
@@ -253,6 +286,7 @@ const makeTaxMaxiEffectResources = (
   portfolio: makePortfolioEffectResource(client),
   sources: makeSourcesEffectResource(client),
   transactions: makeTransactionsEffectResource(client),
+  transactionOverrides: makeTransactionOverridesEffectResource(client),
 })
 
 const mergeHeaders =
@@ -276,6 +310,7 @@ export class TaxMaxi implements TaxMaxiPromiseResources {
   readonly effect: TaxMaxiEffectResources
   readonly sources: SourcesPromiseResource
   readonly transactions: TransactionsPromiseResource
+  readonly transactionOverrides: TransactionOverridesPromiseResource
 
   private readonly client: Effect.Effect<TaxMaxiEffectClient, never>
 
@@ -294,6 +329,10 @@ export class TaxMaxi implements TaxMaxiPromiseResources {
     this.portfolio = makePortfolioPromiseResource(this.effect.portfolio, this.run)
     this.sources = makeSourcesPromiseResource(this.effect.sources, this.run)
     this.transactions = makeTransactionsPromiseResource(this.effect.transactions, this.run)
+    this.transactionOverrides = makeTransactionOverridesPromiseResource(
+      this.effect.transactionOverrides,
+      this.run
+    )
   }
 
   static makeEffectClient(
