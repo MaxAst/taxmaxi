@@ -1,12 +1,22 @@
+import { JurisdictionCode, TaxYear, type MovementCorrectionInput } from "@my/core/accounting"
+import { AuthUserId } from "@my/core/authentication"
+import { CurrencyCode } from "@my/core/currency"
+import { PrincipalId } from "@my/core/ownership"
+import * as BigDecimal from "effect/BigDecimal"
+import * as Option from "effect/Option"
+import { CalculationRunServiceLive } from "../../../persistence/src/layers/CalculationRunServiceLive.ts"
+import { CalculationRunRepositoryLive } from "../../../persistence/src/layers/CalculationRunRepositoryLive.ts"
+import { FactualLedgerRepositoryLive } from "../../../persistence/src/layers/FactualLedgerRepositoryLive.ts"
+import { PrincipalTransactionOverrideRepositoryLive } from "../../../persistence/src/layers/PrincipalTransactionOverrideRepositoryLive.ts"
+import { CalculationRunService } from "../../../persistence/src/services/CalculationRunService.ts"
+import { CalculationRunId } from "../../../persistence/src/services/CalculationRunRepository.ts"
+import { FactualLedgerRepository } from "../../../persistence/src/services/FactualLedgerRepository.ts"
+import { PrincipalTransactionOverrideRepository } from "../../../persistence/src/services/PrincipalTransactionOverrideRepository.ts"
 import * as DateTime from "effect/DateTime"
 import { SourceNormalizationRepository, SourceReplayRepository } from "@my/sync-engine/services"
 import { SourceNormalizationRepositoryLive } from "../../../persistence/src/layers/SourceNormalizationRepositoryLive.ts"
 import { SourceReplayRepositoryLive } from "../../../persistence/src/layers/SourceReplayRepositoryLive.ts"
-import {
-  TEST_SOURCE_ID,
-  TEST_PRINCIPAL_ID,
-  seedSyncEngineRepositoryFixture,
-} from "../../../persistence/tests/support/integration-test-kit.ts"
+import { seedSyncEngineRepositoryFixture } from "../../../persistence/tests/support/integration-test-kit.ts"
 import { HeliusSolanaSourceSyncProviderFromClientAndAssetResolutionLive } from "../../src/providers/helius-solana/layers/HeliusSolanaSourceSyncProviderLive.ts"
 import { HeliusSolanaSourceSyncProvider } from "../../src/providers/helius-solana/services/HeliusSolanaSourceSyncProvider.ts"
 import { SOLANA_USDC_MINT, SOLANA_USDT_MINT, SOLANA_WRAPPED_NATIVE_MINT } from "@my/core/assets"
@@ -33,8 +43,8 @@ const context = makeIntegrationTestDatabaseContext({
 
 await Effect.runPromise(context.recreateTestDatabase())
 
-const SOL_ASSET_ID = "00000000-0000-0000-0000-000000001601"
-const USDC_ASSET_ID = "00000000-0000-0000-0000-000000001602"
+const SOL_ASSET_ID = "00000000-0000-4000-8000-000000001601"
+const USDC_ASSET_ID = "00000000-0000-4000-8000-000000001602"
 const USDT_ASSET_ID = "00000000-0000-0000-0000-000000001603"
 const UNKNOWN_ASSET_ID = "00000000-0000-0000-0000-000000001604"
 const NFT_ASSET_ID = "00000000-0000-0000-0000-000000001606"
@@ -1467,6 +1477,9 @@ describe("HeliusSolanaAssetResolutionServiceLive", () => {
 })
 
 describe("Helius movement target persistence and replay", () => {
+  const movementPrincipalId = "00000000-0000-4000-8000-000000007521"
+  const movementUserId = "00000000-0000-4000-8000-000000007522"
+  const movementSourceId = "00000000-0000-4000-8000-000000007523"
   const wallet = "11111111111111111111111111111111ab"
   const addressId = "00000000-0000-4000-8000-000000007501"
   const time = DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-01T00:00:00.000Z"))
@@ -1500,14 +1513,24 @@ describe("Helius movement target persistence and replay", () => {
   const layer = Layer.mergeAll(
     provider,
     SourceNormalizationRepositoryLive,
-    SourceReplayRepositoryLive
+    SourceReplayRepositoryLive,
+    PrincipalTransactionOverrideRepositoryLive,
+    FactualLedgerRepositoryLive,
+    CalculationRunServiceLive.pipe(
+      Layer.provide(Layer.merge(CalculationRunRepositoryLive, FactualLedgerRepositoryLive))
+    )
   )
 
   const run = <A, E>(
     effect: Effect.Effect<
       A,
       E,
-      HeliusSolanaSourceSyncProvider | SourceNormalizationRepository | SourceReplayRepository
+      | HeliusSolanaSourceSyncProvider
+      | SourceNormalizationRepository
+      | SourceReplayRepository
+      | PrincipalTransactionOverrideRepository
+      | FactualLedgerRepository
+      | CalculationRunService
     >
   ) => Effect.runPromise(context.runWithLayer({ effect, layer }))
 
@@ -1516,11 +1539,13 @@ describe("Helius movement target persistence and replay", () => {
     order = [1, 2],
     parsed = false,
     amounts,
+    cachedRecord,
   }: {
     readonly recordKey: string
     readonly order?: ReadonlyArray<number>
     readonly parsed?: boolean
     readonly amounts?: ReadonlyArray<string>
+    readonly cachedRecord?: { readonly id: string; readonly payload: unknown }
   }) =>
     run(
       Effect.gen(function* () {
@@ -1539,16 +1564,16 @@ describe("Helius movement target persistence and replay", () => {
         }))
         const prepared = yield* provider.prepareNormalization({
           source: {
-            id: TEST_SOURCE_ID,
-            principalId: TEST_PRINCIPAL_ID,
+            id: movementSourceId,
+            principalId: movementPrincipalId,
             providerKey: "helius-solana",
             cexAccountId: null,
             addressId,
             walletAddress: wallet,
           },
           sourceRecord: {
-            id: "00000000-0000-4000-8000-000000007502",
-            sourceId: TEST_SOURCE_ID,
+            id: cachedRecord?.id ?? "00000000-0000-4000-8000-000000007502",
+            sourceId: movementSourceId,
             provider: "helius-solana",
             recordType: "solana_transaction_full",
             externalAccountId: wallet,
@@ -1560,7 +1585,7 @@ describe("Helius movement target persistence and replay", () => {
             normalizationError: null,
             createdAt: time,
             updatedAt: time,
-            payload: {
+            payload: cachedRecord?.payload ?? {
               fullTransaction: {
                 slot: 1,
                 transaction: {
@@ -1595,16 +1620,16 @@ describe("Helius movement target persistence and replay", () => {
           lookups: yield* provider.loadNormalizationLookups,
         })
         return yield* repository.persistNormalizedArtifacts({
-          transaction: { ...prepared.transaction, sourceRawRecordId: null },
+          transaction: { ...prepared.transaction, sourceRawRecordId: cachedRecord?.id ?? null },
           venueContext: prepared.venueContext,
           onchainContext: prepared.onchainContext,
           canonicalTransfers: prepared.canonicalTransfers.map((transfer) => ({
             ...transfer,
-            sourceRawRecordId: null,
+            sourceRawRecordId: cachedRecord?.id ?? null,
           })),
           providerTransfers: prepared.providerTransfers.map((transfer) => ({
             ...transfer,
-            sourceRawRecordId: null,
+            sourceRawRecordId: cachedRecord?.id ?? null,
           })),
           providerAssetRowIds: prepared.providerAssetRowIds,
           transactionReview: prepared.transactionReview,
@@ -1641,7 +1666,7 @@ describe("Helius movement target persistence and replay", () => {
               schema.movementCorrectionTargets.id
             )
           )
-          .where(eq(schema.transactionLegs.sourceId, TEST_SOURCE_ID))
+          .where(eq(schema.transactionLegs.sourceId, movementSourceId))
           .orderBy(schema.movementCorrectionTargets.componentKey)
       })
     )
@@ -1654,12 +1679,16 @@ describe("Helius movement target persistence and replay", () => {
           context.runPg(
             Effect.gen(function* () {
               yield* resetAssetResolutionFixture
-              yield* seedSyncEngineRepositoryFixture()
+              yield* seedSyncEngineRepositoryFixture({
+                principalId: movementPrincipalId,
+                userId: movementUserId,
+                sourceId: movementSourceId,
+              })
               const db = yield* drizzle
               yield* db.insert(schema.addresses).values({
                 id: addressId,
                 address: wallet,
-                principalId: TEST_PRINCIPAL_ID,
+                principalId: movementPrincipalId,
                 type: "solana",
                 name: "Synthetic target wallet",
               })
@@ -1671,7 +1700,7 @@ describe("Helius movement target persistence and replay", () => {
                   cexAccountId: null,
                   providerKey: "helius-solana",
                 })
-                .where(eq(schema.sources.id, TEST_SOURCE_ID))
+                .where(eq(schema.sources.id, movementSourceId))
             })
           )
         )
@@ -1705,7 +1734,7 @@ describe("Helius movement target persistence and replay", () => {
         yield* Effect.promise(() =>
           run(
             Effect.flatMap(SourceReplayRepository, (repository) =>
-              repository.resetSourceDerivedState({ sourceId: TEST_SOURCE_ID })
+              repository.resetSourceDerivedState({ sourceId: movementSourceId })
             )
           )
         )
@@ -1718,7 +1747,7 @@ describe("Helius movement target persistence and replay", () => {
         yield* Effect.promise(() =>
           run(
             Effect.flatMap(SourceReplayRepository, (repository) =>
-              repository.resetSourceDerivedState({ sourceId: TEST_SOURCE_ID })
+              repository.resetSourceDerivedState({ sourceId: movementSourceId })
             )
           )
         )
@@ -1731,12 +1760,299 @@ describe("Helius movement target persistence and replay", () => {
               return yield* db
                 .select({ id: schema.movementCorrectionTargets.id })
                 .from(schema.movementCorrectionTargets)
-                .where(eq(schema.movementCorrectionTargets.sourceId, TEST_SOURCE_ID))
+                .where(eq(schema.movementCorrectionTargets.sourceId, movementSourceId))
             })
           )
         )
         expect(targets).toHaveLength(3)
       })
+  )
+
+  it.effect("keeps accepted corrections on one equal-token component through cached replay", () =>
+    Effect.gen(function* () {
+      const recordKey = "synthetic-corrected-components"
+      const principalId = PrincipalId.make(movementPrincipalId)
+      const currency = CurrencyCode.make("EUR")
+      const firstRunId = CalculationRunId.make("00000000-0000-4000-8000-000000007511")
+      const replayRunId = CalculationRunId.make("00000000-0000-4000-8000-000000007512")
+      const cacheRecord = (order: ReadonlyArray<number>) =>
+        context.runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const payload = {
+              fullTransaction: {
+                slot: 1,
+                transaction: {
+                  signatures: [recordKey],
+                  message: { accountKeys: [wallet, "token-account-one", "token-account-two"] },
+                },
+                blockTime: 1735689600,
+                meta: {
+                  err: null,
+                  fee: 5000,
+                  preBalances: [1000000000, 0, 0],
+                  postBalances: [999995000, 0, 0],
+                  preTokenBalances: [],
+                  postTokenBalances: order.map((accountIndex) => ({
+                    accountIndex,
+                    mint: SOLANA_USDC_MINT,
+                    owner: wallet,
+                    uiTokenAmount: {
+                      amount: "1000000",
+                      decimals: 6,
+                      uiAmount: 1,
+                      uiAmountString: "1",
+                    },
+                  })),
+                },
+              },
+              walletTransferEvidence: [],
+            }
+            yield* db
+              .insert(schema.sourceRecordsRaw)
+              .values({
+                sourceId: movementSourceId,
+                provider: "helius-solana",
+                recordType: "solana_transaction_full",
+                externalAccountId: wallet,
+                externalRecordId: recordKey,
+                occurredAt: time,
+                payload,
+              })
+              .onConflictDoUpdate({
+                target: [
+                  schema.sourceRecordsRaw.sourceId,
+                  schema.sourceRecordsRaw.recordType,
+                  schema.sourceRecordsRaw.externalRecordId,
+                ],
+                set: { payload },
+              })
+            const [cached] = yield* db
+              .select({ id: schema.sourceRecordsRaw.id, payload: schema.sourceRecordsRaw.payload })
+              .from(schema.sourceRecordsRaw)
+              .where(eq(schema.sourceRecordsRaw.externalRecordId, recordKey))
+            if (cached === undefined) return yield* Effect.die("Missing cached Helius record")
+            return cached
+          })
+        )
+      const cached = yield* Effect.promise(() => cacheRecord([1, 2]))
+      yield* Effect.promise(() => normalize({ recordKey, cachedRecord: cached }))
+      const first = yield* Effect.promise(links)
+      const corrected = first.find(
+        ({ component }) => component === `token_balance:1:${SOLANA_USDC_MINT}`
+      )
+      const sibling = first.find(
+        ({ component }) => component === `token_balance:2:${SOLANA_USDC_MINT}`
+      )
+      const fee = first.find(({ component }) => component === "meta.fee")
+      if (corrected === undefined || sibling === undefined || fee === undefined)
+        return yield* Effect.die("Missing equal-token correction fixtures")
+      expect(first).toHaveLength(3)
+      const loadLedger = () =>
+        run(
+          Effect.flatMap(FactualLedgerRepository, (repository) =>
+            repository.load({ principalId, reportingCurrency: currency })
+          )
+        )
+      const originalLedger = yield* Effect.promise(loadLedger)
+      expect(originalLedger.events).toHaveLength(3)
+      expect(originalLedger.valuationFacts).toEqual([])
+      expect(originalLedger.events.find((event) => event.id === fee.legId)).toMatchObject({
+        _tag: "disposition",
+        cause: "fee",
+      })
+      const accept = (input: MovementCorrectionInput) =>
+        run(
+          Effect.gen(function* () {
+            const repository = yield* PrincipalTransactionOverrideRepository
+            const found = yield* repository.findContext({
+              principalId,
+              targetId: corrected.targetId,
+              reportingCurrency: currency,
+            })
+            if (Option.isNone(found) || found.value.current === null)
+              return yield* Effect.die("Missing inspectable Helius movement")
+            const accepted = yield* repository.create({
+              principalId,
+              actorUserId: AuthUserId.make(movementUserId),
+              targetId: corrected.targetId,
+              reportingCurrency: currency,
+              expectedSystemRevision: found.value.current.facts.systemRevision,
+              expectedLeafId: null,
+              reason: "Synthetic account-index component evidence",
+              input,
+            })
+            if (Option.isNone(accepted))
+              return yield* Effect.die("Helius correction was not accepted")
+            return accepted.value
+          })
+        )
+      const price = yield* Effect.promise(() =>
+        accept({ _tag: "price", input: { _tag: "total_value", amount: "7", currency } })
+      )
+      const classification = yield* Effect.promise(() =>
+        accept({ _tag: "classification", input: { _tag: "inbound", cause: "purchase" } })
+      )
+      const acceptedContext = classification.context
+      expect(acceptedContext.history).toHaveLength(2)
+      expect(
+        acceptedContext.history.every((record) => record.targetId === corrected.targetId)
+      ).toBe(true)
+      expect(acceptedContext.history.map((record) => record.inspectedValuationEvidence)).toEqual([
+        { reportingCurrency: currency, facts: [] },
+        { reportingCurrency: currency, facts: [] },
+      ])
+      const recompute = (id: CalculationRunId) =>
+        run(
+          Effect.flatMap(CalculationRunService, (service) =>
+            service.recompute({
+              id,
+              principalId,
+              jurisdiction: JurisdictionCode.make("DE"),
+              taxYear: TaxYear.make(2025),
+              reportingCurrency: currency,
+              accountingChoices: [],
+            })
+          )
+        )
+      const readRun = (id: CalculationRunId) =>
+        context.runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const lots = yield* db
+              .select({
+                eventId: schema.calculationRunDerivedLots.acquisitionEventId,
+                costBasisPerUnit: schema.calculationRunDerivedLots.costBasisPerUnit,
+              })
+              .from(schema.calculationRunDerivedLots)
+              .where(eq(schema.calculationRunDerivedLots.runId, id))
+              .orderBy(schema.calculationRunDerivedLots.sequence)
+            const inputs = yield* db
+              .select({ captured: schema.calculationRunCorrectionInputs.captured })
+              .from(schema.calculationRunCorrectionInputs)
+              .where(eq(schema.calculationRunCorrectionInputs.runId, id))
+              .orderBy(schema.calculationRunCorrectionInputs.overrideId)
+            return { lots, inputs }
+          })
+        )
+      const effectiveBefore = yield* Effect.promise(loadLedger)
+      const beforePrice = effectiveBefore.valuationFacts.filter(
+        (fact) => fact._tag === "user_valuation"
+      )
+      expect(beforePrice).toHaveLength(1)
+      expect(beforePrice[0]?.eventId).toBe(corrected.legId)
+      expect(beforePrice[0]?.evidenceReference).toBe(`movement-price:${price.overrideId}`)
+      expect(beforePrice[0]?.amount.toString()).toBe("7 EUR")
+      expect(effectiveBefore.events.find((event) => event.id === corrected.legId)).toMatchObject({
+        _tag: "acquisition",
+        cause: "purchase",
+      })
+      for (const untouched of [sibling, fee]) {
+        expect(effectiveBefore.events.find((event) => event.id === untouched.legId)).toEqual(
+          originalLedger.events.find((event) => event.id === untouched.legId)
+        )
+      }
+      yield* Effect.promise(() => recompute(firstRunId))
+      const firstRun = yield* Effect.promise(() => readRun(firstRunId))
+      expect(firstRun.inputs.map(({ captured }) => captured.history.id).sort()).toEqual(
+        [price.overrideId, classification.overrideId].sort()
+      )
+      const correctedLot = firstRun.lots.find((lot) => lot.eventId === corrected.legId)
+      expect(
+        correctedLot?.costBasisPerUnit === null || correctedLot?.costBasisPerUnit === undefined
+          ? false
+          : BigDecimal.equals(
+              BigDecimal.fromStringUnsafe(correctedLot.costBasisPerUnit),
+              BigDecimal.fromStringUnsafe("7")
+            )
+      ).toBe(true)
+
+      const reorderedCache = yield* Effect.promise(() => cacheRecord([2, 1]))
+      expect(reorderedCache.id).toBe(cached.id)
+      yield* Effect.promise(() =>
+        run(
+          Effect.flatMap(SourceReplayRepository, (repository) =>
+            repository.resetSourceDerivedState({ sourceId: movementSourceId })
+          )
+        )
+      )
+      yield* Effect.promise(() => normalize({ recordKey, cachedRecord: reorderedCache }))
+      const replayed = yield* Effect.promise(links)
+      expect(replayed.map(({ targetId, component }) => ({ targetId, component }))).toEqual(
+        first.map(({ targetId, component }) => ({ targetId, component }))
+      )
+      expect(replayed.every((row) => first.every((old) => old.legId !== row.legId))).toBe(true)
+      const replayedCorrection = replayed.find(({ targetId }) => targetId === corrected.targetId)
+      const replayedSibling = replayed.find(({ targetId }) => targetId === sibling.targetId)
+      const replayedFee = replayed.find(({ targetId }) => targetId === fee.targetId)
+      if (
+        replayedCorrection === undefined ||
+        replayedSibling === undefined ||
+        replayedFee === undefined
+      )
+        return yield* Effect.die("Missing replayed component links")
+      const found = yield* Effect.promise(() =>
+        run(
+          Effect.flatMap(PrincipalTransactionOverrideRepository, (repository) =>
+            repository.findContext({
+              principalId,
+              targetId: corrected.targetId,
+              reportingCurrency: currency,
+            })
+          )
+        )
+      )
+      if (Option.isNone(found)) return yield* Effect.die("Missing correction after replay")
+      expect(found.value.history).toEqual(acceptedContext.history)
+      expect(found.value.current?.facts).toEqual(acceptedContext.current?.facts)
+      expect(found.value.current?.legId).toBe(replayedCorrection.legId)
+      const effectiveAfter = yield* Effect.promise(loadLedger)
+      const afterPrice = effectiveAfter.valuationFacts.filter(
+        (fact) => fact._tag === "user_valuation"
+      )
+      expect(afterPrice).toHaveLength(1)
+      expect(afterPrice[0]?.eventId).toBe(replayedCorrection.legId)
+      expect(afterPrice[0]?.evidenceReference).toBe(`movement-price:${price.overrideId}`)
+      expect(afterPrice[0]?.amount).toEqual(beforePrice[0]?.amount)
+      expect(
+        effectiveAfter.events.find((event) => event.id === replayedCorrection.legId)
+      ).toMatchObject({ _tag: "acquisition", cause: "purchase" })
+      for (const [old, current] of [
+        [sibling, replayedSibling],
+        [fee, replayedFee],
+      ] as const) {
+        const previous = effectiveBefore.events.find((event) => event.id === old.legId)
+        const next = effectiveAfter.events.find((event) => event.id === current.legId)
+        expect(next).toEqual(
+          previous === undefined ? undefined : { ...previous, id: current.legId }
+        )
+      }
+      yield* Effect.promise(() => recompute(replayRunId))
+      const replayRun = yield* Effect.promise(() => readRun(replayRunId))
+      expect(replayRun.inputs.map(({ captured }) => captured.history)).toEqual(
+        firstRun.inputs.map(({ captured }) => captured.history)
+      )
+      expect(
+        replayRun.inputs.every(
+          ({ captured }) => captured.current?.legId === replayedCorrection.legId
+        )
+      ).toBe(true)
+      const replayedLot = replayRun.lots.find((lot) => lot.eventId === replayedCorrection.legId)
+      expect(replayedLot?.costBasisPerUnit).toBe(correctedLot?.costBasisPerUnit)
+      expect(yield* Effect.promise(() => readRun(firstRunId))).toEqual(firstRun)
+      const retainedRaw = yield* Effect.promise(() =>
+        context.runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return yield* db
+              .select({ id: schema.sourceRecordsRaw.id, payload: schema.sourceRecordsRaw.payload })
+              .from(schema.sourceRecordsRaw)
+              .where(eq(schema.sourceRecordsRaw.id, cached.id))
+          })
+        )
+      )
+      expect(retainedRaw).toEqual([reorderedCache])
+    })
   )
 
   it.effect(

@@ -2020,3 +2020,99 @@ describe("effective movement price application", () => {
       })
   )
 })
+
+it.effect(
+  "carries a prior-year corrected acquisition into a later-year disposal without rewriting either old run",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* runPg(seed())
+      const laterSale = DateTime.toDateUtc(DateTime.makeUnsafe("2026-01-01T00:00:00Z"))
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db
+            .update(schema.transactions)
+            .set({ timestamp: laterSale })
+            .where(eq(schema.transactions.id, fixture.saleId))
+          yield* db
+            .update(schema.transactionLegs)
+            .set({ timestamp: laterSale })
+            .where(eq(schema.transactionLegs.id, fixture.disposition.id))
+        })
+      )
+      const runYear = (index: number, taxYear: number) =>
+        context.runWithLayer({
+          layer: runLayer,
+          effect: Effect.flatMap(CalculationRunService, (service) =>
+            service.recompute({
+              id: runId(index),
+              principalId: PRINCIPAL_ID,
+              jurisdiction: JurisdictionCode.make("DE"),
+              taxYear: TaxYear.make(taxYear),
+              reportingCurrency: EUR,
+              accountingChoices: [],
+            })
+          ),
+        })
+      yield* runYear(40, 2025)
+      expect((yield* runYear(41, 2026)).status).toBe("partial")
+      const originalAcquisitionYear = yield* readRun(40)
+      const originalDisposalYear = yield* readRun(41)
+      expect(originalAcquisitionYear.results).toEqual([])
+      expect(originalDisposalYear.results).toEqual([])
+      expect(originalDisposalYear.blockers).toEqual([
+        { code: "missing_valuation", eventId: fixture.acquisition.id },
+      ])
+      const accepted = yield* changePrice({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "unit_price", amount: "2", currency: EUR },
+      })
+      yield* runYear(42, 2025)
+      expect((yield* runYear(43, 2026)).status).toBe("complete")
+      const later = yield* readRun(43)
+      expect(moneyEquals(later.results[0]?.basis, "20")).toBe(true)
+      expect(moneyEquals(later.results[0]?.gain, "10")).toBe(true)
+      expect(later.inputs).toContainEqual(
+        expect.objectContaining({
+          captured: expect.objectContaining({
+            history: expect.objectContaining({
+              id: accepted.overrideId,
+              targetId: fixture.acquisition.targetId,
+            }),
+            application: "applied",
+            resolvedPrice: expect.objectContaining({ currency: "EUR" }),
+          }),
+        })
+      )
+      expect(
+        moneyEquals(
+          later.inputs.find((row) => row.captured.history.id === accepted.overrideId)?.captured
+            .resolvedPrice?.totalValue,
+          "20"
+        )
+      ).toBe(true)
+      expect((yield* readRun(42)).results).toEqual([])
+      expect(yield* readRun(40)).toEqual(originalAcquisitionYear)
+      expect(yield* readRun(41)).toEqual(originalDisposalYear)
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const rows = yield* db
+            .select({
+              amount: schema.transactionLegs.amount,
+              fiat: schema.transactionLegs.fiatAmount,
+            })
+            .from(schema.transactionLegs)
+            .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+          expect(moneyEquals(rows[0]?.amount, "10")).toBe(true)
+          expect(rows[0]?.fiat).toBeNull()
+          const oldRuns = yield* db
+            .select({ year: schema.calculationRuns.taxYear })
+            .from(schema.calculationRuns)
+            .where(eq(schema.calculationRuns.principalId, PRINCIPAL_ID))
+          expect(oldRuns.map((row) => row.year).sort()).toEqual([2025, 2025, 2026, 2026])
+        })
+      )
+    })
+)

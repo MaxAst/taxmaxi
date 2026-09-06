@@ -16,7 +16,7 @@ import { CalculationRunId } from "../../persistence/src/services/CalculationRunR
 import { prepareMovementLegFixtures } from "../../persistence/tests/support/movement-leg-fixtures.ts"
 import * as BigDecimal from "effect/BigDecimal"
 import * as DateTime from "effect/DateTime"
-import { HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
+import { HttpClient, HttpClientRequest, HttpRouter, HttpServer } from "effect/unstable/http"
 import { HttpApiClient } from "effect/unstable/httpapi"
 import { NodeHttpServer } from "@effect/platform-node"
 import {
@@ -48,6 +48,13 @@ import {
   seedSyncEngineRepositoryFixture,
   TEST_BTC_ASSET_ID,
 } from "../../persistence/tests/support/integration-test-kit.ts"
+import {
+  TaxMaxi,
+  toTaxMaxiError,
+  getTaxMaxiTransactionOverrideError,
+  type TransactionOverridesEffectResource,
+  type TransactionOverrideMutationResult,
+} from "../../sdk/src/index.ts"
 import { TaxMaxiApi } from "../src/definitions/TaxMaxiApi.ts"
 import { AnonSessionServiceLive } from "../src/layers/AnonSessionServiceLive.ts"
 import { SimpleTokenValidatorLive } from "../src/layers/AuthMiddlewareLive.ts"
@@ -387,6 +394,24 @@ const readRun = (index: number) =>
         })
         .from(schema.calculationRunRealizedResults)
         .where(eq(schema.calculationRunRealizedResults.runId, runId(index))),
+      income: yield* db
+        .select({
+          value: schema.calculationRunIncomeResults.value,
+          treatmentCodes: schema.calculationRunIncomeResults.treatmentCodes,
+        })
+        .from(schema.calculationRunIncomeResults)
+        .where(eq(schema.calculationRunIncomeResults.runId, runId(index))),
+      blockers: yield* db
+        .select({ code: schema.calculationRunBlockers.code })
+        .from(schema.calculationRunBlockers)
+        .where(eq(schema.calculationRunBlockers.runId, runId(index))),
+      explanations: yield* db
+        .select({
+          eventId: schema.calculationRunExplanationEntries.eventId,
+          kind: schema.calculationRunExplanationEntries.valuationKind,
+        })
+        .from(schema.calculationRunExplanationEntries)
+        .where(eq(schema.calculationRunExplanationEntries.runId, runId(index))),
       inputs: yield* db
         .select({ captured: schema.calculationRunCorrectionInputs.captured })
         .from(schema.calculationRunCorrectionInputs)
@@ -394,12 +419,12 @@ const readRun = (index: number) =>
     }
   })
 
-const recompute = (index: number) =>
+const recompute = (index: number, principalId = PRINCIPAL_ID) =>
   Effect.gen(function* () {
     const service = yield* CalculationRunService
     return yield* service.recompute({
       id: runId(index),
-      principalId: PrincipalId.make(PRINCIPAL_ID),
+      principalId: PrincipalId.make(principalId),
       jurisdiction: JurisdictionCode.make("DE"),
       taxYear: YEAR,
       reportingCurrency: EUR,
@@ -412,6 +437,66 @@ const recompute = (index: number) =>
       )
     )
   )
+
+type SdkStyle = "Effect" | "Promise"
+type SdkInput<K extends keyof TransactionOverridesEffectResource> = Parameters<
+  TransactionOverridesEffectResource[K]
+>[0]
+
+const sdkResource = (style: SdkStyle, userId = USER_ID) =>
+  Effect.gen(function* () {
+    const server = yield* HttpServer.HttpServer
+    if (server.address._tag !== "TcpAddress") return yield* Effect.die("Expected local HTTP server")
+    const sdk = new TaxMaxi({
+      apiKey: `user_${userId}_admin`,
+      baseUrl: `http://127.0.0.1:${server.address.port}`,
+    })
+    // Both adapters call the public SDK over the actual test server socket.
+    return {
+      getTargets: (input: SdkInput<"getTargets">) =>
+        style === "Effect"
+          ? sdk.effect.transactionOverrides.getTargets(input).pipe(Effect.mapError(toTaxMaxiError))
+          : Effect.tryPromise({
+              try: () => sdk.transactionOverrides.getTargets(input),
+              catch: toTaxMaxiError,
+            }),
+      getCurrent: (input: SdkInput<"getCurrent">) =>
+        style === "Effect"
+          ? sdk.effect.transactionOverrides.getCurrent(input).pipe(Effect.mapError(toTaxMaxiError))
+          : Effect.tryPromise({
+              try: () => sdk.transactionOverrides.getCurrent(input),
+              catch: toTaxMaxiError,
+            }),
+      getHistory: (input: SdkInput<"getHistory">) =>
+        style === "Effect"
+          ? sdk.effect.transactionOverrides.getHistory(input).pipe(Effect.mapError(toTaxMaxiError))
+          : Effect.tryPromise({
+              try: () => sdk.transactionOverrides.getHistory(input),
+              catch: toTaxMaxiError,
+            }),
+      create: (input: SdkInput<"create">) =>
+        style === "Effect"
+          ? sdk.effect.transactionOverrides.create(input).pipe(Effect.mapError(toTaxMaxiError))
+          : Effect.tryPromise({
+              try: () => sdk.transactionOverrides.create(input),
+              catch: toTaxMaxiError,
+            }),
+      replace: (input: SdkInput<"replace">) =>
+        style === "Effect"
+          ? sdk.effect.transactionOverrides.replace(input).pipe(Effect.mapError(toTaxMaxiError))
+          : Effect.tryPromise({
+              try: () => sdk.transactionOverrides.replace(input),
+              catch: toTaxMaxiError,
+            }),
+      withdraw: (input: SdkInput<"withdraw">) =>
+        style === "Effect"
+          ? sdk.effect.transactionOverrides.withdraw(input).pipe(Effect.mapError(toTaxMaxiError))
+          : Effect.tryPromise({
+              try: () => sdk.transactionOverrides.withdraw(input),
+              catch: toTaxMaxiError,
+            }),
+    }
+  })
 
 await Effect.runPromise(context.recreateTestDatabase())
 beforeEach(() => {
@@ -988,3 +1073,402 @@ describe("TransactionOverridesApiLive", () => {
       }).pipe(Effect.provide(HttpLive), Effect.scoped)
   )
 })
+
+// These tests join both public SDKs to real HTTP, SQL, and immutable accounting runs.
+describe("movement corrections through SDK and HTTP", () => {
+  for (const style of ["Effect", "Promise"] as const) {
+    for (const mode of ["unit_price", "total_value"] as const) {
+      it.effect(
+        `${style} ${mode} preserves D06 amounts, history, other principals, and old runs`,
+        () =>
+          Effect.gen(function* () {
+            const seeded = yield* fixture
+            const db = yield* drizzle
+            yield* db
+              .delete(schema.transactionLegs)
+              .where(eq(schema.transactionLegs.id, seeded.fee.id))
+            const [otherBuy, otherSell] = yield* db
+              .insert(schema.transactions)
+              .values([
+                {
+                  principalId: OTHER_PRINCIPAL_ID,
+                  sourceId: OTHER_SOURCE_ID,
+                  externalId: "other-buy",
+                  transactionType: "buy_fiat",
+                  timestamp,
+                },
+                {
+                  principalId: OTHER_PRINCIPAL_ID,
+                  sourceId: OTHER_SOURCE_ID,
+                  externalId: "other-sell",
+                  transactionType: "sell_fiat",
+                  timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-01T00:00:00Z")),
+                  providerFiatAmount: "30",
+                  providerFiatCurrency: "EUR",
+                },
+              ])
+              .returning({ id: schema.transactions.id })
+            if (otherBuy === undefined || otherSell === undefined)
+              return yield* Effect.die("Missing other principal transactions")
+            yield* db.insert(schema.transactionLegs).values(
+              yield* prepareMovementLegFixtures([
+                {
+                  movementIdentity: { sourceRecordKey: "other-buy", componentKey: "amount" },
+                  principalId: OTHER_PRINCIPAL_ID,
+                  sourceId: OTHER_SOURCE_ID,
+                  externalId: "other-buy-amount",
+                  transactionId: otherBuy.id,
+                  timestamp,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "10",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none",
+                },
+                {
+                  movementIdentity: { sourceRecordKey: "other-sell", componentKey: "amount" },
+                  principalId: OTHER_PRINCIPAL_ID,
+                  sourceId: OTHER_SOURCE_ID,
+                  externalId: "other-sell-amount",
+                  transactionId: otherSell.id,
+                  timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-01T00:00:00Z")),
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "10",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none",
+                },
+              ])
+            )
+            const api = yield* sdkResource(style)
+            const query = { targetId: seeded.acquisition.targetId, taxYear: 2025 }
+            const discovered = yield* api.getTargets({
+              transactionId: seeded.buy.id,
+              taxYear: 2025,
+            })
+            expect(discovered.targets.map((target) => target.context.targetId)).toEqual([
+              query.targetId,
+            ])
+            const initial = yield* api.getCurrent(query)
+            if (initial.context.current === null) return yield* Effect.die("Missing inspection")
+            const revision = initial.context.current.facts.systemRevision
+            expect((yield* recompute(20)).status).toBe("partial")
+            const unknownRun = yield* readRun(20)
+            expect((yield* recompute(21, OTHER_PRINCIPAL_ID)).status).toBe("partial")
+            const otherRun = yield* readRun(21)
+            const accepted = yield* api.create({
+              targetId: query.targetId,
+              override: {
+                expectedLeafId: null,
+                expectedSystemRevision: revision,
+                reason: "Synthetic SDK purchase evidence",
+                input: {
+                  _tag: "price",
+                  input: {
+                    _tag: mode,
+                    amount: mode === "unit_price" ? "2" : "20",
+                    currency: "EUR",
+                  },
+                },
+              },
+            })
+            expect(accepted.context.price.active?.input).toEqual({
+              _tag: "price",
+              input: { _tag: mode, amount: mode === "unit_price" ? "2" : "20", currency: "EUR" },
+            })
+            expect((yield* recompute(22)).status).toBe("complete")
+            const pricedRun = yield* readRun(22)
+            expect(
+              pricedRun.results.map((row) => ({
+                basis: decimal(row.basis),
+                gain: decimal(row.gain),
+              }))
+            ).toEqual([{ basis: "20", gain: "10" }])
+            expect(pricedRun.explanations).toContainEqual(
+              expect.objectContaining({ eventId: seeded.acquisition.id, kind: "user_valuation" })
+            )
+            expect(pricedRun.inputs[0]?.captured).toMatchObject({
+              history: { id: accepted.overrideId, kind: "price" },
+              application: "applied",
+              resolvedPrice: { currency: "EUR" },
+            })
+            expect(decimal(pricedRun.inputs[0]?.captured.resolvedPrice?.totalValue)).toBe("20")
+            const replaced = yield* api.replace({
+              targetId: query.targetId,
+              replacement: {
+                expectedLeafId: accepted.overrideId,
+                expectedSystemRevision: revision,
+                reason: "Synthetic SDK revised evidence",
+                input: {
+                  _tag: "price",
+                  input: {
+                    _tag: mode,
+                    amount: mode === "unit_price" ? "3" : "30",
+                    currency: "EUR",
+                  },
+                },
+              },
+            })
+            expect((yield* recompute(23)).status).toBe("complete")
+            expect(
+              (yield* readRun(23)).results.map((row) => ({
+                basis: decimal(row.basis),
+                gain: decimal(row.gain),
+              }))
+            ).toEqual([{ basis: "30", gain: "0" }])
+            const withdrawn = yield* api.withdraw({
+              targetId: query.targetId,
+              withdrawal: {
+                kind: "price",
+                expectedLeafId: replaced.overrideId,
+                expectedSystemRevision: revision,
+                reason: "Synthetic SDK withdrawal",
+              },
+            })
+            expect((yield* recompute(24)).status).toBe("partial")
+            expect((yield* readRun(24)).results).toEqual(unknownRun.results)
+            expect((yield* readRun(24)).blockers).toEqual(unknownRun.blockers)
+            const history = yield* api.getHistory(query)
+            expect(history.context.history.map((record) => record.id).sort()).toEqual(
+              [accepted.overrideId, replaced.overrideId, withdrawn.overrideId].sort()
+            )
+            expect(history.context.price).toMatchObject({
+              active: null,
+              leaf: { id: withdrawn.overrideId },
+            })
+            expect(history.inputs.system).toEqual(initial.inputs.system)
+            expect(yield* readRun(20)).toEqual(unknownRun)
+            expect(yield* readRun(22)).toEqual(pricedRun)
+            expect(yield* readRun(21)).toEqual(otherRun)
+            expect((yield* recompute(25, OTHER_PRINCIPAL_ID)).status).toBe("partial")
+            expect((yield* readRun(25)).results).toEqual(otherRun.results)
+            expect(yield* counts).toEqual({ history: 3, applications: 3, jobs: 1 })
+            expect(
+              new Set([
+                accepted.processingJobId,
+                replaced.processingJobId,
+                withdrawn.processingJobId,
+              ]).size
+            ).toBe(1)
+            const otherApi = yield* sdkResource(style, OTHER_USER_ID)
+            const denied = yield* otherApi.getCurrent(query).pipe(Effect.flip)
+            expect(getTaxMaxiTransactionOverrideError(denied)?._tag).toBe(
+              "TransactionOverrideNotFoundError"
+            )
+            const unchanged = yield* db
+              .select({
+                amount: schema.transactionLegs.amount,
+                fiat: schema.transactionLegs.fiatAmount,
+              })
+              .from(schema.transactionLegs)
+              .where(eq(schema.transactionLegs.id, seeded.acquisition.id))
+            expect(decimal(unchanged[0]?.amount)).toBe("10")
+            expect(unchanged[0]?.fiat).toBeNull()
+          }).pipe(Effect.provide(HttpLive), Effect.scoped)
+      )
+    }
+
+    it.effect(`${style} applies user passive staking and retains missing gift/airdrop facts`, () =>
+      Effect.gen(function* () {
+        const seeded = yield* fixture
+        const db = yield* drizzle
+        yield* db.delete(schema.transactionLegs).where(eq(schema.transactionLegs.id, seeded.fee.id))
+        yield* db
+          .update(schema.transactions)
+          .set({
+            transactionType: "staking_reward",
+            providerTransactionType: "synthetic_staking",
+            providerFiatAmount: "20",
+            providerFiatCurrency: "EUR",
+          })
+          .where(eq(schema.transactions.id, seeded.buy.id))
+        const api = yield* sdkResource(style)
+        const query = { targetId: seeded.acquisition.targetId, taxYear: 2025 }
+        const initial = yield* api.getCurrent(query)
+        if (initial.context.current === null) return yield* Effect.die("Missing staking inspection")
+        const revision = initial.context.current.facts.systemRevision
+        expect((yield* recompute(30)).status).toBe("partial")
+        const before = yield* readRun(30)
+        expect(before.blockers).toContainEqual({
+          code: "de.staking_activity_classification_required",
+        })
+        const passive = yield* api.create({
+          targetId: query.targetId,
+          override: {
+            expectedLeafId: null,
+            expectedSystemRevision: revision,
+            reason: "User confirms passive staking",
+            input: {
+              _tag: "classification",
+              input: { _tag: "inbound", cause: "passive_staking_reward" },
+            },
+          },
+        })
+        expect((yield* recompute(31)).status).toBe("complete")
+        const applied = yield* readRun(31)
+        expect(
+          applied.income.map((row) => ({ value: decimal(row.value), codes: row.treatmentCodes }))
+        ).toEqual([{ value: "20", codes: ["de.taxable_income_section22_3_staking"] }])
+        expect(decimal(applied.results[0]?.basis)).toBe("20")
+        expect(applied.inputs[0]?.captured).toMatchObject({
+          history: { id: passive.overrideId },
+          system: { event: { cause: "staking_reward" } },
+          effective: {
+            event: { cause: "passive_staking_reward" },
+            classificationEvidence: { _tag: "user_assertion", overrideId: passive.overrideId },
+          },
+        })
+        const price = yield* api.create({
+          targetId: query.targetId,
+          override: {
+            expectedLeafId: null,
+            expectedSystemRevision: revision,
+            reason: "Exact independent valuation",
+            input: { _tag: "price", input: { _tag: "total_value", amount: "20", currency: "EUR" } },
+          },
+        })
+        let leafId = passive.overrideId
+        for (const [offset, cause] of (["gift", "airdrop"] as const).entries()) {
+          const changed = yield* api.replace({
+            targetId: query.targetId,
+            replacement: {
+              expectedLeafId: leafId,
+              expectedSystemRevision: revision,
+              reason: "User asserts cause without donor or activity facts",
+              input: { _tag: "classification", input: { _tag: "inbound", cause } },
+            },
+          })
+          leafId = changed.overrideId
+          expect((yield* recompute(32 + offset)).status).toBe("partial")
+          const result = yield* readRun(32 + offset)
+          expect(result.blockers).toContainEqual({
+            code:
+              cause === "gift"
+                ? "de.gift_acquisition_basis_required"
+                : "de.airdrop_classification_required",
+          })
+          expect(result.inputs.map((row) => row.captured.history.id)).toContain(price.overrideId)
+          expect(
+            result.inputs.find((row) => row.captured.history.id === changed.overrideId)?.captured
+          ).toMatchObject({ application: "applied", effective: { event: { cause } } })
+        }
+        expect(yield* readRun(30)).toEqual(before)
+        expect(yield* readRun(31)).toEqual(applied)
+        expect((yield* api.getCurrent(query)).inputs.system).toEqual(initial.inputs.system)
+      }).pipe(Effect.provide(HttpLive), Effect.scoped)
+    )
+  }
+
+  it.effect("accepts exactly one concurrent SDK replacement without extra history or work", () =>
+    Effect.gen(function* () {
+      const seeded = yield* fixture
+      const effectApi = yield* sdkResource("Effect")
+      const promiseApi = yield* sdkResource("Promise")
+      const query = { targetId: seeded.acquisition.targetId, taxYear: 2025 }
+      const current = yield* effectApi.getCurrent(query)
+      if (current.context.current === null) return yield* Effect.die("Missing race inspection")
+      const revision = current.context.current.facts.systemRevision
+      const original = yield* effectApi.create({
+        targetId: query.targetId,
+        override: {
+          expectedLeafId: null,
+          expectedSystemRevision: revision,
+          reason: "Before race",
+          input: { _tag: "price", input: { _tag: "total_value", amount: "20", currency: "EUR" } },
+        },
+      })
+      const outcomes = yield* Effect.all(
+        [effectApi, promiseApi].map((api, index) =>
+          api
+            .replace({
+              targetId: query.targetId,
+              replacement: {
+                expectedLeafId: original.overrideId,
+                expectedSystemRevision: revision,
+                reason: `Concurrent evidence ${index}`,
+                input: {
+                  _tag: "price",
+                  input: { _tag: "total_value", amount: String(30 + index), currency: "EUR" },
+                },
+              },
+            })
+            .pipe(Effect.result)
+        ),
+        { concurrency: "unbounded" }
+      )
+      expect(outcomes.filter((result) => result._tag === "Success")).toHaveLength(1)
+      const rejected = outcomes.find((result) => result._tag === "Failure")
+      if (rejected?._tag !== "Failure") return yield* Effect.die("Missing conflict")
+      expect(getTaxMaxiTransactionOverrideError(rejected.failure)?._tag).toBe(
+        "TransactionOverrideConflictError"
+      )
+      expect(yield* counts).toEqual({ history: 2, applications: 2, jobs: 1 })
+      const history = yield* effectApi.getHistory(query)
+      expect(history.context.history).toHaveLength(2)
+      expect(history.context.price.active?.supersedesOverrideId).toBe(original.overrideId)
+    }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
+})
+
+it.effect(
+  "keeps authoritative SDK totals exact for thirds, zero, large and tiny values in stored runs",
+  () =>
+    Effect.gen(function* () {
+      const seeded = yield* fixture
+      const db = yield* drizzle
+      yield* db.delete(schema.transactionLegs).where(eq(schema.transactionLegs.id, seeded.fee.id))
+      yield* db
+        .update(schema.transactionLegs)
+        .set({ amount: "3" })
+        .where(eq(schema.transactionLegs.principalId, PRINCIPAL_ID))
+      const api = yield* sdkResource("Effect")
+      const query = { targetId: seeded.acquisition.targetId, taxYear: 2025 }
+      const initial = yield* api.getCurrent(query)
+      if (initial.context.current === null)
+        return yield* Effect.die("Missing three-token inspection")
+      const revision = initial.context.current.facts.systemRevision
+      let leafId: string | null = null
+      const records: string[] = []
+      for (const [index, amount] of [
+        "1",
+        "0",
+        "9007199254740993",
+        "0.000000000000000001",
+      ].entries()) {
+        const input = {
+          expectedLeafId: leafId,
+          expectedSystemRevision: revision,
+          reason: "Exact authoritative total",
+          input: { _tag: "price", input: { _tag: "total_value", amount, currency: "EUR" } },
+        } as const
+        const accepted: TransactionOverrideMutationResult = yield* leafId === null
+          ? api.create({ targetId: query.targetId, override: input })
+          : api.replace({ targetId: query.targetId, replacement: input })
+        leafId = accepted.overrideId
+        records.push(accepted.overrideId)
+        expect(accepted.context.price.active?.input).toEqual(input.input)
+        const current = yield* api.getCurrent(query)
+        expect(current.price.resolvedPrice?.totalValue).toBe(amount)
+        if (amount === "1")
+          expect(current.price.resolvedPrice?.unitPrice).toEqual({
+            amount: "0.333333333333333333",
+            rounded: true,
+          })
+        expect((yield* recompute(50 + index)).status).toBe("complete")
+        const run = yield* readRun(50 + index)
+        expect(decimal(run.results[0]?.basis)).toBe(decimal(amount))
+        expect(
+          run.inputs.find((row) => row.captured.history.id === accepted.overrideId)?.captured
+            .resolvedPrice?.totalValue
+        ).toBe(amount)
+        expect(run.explanations).toContainEqual({
+          eventId: seeded.acquisition.id,
+          kind: "user_valuation",
+        })
+      }
+      const history = yield* api.getHistory(query)
+      expect(history.context.history.map((record) => record.id).sort()).toEqual(records.sort())
+      expect((yield* readRun(50)).results.map((row) => decimal(row.basis))).toEqual(["1"])
+      expect(history.inputs.system).toEqual(initial.inputs.system)
+    }).pipe(Effect.provide(HttpLive), Effect.scoped)
+)
