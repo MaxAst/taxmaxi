@@ -77,3 +77,89 @@ ALTER TABLE "principal_transaction_overrides" ADD CONSTRAINT "principal_transact
 ALTER TABLE "principal_transaction_overrides" ADD CONSTRAINT "principal_transaction_overrides_1Y8TgoGi8STw_fkey" FOREIGN KEY ("inspected_economic_asset_id") REFERENCES "assets"("id") ON DELETE RESTRICT;--> statement-breakpoint
 ALTER TABLE "principal_transaction_overrides" ADD CONSTRAINT "principal_transaction_overrides_actor_user_id_users_id_fkey" FOREIGN KEY ("actor_user_id") REFERENCES "users"("id") ON DELETE RESTRICT;--> statement-breakpoint
 ALTER TABLE "principal_transaction_overrides" ADD CONSTRAINT "principal_transaction_overrides_supersedes_fk" FOREIGN KEY ("principal_id","source_id","target_id","kind","supersedes_override_id") REFERENCES "principal_transaction_overrides"("principal_id","source_id","target_id","kind","id");
+--> statement-breakpoint
+-- Schema-only audit DDL approved in #150, issuecomment-5559120782.
+CREATE FUNCTION reject_principal_transaction_override_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'movement correction audit records are append-only' USING ERRCODE = '55000';
+END;
+$$;
+CREATE TRIGGER principal_transaction_overrides_append_only
+BEFORE UPDATE OR DELETE ON principal_transaction_overrides
+FOR EACH ROW EXECUTE FUNCTION reject_principal_transaction_override_mutation();
+
+CREATE FUNCTION validate_principal_transaction_override_insert()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  previous_operation movement_correction_operation;
+BEGIN
+  PERFORM 1 FROM principals
+  WHERE id = NEW.principal_id AND kind = 'user' AND user_id = NEW.actor_user_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'movement correction actor must own the user-backed principal' USING ERRCODE = '23503';
+  END IF;
+  PERFORM 1 FROM movement_correction_targets
+  WHERE id = NEW.target_id AND principal_id = NEW.principal_id AND source_id = NEW.source_id
+    AND source_record_key = NEW.inspected_source_record_key AND component_key = NEW.inspected_component_key;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'movement correction target must match the inspected owned source component' USING ERRCODE = '23503';
+  END IF;
+  IF NEW.supersedes_override_id IS NULL THEN
+    IF NEW.operation <> 'create' THEN
+      RAISE EXCEPTION 'an initial movement correction must use create' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  SELECT operation INTO previous_operation FROM principal_transaction_overrides
+  WHERE id = NEW.supersedes_override_id AND principal_id = NEW.principal_id
+    AND source_id = NEW.source_id AND target_id = NEW.target_id AND kind = NEW.kind;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'superseded correction must already exist in the same stream' USING ERRCODE = '23503';
+  END IF;
+  IF NEW.operation = 'create' AND previous_operation <> 'withdraw' THEN
+    RAISE EXCEPTION 'create may supersede only a withdrawal' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.operation IN ('replace', 'withdraw') AND previous_operation = 'withdraw' THEN
+    RAISE EXCEPTION 'an inactive correction must be created before replacement or withdrawal' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER principal_transaction_overrides_validate_insert
+BEFORE INSERT ON principal_transaction_overrides
+FOR EACH ROW EXECUTE FUNCTION validate_principal_transaction_override_insert();
+
+CREATE FUNCTION protect_movement_correction_target_identity()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.id IS DISTINCT FROM OLD.id OR NEW.source_id IS DISTINCT FROM OLD.source_id
+    OR NEW.source_record_key IS DISTINCT FROM OLD.source_record_key OR NEW.component_key IS DISTINCT FROM OLD.component_key
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'movement correction target identity cannot be rewritten' USING ERRCODE = '55000';
+  END IF;
+  -- Existing source claims may change current ownership; immutable history has no cascade.
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER movement_correction_targets_identity_immutable
+BEFORE UPDATE ON movement_correction_targets
+FOR EACH ROW EXECUTE FUNCTION protect_movement_correction_target_identity();
+
+CREATE FUNCTION validate_principal_transaction_override_application()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.processing_job_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM processing_jobs job
+    JOIN principal_transaction_overrides correction ON correction.id = NEW.override_id
+    WHERE job.id = NEW.processing_job_id AND job.source_id = NEW.source_id
+      AND job.principal_id = correction.principal_id
+  ) THEN
+    RAISE EXCEPTION 'movement correction work must belong to the recorded principal and source' USING ERRCODE = '23503';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER principal_transaction_override_applications_validate
+BEFORE INSERT OR UPDATE ON principal_transaction_override_applications
+FOR EACH ROW EXECUTE FUNCTION validate_principal_transaction_override_application();
