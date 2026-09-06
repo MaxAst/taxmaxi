@@ -268,6 +268,7 @@ const makeHttpLive = <R = never>(
 ) =>
   HttpRouter.serve(
     TaxMaxiApiLive.pipe(
+      Layer.provide(sourceSyncQueueLayer),
       Layer.provide(AnonSessionServiceTestLive),
       Layer.provide(SIWXProofVerifierTestLive),
       Layer.provide(x402PaymentValidatorLayer),

@@ -20,6 +20,7 @@ import { PortfolioApi } from "./PortfolioApi.ts"
 import { SourcesApi } from "./SourcesApi.ts"
 import { SyncRunsApi } from "./SyncRunsApi.ts"
 import { TransactionsApi } from "./TransactionsApi.ts"
+import { TransactionOverridesApi } from "./TransactionOverridesApi.ts"
 import { AssetOverridesApi } from "./AssetOverridesApi.ts"
 
 // =============================================================================
@@ -96,6 +97,7 @@ export class TaxMaxiApi extends HttpApi.make("TaxMaxiApi")
   .add(SyncRunsApi)
   .add(TransactionsApi)
   .add(AssetOverridesApi)
+  .add(TransactionOverridesApi)
   .annotateMerge(
     OpenApi.annotations({
       title: "TaxMaxi API",

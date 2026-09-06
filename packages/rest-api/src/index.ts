@@ -7,3 +7,5 @@ export { AnonSessionServiceLive } from "./layers/AnonSessionServiceLive.ts"
 export { X402PaymentValidatorLive } from "./layers/X402PaymentValidatorLive.ts"
 export { SIWXProofVerifierLive } from "./layers/SIWXProofVerifierLive.ts"
 export { ServeWithUserFriendlyErrorsLive } from "./layers/ServeWithUserFriendlyErrorsLive.ts"
+
+export * from "./definitions/TransactionOverridesApi.ts"

@@ -161,6 +161,7 @@ const PersistenceLayer = Layer.mergeAll(
 
 const HttpLive = HttpRouter.serve(
   TaxMaxiApiLive.pipe(
+    Layer.provide(SourceSyncQueueTestLive),
     Layer.provide(AnonSessionServiceTestLive),
     Layer.provide(SIWXProofVerifierTestLive),
     Layer.provide(X402PaymentValidatorTestLive),
@@ -189,6 +190,7 @@ const CalculationRunStatusFailureTestLive = Layer.succeed(
 
 const HttpWithCalculationRunStatusFailureLive = HttpRouter.serve(
   TaxMaxiApiLive.pipe(
+    Layer.provide(SourceSyncQueueTestLive),
     Layer.provide(CalculationRunStatusFailureTestLive),
     Layer.provide(AnonSessionServiceTestLive),
     Layer.provide(SIWXProofVerifierTestLive),

@@ -35,7 +35,7 @@ const port = 4000
 const DEFAULT_FRONTEND_URL = "http://localhost:3000"
 
 const SyncRuntimeLive = SourceSyncServiceLive.pipe(
-  Layer.provide(ApiBullMqSourceSyncQueueLive),
+  Layer.provideMerge(ApiBullMqSourceSyncQueueLive),
   Layer.provide(RepositoriesLive)
 )
 
