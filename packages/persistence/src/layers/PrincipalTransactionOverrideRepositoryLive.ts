@@ -6,6 +6,8 @@
 import {
   ObservedConsiderationFact,
   MarketQuoteFact,
+  AccountingEvent,
+  ValuationFact,
   format as formatAccountingQuantity,
   MovementClassificationInput,
   MovementCorrectionInput,
@@ -16,11 +18,27 @@ import {
   MovementCorrectionTargetIdentity,
   MovementPriceInput,
 } from "@my/core/accounting"
-import type { CurrencyCode } from "@my/core/currency"
-import type { MovementValuationEvidence } from "../services/FactualLedgerRepository.ts"
+import { germanTaxYearEndExclusive, UnsupportedJurisdictionError } from "@my/accounting"
+import { CurrencyCode } from "@my/core/currency"
+import type { FactualLedgerSnapshot } from "../services/FactualLedgerRepository.ts"
 import { makeFactualLedgerSnapshotReader } from "./FactualLedgerSnapshotReader.ts"
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  ne,
+  exists,
+  notExists,
+  inArray,
+  isNull,
+  isNotNull,
+  sql,
+  getTableColumns,
+  or,
+} from "drizzle-orm"
+import type { MovementValuationEvidence } from "../services/FactualLedgerRepository.ts"
 import { MovementValuationEvidenceSchema } from "./PrincipalTransactionOverrideDecisionLoader.ts"
-import { and, asc, eq, getTableColumns, or } from "drizzle-orm"
 import { alias } from "drizzle-orm/pg-core"
 import { createHash } from "node:crypto"
 import * as DateTime from "effect/DateTime"
@@ -34,6 +52,9 @@ import {
   PrincipalTransactionOverrideRepository,
   MovementCorrectionConflictError,
   MovementCorrectionValidationError,
+  type MovementCalculationScope,
+  type MovementCorrectionReplay,
+  type MovementCorrectionStreamProjection,
   type SetMovementCorrectionParams,
   type WithdrawMovementCorrectionParams,
   type PrincipalTransactionOverrideContext,
@@ -47,6 +68,39 @@ import { scheduleSourceReplays } from "./SourceReplayScheduling.ts"
 import type { SyncEngineDbTransaction } from "./SyncEngineRepositorySupport.ts"
 import { drizzle } from "./PgClientLive.ts"
 import { makePrincipalAssetOverrideDecisionLoader } from "./PrincipalAssetOverrideDecisionLoader.ts"
+
+const REQUESTED_REPLAY = alias(schema.processingJobs, "movement_requested_replay")
+const FOLLOW_UP_REPLAY = alias(schema.processingJobs, "movement_follow_up_replay")
+const ENGINE_INPUTS = Schema.Struct({
+  event: Schema.NullOr(Schema.toEncoded(AccountingEvent)),
+  valuationFacts: Schema.Array(Schema.toEncoded(ValuationFact)),
+  classificationEvidence: Schema.optionalKey(
+    Schema.TaggedStruct("user_assertion", { overrideId: Schema.String })
+  ),
+})
+const COVERED_INPUT = Schema.Struct({
+  application: Schema.Literals(["inactive", "not_applied", "applied", "needs_attention"]),
+  applicationProblem: Schema.NullOr(
+    Schema.Literals([
+      "target_unavailable",
+      "target_ineligible",
+      "target_changed",
+      "quantity_changed",
+      "asset_changed",
+      "structure_changed",
+      "reporting_currency_mismatch",
+    ])
+  ),
+  resolvedPrice: Schema.NullOr(
+    Schema.Struct({
+      totalValue: Schema.String,
+      unitPrice: Schema.Struct({ amount: Schema.String, rounded: Schema.Boolean }),
+      currency: CurrencyCode,
+    })
+  ),
+  system: ENGINE_INPUTS,
+  effective: ENGINE_INPUTS,
+})
 
 const PROVIDER_TRANSACTION = alias(schema.transactions, "movement_correction_provider_transaction")
 const CANONICAL_TRANSACTION = alias(
@@ -160,10 +214,12 @@ const loadContext = ({
   targetId,
   reportingCurrency,
   retainedValuationEvidence,
+  allowUnavailableInspection = false,
 }: {
   readonly snapshotReader: Effect.Success<typeof makeFactualLedgerSnapshotReader>
   readonly reportingCurrency: CurrencyCode
   readonly retainedValuationEvidence?: MovementValuationEvidence
+  readonly allowUnavailableInspection?: boolean
   readonly assetLoader: Effect.Success<typeof makePrincipalAssetOverrideDecisionLoader>
   readonly tx: SyncEngineDbTransaction
   readonly principalId: PrincipalTransactionOverrideContext["target"]["principalId"]
@@ -405,14 +461,20 @@ const loadContext = ({
               economicAssetId,
               direction:
                 leg.kind === "acquisition" || leg.kind === "income" ? "inbound" : "outbound",
-            })
-            return {
-              legId: leg.id,
-              transactionId: leg.transactionId,
-              facts,
-              system,
-              valuationEvidence,
-            }
+            }).pipe(
+              Effect.catch((error) =>
+                allowUnavailableInspection ? Effect.succeed(null) : Effect.fail(error)
+              )
+            )
+            return facts === null
+              ? null
+              : {
+                  legId: leg.id,
+                  transactionId: leg.transactionId,
+                  facts,
+                  system,
+                  valuationEvidence,
+                }
           })
     // Every history column is returned as audit context; no replacement is applied here.
     const rows = yield* tx
@@ -458,6 +520,579 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
           accessMode: "read only",
         })
         .pipe(wrapSqlError("principalTransactionOverrideRepository.findContext"))
+
+    // Each projection request shares current facts across all targets. The year-scoped
+    // calculation read stays separate because its eligibility rules include the cutoff.
+    const makeInspectionReader = (): Effect.Success<typeof makeFactualLedgerSnapshotReader> => {
+      const snapshots = new Map<CurrencyCode, FactualLedgerSnapshot>()
+      return {
+        load: (params) =>
+          Effect.gen(function* () {
+            const existing = snapshots.get(params.reportingCurrency)
+            if (existing !== undefined) return existing
+            const snapshot = yield* snapshotReader.load({
+              principalId: params.principalId,
+              reportingCurrency: params.reportingCurrency,
+            })
+            snapshots.set(params.reportingCurrency, snapshot)
+            return snapshot
+          }),
+      }
+    }
+
+    const loadCoverage = ({
+      tx,
+      context,
+      kind,
+      scope,
+    }: {
+      readonly tx: SyncEngineDbTransaction
+      readonly context: PrincipalTransactionOverrideContext
+      readonly kind: "price" | "classification"
+      readonly scope: MovementCalculationScope
+    }) =>
+      Effect.gen(function* () {
+        const leaf = context[kind].leaf
+        if (leaf === null)
+          return {
+            replay: {
+              status: "not_scheduled",
+              processingJobId: null,
+              followUpJobId: null,
+            } as const,
+            coverage: null,
+          }
+        const [job] = yield* tx
+          .select({
+            processingJobId: REQUESTED_REPLAY.id,
+            requestedStatus: REQUESTED_REPLAY.status,
+            followUpMode: REQUESTED_REPLAY.followUpMode,
+            followUpJobId: REQUESTED_REPLAY.followUpJobId,
+            followUpStatus: FOLLOW_UP_REPLAY.status,
+          })
+          .from(schema.principalTransactionOverrideApplications)
+          .leftJoin(
+            REQUESTED_REPLAY,
+            and(
+              eq(
+                REQUESTED_REPLAY.id,
+                schema.principalTransactionOverrideApplications.processingJobId
+              ),
+              eq(REQUESTED_REPLAY.principalId, leaf.principalId),
+              eq(REQUESTED_REPLAY.sourceId, leaf.sourceId)
+            )
+          )
+          .leftJoin(
+            FOLLOW_UP_REPLAY,
+            and(
+              eq(FOLLOW_UP_REPLAY.id, REQUESTED_REPLAY.followUpJobId),
+              eq(FOLLOW_UP_REPLAY.principalId, leaf.principalId),
+              eq(FOLLOW_UP_REPLAY.sourceId, leaf.sourceId)
+            )
+          )
+          .where(
+            and(
+              eq(schema.principalTransactionOverrideApplications.overrideId, leaf.id),
+              eq(schema.principalTransactionOverrideApplications.sourceId, leaf.sourceId)
+            )
+          )
+        const status =
+          job?.processingJobId == null
+            ? "failed"
+            : job.followUpJobId !== null
+              ? job.followUpStatus === "completed"
+                ? "complete"
+                : job.followUpStatus === null ||
+                    job.followUpStatus === "failed" ||
+                    job.followUpStatus === "credit_required"
+                  ? "failed"
+                  : "updating"
+              : job.requestedStatus === "failed" || job.requestedStatus === "credit_required"
+                ? "failed"
+                : job.requestedStatus === "completed" && job.followUpMode === null
+                  ? "complete"
+                  : "updating"
+        const replay: MovementCorrectionReplay = {
+          status,
+          processingJobId: job?.processingJobId ?? null,
+          followUpJobId: job?.followUpJobId ?? null,
+        }
+        const historyIds = context.history
+          .filter((record) => record.kind === kind)
+          .map((record) => record.id)
+        const runSnapshot = sql`case when split_part(${schema.calculationRuns.inputLedgerRevision}, ':', 1) = 'v2' then replace(split_part(${schema.calculationRuns.inputLedgerRevision}, ':', 3), '.', ':')::pg_snapshot else null end`
+        const [run] = yield* tx
+          .select({
+            runId: schema.calculationRuns.id,
+            status: schema.calculationRuns.status,
+            failureCode: schema.calculationRuns.failureCode,
+            input: schema.calculationRunCorrectionInputs.captured,
+          })
+          .from(schema.calculationRuns)
+          .innerJoin(
+            schema.calculationRunCorrectionInputs,
+            and(
+              eq(schema.calculationRunCorrectionInputs.runId, schema.calculationRuns.id),
+              eq(schema.calculationRunCorrectionInputs.principalId, leaf.principalId),
+              eq(schema.calculationRunCorrectionInputs.targetId, context.targetId),
+              eq(schema.calculationRunCorrectionInputs.overrideId, leaf.id),
+              eq(schema.calculationRunCorrectionInputs.kind, kind)
+            )
+          )
+          .where(
+            and(
+              eq(schema.calculationRuns.principalId, leaf.principalId),
+              eq(schema.calculationRuns.jurisdiction, scope.jurisdiction),
+              eq(schema.calculationRuns.taxYear, scope.taxYear),
+              eq(schema.calculationRuns.reportingCurrency, scope.reportingCurrency),
+              ne(schema.calculationRuns.status, "pending"),
+              sql`split_part(${schema.calculationRuns.inputLedgerRevision}, ':', 1) = 'v2'`,
+              notExists(
+                tx
+                  .select({ id: schema.principalTransactionOverrides.id })
+                  .from(schema.principalTransactionOverrides)
+                  .where(
+                    and(
+                      inArray(schema.principalTransactionOverrides.id, historyIds),
+                      sql`not pg_visible_in_snapshot(${schema.principalTransactionOverrides}.xmin::text::xid8, ${runSnapshot})`
+                    )
+                  )
+              ),
+              exists(
+                tx
+                  .select({ id: schema.principalTransactionOverrideApplications.overrideId })
+                  .from(schema.principalTransactionOverrideApplications)
+                  .innerJoin(
+                    REQUESTED_REPLAY,
+                    and(
+                      eq(
+                        REQUESTED_REPLAY.id,
+                        schema.principalTransactionOverrideApplications.processingJobId
+                      ),
+                      eq(REQUESTED_REPLAY.principalId, leaf.principalId),
+                      eq(REQUESTED_REPLAY.sourceId, leaf.sourceId)
+                    )
+                  )
+                  .leftJoin(
+                    FOLLOW_UP_REPLAY,
+                    and(
+                      eq(FOLLOW_UP_REPLAY.id, REQUESTED_REPLAY.followUpJobId),
+                      eq(FOLLOW_UP_REPLAY.principalId, leaf.principalId),
+                      eq(FOLLOW_UP_REPLAY.sourceId, leaf.sourceId)
+                    )
+                  )
+                  .where(
+                    and(
+                      eq(schema.principalTransactionOverrideApplications.overrideId, leaf.id),
+                      sql`pg_visible_in_snapshot(${schema.principalTransactionOverrideApplications}.xmin::text::xid8, ${runSnapshot})`,
+                      sql`pg_visible_in_snapshot(${REQUESTED_REPLAY}.xmin::text::xid8, ${runSnapshot})`,
+                      or(
+                        and(
+                          isNull(REQUESTED_REPLAY.followUpJobId),
+                          isNull(REQUESTED_REPLAY.followUpMode),
+                          eq(REQUESTED_REPLAY.status, "completed")
+                        ),
+                        and(
+                          isNotNull(REQUESTED_REPLAY.followUpJobId),
+                          eq(FOLLOW_UP_REPLAY.status, "completed"),
+                          sql`pg_visible_in_snapshot(${FOLLOW_UP_REPLAY}.xmin::text::xid8, ${runSnapshot})`
+                        )
+                      )
+                    )
+                  )
+              )
+            )
+          )
+          .orderBy(
+            desc(sql`split_part(${schema.calculationRuns.inputLedgerRevision}, ':', 2)::numeric`),
+            desc(schema.calculationRuns.id)
+          )
+          .limit(1)
+        if (run === undefined || run.status === "pending") return { replay, coverage: null }
+        const input = yield* Schema.decodeEffect(COVERED_INPUT)(run.input)
+        return {
+          replay,
+          coverage: {
+            runId: run.runId,
+            status: run.status,
+            failureCode: run.failureCode,
+            overrideId: leaf.id,
+            input,
+          },
+        }
+      })
+
+    const project = ({
+      inspectionReader,
+      tx,
+      context,
+      snapshot,
+      scope,
+    }: {
+      readonly tx: SyncEngineDbTransaction
+      readonly context: PrincipalTransactionOverrideContext
+      readonly snapshot: FactualLedgerSnapshot
+      readonly inspectionReader: Effect.Success<typeof makeFactualLedgerSnapshotReader>
+      readonly scope: MovementCalculationScope
+    }) =>
+      Effect.gen(function* () {
+        const inputs = snapshot.movements.get(context.targetId) ?? {
+          targetId: context.targetId,
+          current: null,
+          currentOutcome: "absent" as const,
+          system: { event: null, valuationFacts: [] },
+          effective: { event: null, valuationFacts: [] },
+          corrections: [],
+        }
+        const outsidePeriod =
+          inputs.currentOutcome === "outside_period" ||
+          (inputs.current === null &&
+            context.history.length > 0 &&
+            context.history.every(
+              (record) =>
+                record.inspectedSystem.occurredAt >=
+                germanTaxYearEndExclusive(scope.taxYear).toDate()
+            ))
+        const streams = yield* Effect.forEach(["price", "classification"] as const, (kind) =>
+          Effect.gen(function* () {
+            const stream = context[kind]
+            const capture = inputs.corrections.find((input) => input.history.id === stream.leaf?.id)
+            const { replay, coverage } = yield* loadCoverage({ tx, context, kind, scope })
+            const inspectedCurrency = stream.active?.inspectedValuationEvidence.reportingCurrency
+            const currentInspection =
+              inspectedCurrency === undefined || inspectedCurrency === scope.reportingCurrency
+                ? context.current
+                : yield* loadContext({
+                    tx,
+                    assetLoader,
+                    snapshotReader: inspectionReader,
+                    principalId: context.target.principalId,
+                    targetId: context.targetId,
+                    reportingCurrency: inspectedCurrency,
+                    allowUnavailableInspection: true,
+                  }).pipe(
+                    Effect.map((value) => (Option.isSome(value) ? value.value.current : null))
+                  )
+            const projection: MovementCorrectionStreamProjection = {
+              ...stream,
+              stale:
+                stream.active !== null &&
+                (currentInspection === null ||
+                  stream.active.inspectedFacts.systemRevision !==
+                    currentInspection.facts.systemRevision),
+              application:
+                capture?.application ?? (stream.active === null ? "inactive" : "not_applied"),
+              applicationProblem: capture?.applicationProblem ?? null,
+              resolvedPrice: capture?.resolvedPrice ?? null,
+              replay,
+              coverage,
+              coverageStatus:
+                stream.leaf === null
+                  ? "not_requested"
+                  : outsidePeriod
+                    ? "outside_period"
+                    : replay.status === "failed"
+                      ? "failed"
+                      : replay.status !== "complete" ||
+                          coverage === null ||
+                          coverage.status === "running"
+                        ? "updating"
+                        : coverage.status === "failed"
+                          ? "failed"
+                          : "covered",
+            }
+            return projection
+          })
+        )
+        const [price, classification] = streams
+        if (price === undefined || classification === undefined)
+          return yield* new PersistenceError({
+            operation: "movementCorrection.project.streams",
+            cause: "Missing stream projection",
+          })
+        return { context, scope, inputs, price, classification }
+      })
+
+    const readScope = (scope: MovementCalculationScope) =>
+      scope.jurisdiction === "DE"
+        ? Effect.succeed(germanTaxYearEndExclusive(scope.taxYear).toDate())
+        : Effect.fail(new UnsupportedJurisdictionError({ jurisdiction: scope.jurisdiction }))
+
+    const findProjection: PrincipalTransactionOverrideRepositoryShape["findProjection"] = (
+      params
+    ) =>
+      db
+        .transaction(
+          (tx) =>
+            Effect.gen(function* () {
+              const inspectionReader = makeInspectionReader()
+              const context = yield* loadContext({
+                tx,
+                assetLoader,
+                snapshotReader: inspectionReader,
+                reportingCurrency: params.scope.reportingCurrency,
+                ...params,
+                allowUnavailableInspection: true,
+              })
+              if (Option.isNone(context)) return Option.none()
+              const occurredBefore = yield* readScope(params.scope)
+              const snapshot = yield* snapshotReader.load({
+                principalId: params.principalId,
+                reportingCurrency: params.scope.reportingCurrency,
+                occurredBefore,
+              })
+              return Option.some(
+                yield* project({
+                  tx,
+                  context: context.value,
+                  snapshot,
+                  scope: params.scope,
+                  inspectionReader,
+                })
+              )
+            }),
+          { isolationLevel: "repeatable read", accessMode: "read only" }
+        )
+        .pipe(
+          Effect.mapError((cause) =>
+            Schema.is(UnsupportedJurisdictionError)(cause)
+              ? cause
+              : isPersistenceError(cause)
+                ? cause
+                : new PersistenceError({ operation: "movementCorrection.findProjection", cause })
+          )
+        )
+
+    const findTransactionTargets: PrincipalTransactionOverrideRepositoryShape["findTransactionTargets"] =
+      (params) =>
+        db
+          .transaction(
+            (tx) =>
+              Effect.gen(function* () {
+                const [transaction] = yield* tx
+                  .select({ id: schema.transactions.id, sourceId: schema.transactions.sourceId })
+                  .from(schema.transactions)
+                  .innerJoin(
+                    schema.sources,
+                    and(
+                      eq(schema.sources.id, schema.transactions.sourceId),
+                      eq(schema.sources.principalId, params.principalId)
+                    )
+                  )
+                  .where(
+                    and(
+                      eq(schema.transactions.id, params.transactionId),
+                      eq(schema.transactions.principalId, params.principalId)
+                    )
+                  )
+                if (transaction === undefined) return Option.none()
+                const rows = yield* tx
+                  .selectDistinct({ targetId: schema.transactionLegs.movementCorrectionTargetId })
+                  .from(schema.transactionLegs)
+                  .innerJoin(
+                    schema.sources,
+                    and(
+                      eq(schema.sources.id, schema.transactionLegs.sourceId),
+                      eq(schema.sources.principalId, params.principalId)
+                    )
+                  )
+                  .innerJoin(
+                    schema.movementCorrectionTargets,
+                    and(
+                      eq(
+                        schema.movementCorrectionTargets.id,
+                        schema.transactionLegs.movementCorrectionTargetId
+                      ),
+                      eq(
+                        schema.movementCorrectionTargets.sourceId,
+                        schema.transactionLegs.sourceId
+                      ),
+                      eq(schema.movementCorrectionTargets.principalId, params.principalId)
+                    )
+                  )
+                  .where(
+                    and(
+                      eq(schema.transactionLegs.principalId, params.principalId),
+                      or(
+                        and(
+                          eq(schema.transactionLegs.transactionId, params.transactionId),
+                          eq(schema.transactionLegs.sourceId, transaction.sourceId)
+                        ),
+                        and(
+                          eq(schema.transactionLegs.feeForTransactionId, params.transactionId),
+                          eq(schema.transactionLegs.sourceId, transaction.sourceId)
+                        ),
+                        exists(
+                          tx
+                            .select({ id: schema.providerTransfers.id })
+                            .from(schema.providerTransfers)
+                            .where(
+                              and(
+                                eq(schema.transactionLegs.originKind, "provider_transfer"),
+                                eq(
+                                  schema.providerTransfers.id,
+                                  schema.transactionLegs.providerTransferId
+                                ),
+                                eq(
+                                  schema.providerTransfers.sourceId,
+                                  schema.transactionLegs.sourceId
+                                ),
+                                eq(schema.providerTransfers.transactionId, params.transactionId),
+                                eq(schema.providerTransfers.sourceId, transaction.sourceId)
+                              )
+                            )
+                        ),
+                        exists(
+                          tx
+                            .select({ id: schema.transferReconciliations.id })
+                            .from(schema.transferReconciliations)
+                            .innerJoin(
+                              schema.providerTransfers,
+                              eq(
+                                schema.providerTransfers.id,
+                                schema.transferReconciliations.providerTransferId
+                              )
+                            )
+                            .innerJoin(
+                              PROVIDER_TRANSACTION,
+                              and(
+                                eq(PROVIDER_TRANSACTION.id, schema.providerTransfers.transactionId),
+                                eq(
+                                  PROVIDER_TRANSACTION.sourceId,
+                                  schema.providerTransfers.sourceId
+                                ),
+                                eq(PROVIDER_TRANSACTION.principalId, params.principalId)
+                              )
+                            )
+                            .innerJoin(
+                              PROVIDER_SOURCE,
+                              and(
+                                eq(PROVIDER_SOURCE.id, schema.providerTransfers.sourceId),
+                                eq(PROVIDER_SOURCE.principalId, params.principalId)
+                              )
+                            )
+                            .innerJoin(
+                              schema.transfers,
+                              and(
+                                eq(
+                                  schema.transfers.id,
+                                  schema.transferReconciliations.canonicalTransferId
+                                ),
+                                eq(schema.transfers.principalId, params.principalId)
+                              )
+                            )
+                            .innerJoin(
+                              CANONICAL_TRANSACTION,
+                              and(
+                                eq(
+                                  CANONICAL_TRANSACTION.id,
+                                  schema.transferReconciliations.canonicalTransactionId
+                                ),
+                                eq(CANONICAL_TRANSACTION.sourceId, schema.transfers.sourceId),
+                                eq(CANONICAL_TRANSACTION.principalId, params.principalId)
+                              )
+                            )
+                            .innerJoin(
+                              CANONICAL_SOURCE,
+                              and(
+                                eq(CANONICAL_SOURCE.id, schema.transfers.sourceId),
+                                eq(CANONICAL_SOURCE.principalId, params.principalId)
+                              )
+                            )
+                            .where(
+                              and(
+                                eq(schema.transferReconciliations.principalId, params.principalId),
+                                or(
+                                  eq(schema.transferReconciliations.status, "approved"),
+                                  and(
+                                    eq(schema.transferReconciliations.status, "auto_applied"),
+                                    eq(schema.transferReconciliations.deterministic, true)
+                                  )
+                                ),
+                                or(
+                                  eq(
+                                    schema.transferReconciliations.canonicalTransactionId,
+                                    params.transactionId
+                                  ),
+                                  eq(schema.providerTransfers.transactionId, params.transactionId)
+                                ),
+                                or(
+                                  and(
+                                    eq(schema.transactionLegs.originKind, "canonical_transfer"),
+                                    eq(
+                                      schema.transactionLegs.sourceTransferId,
+                                      schema.transfers.id
+                                    ),
+                                    eq(schema.transactionLegs.sourceId, schema.transfers.sourceId)
+                                  ),
+                                  and(
+                                    eq(schema.transactionLegs.originKind, "provider_transfer"),
+                                    eq(
+                                      schema.transactionLegs.providerTransferId,
+                                      schema.providerTransfers.id
+                                    ),
+                                    eq(
+                                      schema.transactionLegs.sourceId,
+                                      schema.providerTransfers.sourceId
+                                    )
+                                  )
+                                )
+                              )
+                            )
+                        )
+                      )
+                    )
+                  )
+                  .orderBy(asc(schema.transactionLegs.movementCorrectionTargetId))
+                const occurredBefore = yield* readScope(params.scope)
+                if (rows.length === 0) return Option.some([])
+                const snapshot = yield* snapshotReader.load({
+                  principalId: params.principalId,
+                  reportingCurrency: params.scope.reportingCurrency,
+                  occurredBefore,
+                })
+                const inspectionReader = makeInspectionReader()
+                const projections = yield* Effect.forEach(rows, ({ targetId }) =>
+                  Effect.gen(function* () {
+                    const context = yield* loadContext({
+                      tx,
+                      assetLoader,
+                      snapshotReader: inspectionReader,
+                      reportingCurrency: params.scope.reportingCurrency,
+                      principalId: params.principalId,
+                      targetId,
+                      allowUnavailableInspection: true,
+                    })
+                    if (Option.isNone(context))
+                      return yield* new PersistenceError({
+                        operation: "movementCorrection.discover",
+                        cause: "Owned target disappeared inside snapshot",
+                      })
+                    return yield* project({
+                      tx,
+                      context: context.value,
+                      snapshot,
+                      scope: params.scope,
+                      inspectionReader,
+                    })
+                  })
+                )
+                return Option.some(projections)
+              }),
+            { isolationLevel: "repeatable read", accessMode: "read only" }
+          )
+          .pipe(
+            Effect.mapError((cause) =>
+              Schema.is(UnsupportedJurisdictionError)(cause)
+                ? cause
+                : isPersistenceError(cause)
+                  ? cause
+                  : new PersistenceError({
+                      operation: "movementCorrection.findTransactionTargets",
+                      cause,
+                    })
+            )
+          )
 
     const mutate = (request: MutationRequest) =>
       db
@@ -665,6 +1300,8 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
         )
     return {
       findContext,
+      findProjection,
+      findTransactionTargets,
       create: (params) => mutate({ ...params, operation: "create" }),
       replace: (params) => mutate({ ...params, operation: "replace" }),
       withdraw: (params) => mutate({ ...params, operation: "withdraw" }),

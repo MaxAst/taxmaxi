@@ -685,6 +685,26 @@ describe("FactualLedgerRepositoryLive", () => {
       )
 
       const result = yield* Effect.promise(loadFactualLedger)
+      const snapshot = yield* Effect.promise(() =>
+        runPg(
+          Effect.flatMap(makeFactualLedgerSnapshotReader, (reader) =>
+            reader.load({
+              principalId: TEST_PRINCIPAL_ID,
+              reportingCurrency: CurrencyCode.make("EUR"),
+            })
+          )
+        )
+      )
+      expect(snapshot.ledger).toEqual(result)
+      expect(snapshot.movements.size).toBe(4)
+      expect(
+        [...snapshot.movements.values()].every(
+          (movement) => movement.corrections.length === 0 && movement.system.event !== null
+        )
+      ).toBe(true)
+      expect(
+        [...snapshot.movements.values()].map((movement) => movement.system.event?.id).sort()
+      ).toEqual(result.events.map((event) => event.id).sort())
 
       expect(
         result.events.map((event) => ({
