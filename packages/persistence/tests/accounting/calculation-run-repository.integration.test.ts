@@ -406,14 +406,22 @@ const seedCorrectionRunInput = Effect.gen(function* () {
   })
   const db = yield* drizzle
   const [leg] = yield* db
-    .select({ targetId: schema.transactionLegs.movementCorrectionTargetId })
+    .select({
+      targetId: schema.transactionLegs.movementCorrectionTargetId,
+      transactionId: schema.transactionLegs.transactionId,
+    })
     .from(schema.transactionLegs)
     .where(eq(schema.transactionLegs.id, ACQUISITION_EVENT_ID))
   const [principal] = yield* db
     .select({ userId: schema.principals.userId })
     .from(schema.principals)
     .where(eq(schema.principals.id, TEST_PRINCIPAL_ID))
-  if (leg === undefined || principal?.userId === null || principal?.userId === undefined)
+  if (
+    leg === undefined ||
+    leg.transactionId === null ||
+    principal?.userId === null ||
+    principal?.userId === undefined
+  )
     return yield* Effect.die("Missing synthetic input owner")
   const draft = {
     principalId: TEST_PRINCIPAL_ID,
@@ -432,6 +440,17 @@ const seedCorrectionRunInput = Effect.gen(function* () {
     inspectedLegKind: "acquisition",
     inspectedFiatAmount: null,
     inspectedFiatCurrency: null,
+    inspectedValuationEvidence: {
+      reportingCurrency: EUR,
+      facts: [
+        {
+          _tag: "observed_consideration",
+          eventId: ACQUISITION_EVENT_ID,
+          amount: { amount: "10", currency: EUR },
+          evidenceReference: `transaction:${leg.transactionId}`,
+        },
+      ],
+    },
     inspectedTransactionType: "buy_fiat",
     inspectedProviderTransactionType: null,
     inspectedDerivationRule: null,

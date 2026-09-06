@@ -6,6 +6,8 @@
 
 import type {
   AccountingEvent,
+  ObservedConsiderationFact,
+  MarketQuoteFact,
   CustodyUnitId,
   ValuationFact,
   MovementCorrectionFacts,
@@ -113,6 +115,15 @@ export type PrincipalAssetOverrideRevisionRecord =
       readonly replacementInclusion: "included" | "excluded" | null
     }
 
+/** Exact pre-correction valuation evidence in the reporting currency used for inspection. */
+export interface MovementValuationEvidence {
+  readonly reportingCurrency: CurrencyCode
+  readonly facts: ReadonlyArray<
+    | Schema.Codec.Encoded<typeof ObservedConsiderationFact>
+    | Schema.Codec.Encoded<typeof MarketQuoteFact>
+  >
+}
+
 /** Exact immutable history values encoded for a run snapshot, without runtime decimal/date objects. */
 export type CapturedMovementCorrectionHistory = Omit<
   PrincipalTransactionOverrideHistoryRecord,
@@ -207,6 +218,22 @@ export interface FactualLedger {
   readonly custodyUnitMembership: ReadonlyArray<CustodyUnitMembership>
   readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
   readonly principalAssetOverrideRevision: ReadonlyArray<PrincipalAssetOverrideRevisionRecord>
+}
+
+/** Current target inputs from the same factual read used by calculations, even without history. */
+export interface MovementFactualProjection {
+  readonly targetId: string
+  readonly current: MovementCorrectionLegContext | null
+  readonly currentOutcome: CalculationRunCorrectionInput["currentOutcome"]
+  readonly system: MovementCorrectionEngineInputs
+  readonly effective: MovementCorrectionEngineInputs
+  readonly corrections: ReadonlyArray<CalculationRunCorrectionInput>
+}
+
+/** Shared snapshot result; the calculation-facing ledger remains unchanged. */
+export interface FactualLedgerSnapshot {
+  readonly ledger: FactualLedger
+  readonly movements: ReadonlyMap<string, MovementFactualProjection>
 }
 
 /** Persistence contract for adapting stored rows to a factual ledger. */

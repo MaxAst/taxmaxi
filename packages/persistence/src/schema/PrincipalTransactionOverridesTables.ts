@@ -3,6 +3,7 @@
  *
  * @module PrincipalTransactionOverridesTables
  */
+import type { MovementValuationEvidence } from "../services/FactualLedgerRepository.ts"
 import type { MovementClassificationInput, MovementPriceInput } from "@my/core/accounting"
 import { CURRENCIES_BY_CODE } from "@my/core/currency"
 import { sql } from "drizzle-orm"
@@ -70,6 +71,9 @@ export const principalTransactionOverrides = pgTable(
     kind: movementCorrectionKindEnum("kind").notNull(),
     operation: movementCorrectionOperationEnum("operation").notNull(),
     inspectedSystemRevision: text("inspected_system_revision").notNull(),
+    inspectedValuationEvidence: jsonb("inspected_valuation_evidence")
+      .$type<MovementValuationEvidence>()
+      .notNull(),
     inspectedSourceRecordKey: text("inspected_source_record_key").notNull(),
     inspectedComponentKey: text("inspected_component_key").notNull(),
     inspectedQuantity: text("inspected_quantity").notNull(),
@@ -99,6 +103,14 @@ export const principalTransactionOverrides = pgTable(
     check(
       "principal_transaction_overrides_required_text",
       sql`length(btrim(${table.reason}, ${whitespace})) > 0 and length(btrim(${table.inspectedSystemRevision}, ${whitespace})) > 0 and length(btrim(${table.inspectedSourceRecordKey}, ${whitespace})) > 0 and length(btrim(${table.inspectedComponentKey}, ${whitespace})) > 0`
+    ),
+    check(
+      "principal_transaction_overrides_valuation_evidence",
+      sql`(jsonb_typeof(${table.inspectedValuationEvidence}) = 'object'
+        and ${table.inspectedValuationEvidence} - ARRAY['reportingCurrency','facts'] = '{}'::jsonb
+        and ${table.inspectedValuationEvidence}->>'reportingCurrency' in (${reportingCurrencies})
+        and jsonb_typeof(${table.inspectedValuationEvidence}->'facts') = 'array'
+        and jsonb_array_length(jsonb_path_query_array(${table.inspectedValuationEvidence}->'facts', 'strict $[*] ? (@.type() == "object" && (@._tag == "observed_consideration" || @._tag == "market_quote"))')) = jsonb_array_length(${table.inspectedValuationEvidence}->'facts')) is true`
     ),
     check(
       "principal_transaction_overrides_quantity",

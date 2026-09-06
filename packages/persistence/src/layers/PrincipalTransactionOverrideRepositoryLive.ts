@@ -4,6 +4,8 @@
  * @module PrincipalTransactionOverrideRepositoryLive
  */
 import {
+  ObservedConsiderationFact,
+  MarketQuoteFact,
   format as formatAccountingQuantity,
   MovementClassificationInput,
   MovementCorrectionInput,
@@ -14,6 +16,10 @@ import {
   MovementCorrectionTargetIdentity,
   MovementPriceInput,
 } from "@my/core/accounting"
+import type { CurrencyCode } from "@my/core/currency"
+import type { MovementValuationEvidence } from "../services/FactualLedgerRepository.ts"
+import { makeFactualLedgerSnapshotReader } from "./FactualLedgerSnapshotReader.ts"
+import { MovementValuationEvidenceSchema } from "./PrincipalTransactionOverrideDecisionLoader.ts"
 import { and, asc, eq, getTableColumns, or } from "drizzle-orm"
 import { alias } from "drizzle-orm/pg-core"
 import { createHash } from "node:crypto"
@@ -58,6 +64,8 @@ const SystemRevisionPayload = Schema.fromJsonString(
     structure: Schema.Literals(["ownership_change", "fee", "custody"]),
     economicAssetId: Schema.NullOr(Schema.String),
     storedAssetId: Schema.String,
+    valuationCurrency: Schema.String,
+    valuationFacts: Schema.Array(Schema.Array(Schema.Union([Schema.String, Schema.Finite]))),
     system: Schema.Struct({
       occurredAt: Schema.DateFromString,
       legKind: Schema.Literals(["acquisition", "disposal", "income", "fee"]),
@@ -109,6 +117,9 @@ const decodeHistory = (row: typeof schema.principalTransactionOverrides.$inferSe
       operation: row.operation,
       inspectedFacts,
       input,
+      inspectedValuationEvidence: yield* Schema.decodeEffect(MovementValuationEvidenceSchema)(
+        row.inspectedValuationEvidence
+      ),
       inspectedSystem: {
         occurredAt: row.inspectedOccurredAt,
         legKind: row.inspectedLegKind,
@@ -144,9 +155,15 @@ const stream = (
 const loadContext = ({
   tx,
   assetLoader,
+  snapshotReader,
   principalId,
   targetId,
+  reportingCurrency,
+  retainedValuationEvidence,
 }: {
+  readonly snapshotReader: Effect.Success<typeof makeFactualLedgerSnapshotReader>
+  readonly reportingCurrency: CurrencyCode
+  readonly retainedValuationEvidence?: MovementValuationEvidence
   readonly assetLoader: Effect.Success<typeof makePrincipalAssetOverrideDecisionLoader>
   readonly tx: SyncEngineDbTransaction
   readonly principalId: PrincipalTransactionOverrideContext["target"]["principalId"]
@@ -342,6 +359,32 @@ const loadContext = ({
               derivationRule: leg.derivationRule,
               feeForSourceRecordKey: leg.feeForSourceRecordKey,
             }
+            const valuationEvidence =
+              retainedValuationEvidence ??
+              (yield* Effect.gen(function* () {
+                const snapshot = yield* snapshotReader.load({ principalId, reportingCurrency })
+                return yield* Schema.decodeUnknownEffect(MovementValuationEvidenceSchema)({
+                  reportingCurrency,
+                  facts: snapshot.movements.get(targetId)?.system.valuationFacts ?? [],
+                })
+              }))
+            // The audit keeps original event/reference IDs; the revision compares actual valuation content.
+            const valuationFacts = yield* Effect.forEach(valuationEvidence.facts, (encoded) =>
+              Effect.gen(function* () {
+                const fact = yield* Schema.decodeEffect(
+                  Schema.Union([ObservedConsiderationFact, MarketQuoteFact])
+                )(encoded)
+                return fact._tag === "observed_consideration"
+                  ? [fact._tag, fact.amount.format(), fact.amount.currency]
+                  : [
+                      fact._tag,
+                      fact.unitPrice.format(),
+                      fact.unitPrice.currency,
+                      fact.quotedAt.epochMillis,
+                      fact.source,
+                    ]
+              })
+            )
             // Recreated row UUIDs and timestamps of persistence do not change the inspected facts.
             const revisionPayload = yield* Schema.encodeEffect(SystemRevisionPayload)({
               target,
@@ -349,6 +392,8 @@ const loadContext = ({
               structure,
               economicAssetId,
               storedAssetId: leg.assetId,
+              valuationCurrency: valuationEvidence.reportingCurrency,
+              valuationFacts,
               system,
             })
             const systemRevision = createHash("sha256").update(revisionPayload).digest("hex")
@@ -361,7 +406,13 @@ const loadContext = ({
               direction:
                 leg.kind === "acquisition" || leg.kind === "income" ? "inbound" : "outbound",
             })
-            return { legId: leg.id, transactionId: leg.transactionId, facts, system }
+            return {
+              legId: leg.id,
+              transactionId: leg.transactionId,
+              facts,
+              system,
+              valuationEvidence,
+            }
           })
     // Every history column is returned as audit context; no replacement is applied here.
     const rows = yield* tx
@@ -399,9 +450,10 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
   Effect.gen(function* () {
     const db = yield* drizzle
     const assetLoader = yield* makePrincipalAssetOverrideDecisionLoader
+    const snapshotReader = yield* makeFactualLedgerSnapshotReader
     const findContext: PrincipalTransactionOverrideRepositoryShape["findContext"] = (params) =>
       db
-        .transaction((tx) => loadContext({ tx, assetLoader, ...params }), {
+        .transaction((tx) => loadContext({ tx, assetLoader, snapshotReader, ...params }), {
           isolationLevel: "repeatable read",
           accessMode: "read only",
         })
@@ -443,6 +495,8 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
               const loaded = yield* loadContext({
                 tx,
                 assetLoader,
+                snapshotReader,
+                reportingCurrency: request.reportingCurrency,
                 principalId: request.principalId,
                 targetId: request.targetId,
               })
@@ -519,6 +573,7 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
                   supersedesOverrideId: request.expectedLeafId,
                   recordedAt: now,
                   inspectedSystemRevision: facts.systemRevision,
+                  inspectedValuationEvidence: current.valuationEvidence,
                   inspectedSourceRecordKey: context.target.sourceRecordKey,
                   inspectedComponentKey: context.target.componentKey,
                   inspectedQuantity: formatAccountingQuantity(facts.quantity),
@@ -568,6 +623,9 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
               const updated = yield* loadContext({
                 tx,
                 assetLoader,
+                snapshotReader,
+                reportingCurrency: request.reportingCurrency,
+                retainedValuationEvidence: current.valuationEvidence,
                 principalId: request.principalId,
                 targetId: request.targetId,
               })
