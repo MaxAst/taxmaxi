@@ -638,6 +638,9 @@ describe("calculation-runs schema", () => {
             yield* db.execute(sql`drop table calculation_runs`)
             yield* db.execute(sql`drop table custody_unit_sources`)
             yield* db.execute(sql`drop table custody_units`)
+            yield* db.execute(
+              sql`alter table movement_correction_targets drop constraint movement_correction_targets_source_owner_fk`
+            )
             yield* db.execute(sql`alter table sources drop constraint sources_id_principal_unique`)
             yield* db.execute(sql`drop type calculation_run_inventory_scope`)
             yield* db.execute(sql`drop type calculation_run_status`)

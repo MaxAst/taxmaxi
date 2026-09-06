@@ -27,6 +27,7 @@ import * as processingJobs from "./ProcessingJobsTable.ts"
 import * as principalClaims from "./PrincipalClaimsTable.ts"
 import * as principalAssetOverrideApplications from "./PrincipalAssetOverrideApplicationsTable.ts"
 import * as principalAssetOverrides from "./PrincipalAssetOverridesTables.ts"
+import * as movementCorrectionTargets from "./MovementCorrectionTargetsTable.ts"
 import * as principals from "./PrincipalsTable.ts"
 import * as protocolCandidateObservations from "./ProtocolCandidateObservationsTable.ts"
 import * as protocolCandidates from "./ProtocolCandidatesTable.ts"
@@ -89,6 +90,7 @@ export const schema = {
   ...principalClaims,
   ...principalAssetOverrideApplications,
   ...principalAssetOverrides,
+  ...movementCorrectionTargets,
   ...principals,
   ...protocolCandidateObservations,
   ...protocolCandidates,

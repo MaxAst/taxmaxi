@@ -1,3 +1,4 @@
+import { prepareMovementLegFixtures } from "../../persistence/tests/support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
 import { NodeHttpServer } from "@effect/platform-node"
@@ -280,21 +281,29 @@ const seedFactualLedgerOnly = Effect.gen(function* () {
 
   const db = yield* drizzle
   const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-05-01T10:00:00.000Z"))
-  yield* db.insert(schema.transactionLegs).values({
-    id: fixtureIds.factualLegId,
-    sourceId: fixture.sourceId,
-    externalId: "portfolio-factual-only-leg",
-    timestamp,
-    principalId: fixture.principalId,
-    assetId: TEST_BTC_ASSET_ID,
-    assetRepresentationId: null,
-    amount: "99",
-    kind: "acquisition",
-    provenance: "deterministic",
-    originKind: "none" as const,
-    fiatAmount: "990",
-    fiatCurrency: "EUR",
-  })
+  yield* db.insert(schema.transactionLegs).values(
+    yield* prepareMovementLegFixtures([
+      {
+        movementIdentity: {
+          sourceRecordKey: "portfolio-factual-only-leg",
+          componentKey: "movement",
+        },
+        id: fixtureIds.factualLegId,
+        sourceId: fixture.sourceId,
+        externalId: "portfolio-factual-only-leg",
+        timestamp,
+        principalId: fixture.principalId,
+        assetId: TEST_BTC_ASSET_ID,
+        assetRepresentationId: null,
+        amount: "99",
+        kind: "acquisition",
+        provenance: "deterministic",
+        originKind: "none" as const,
+        fiatAmount: "990",
+        fiatCurrency: "EUR",
+      },
+    ])
+  )
 })
 
 const seedValuedAndUnpricedFacts = Effect.gen(function* () {
@@ -338,34 +347,44 @@ const seedValuedAndUnpricedFacts = Effect.gen(function* () {
       principalId: fixture.principalId,
     },
   ])
-  yield* db.insert(schema.transactionLegs).values([
-    {
-      id: fixtureIds.valuedLegId,
-      sourceId: fixture.sourceId,
-      externalId: "t17-valued-acquisition-leg",
-      timestamp,
-      principalId: fixture.principalId,
-      assetId: TEST_BTC_ASSET_ID,
-      amount: "2",
-      kind: "acquisition",
-      provenance: "deterministic",
-      originKind: "none" as const,
-      transactionId: fixtureIds.valuedTransactionId,
-    },
-    {
-      id: fixtureIds.unpricedLegId,
-      sourceId: fixture.sourceId,
-      externalId: "t17-unpriced-acquisition-leg",
-      timestamp,
-      principalId: fixture.principalId,
-      assetId: fixtureIds.unpricedAssetId,
-      amount: "3",
-      kind: "acquisition",
-      provenance: "deterministic",
-      originKind: "none" as const,
-      transactionId: fixtureIds.unpricedTransactionId,
-    },
-  ])
+  yield* db.insert(schema.transactionLegs).values(
+    yield* prepareMovementLegFixtures([
+      {
+        movementIdentity: {
+          sourceRecordKey: "t17-valued-acquisition-leg",
+          componentKey: "movement",
+        },
+        id: fixtureIds.valuedLegId,
+        sourceId: fixture.sourceId,
+        externalId: "t17-valued-acquisition-leg",
+        timestamp,
+        principalId: fixture.principalId,
+        assetId: TEST_BTC_ASSET_ID,
+        amount: "2",
+        kind: "acquisition",
+        provenance: "deterministic",
+        originKind: "none" as const,
+        transactionId: fixtureIds.valuedTransactionId,
+      },
+      {
+        movementIdentity: {
+          sourceRecordKey: "t17-unpriced-acquisition-leg",
+          componentKey: "movement",
+        },
+        id: fixtureIds.unpricedLegId,
+        sourceId: fixture.sourceId,
+        externalId: "t17-unpriced-acquisition-leg",
+        timestamp,
+        principalId: fixture.principalId,
+        assetId: fixtureIds.unpricedAssetId,
+        amount: "3",
+        kind: "acquisition",
+        provenance: "deterministic",
+        originKind: "none" as const,
+        transactionId: fixtureIds.unpricedTransactionId,
+      },
+    ])
+  )
   yield* db.insert(schema.assetPrices).values({
     assetId: TEST_BTC_ASSET_ID,
     timestamp: quoteAt,

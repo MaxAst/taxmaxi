@@ -15,6 +15,7 @@ import { sql } from "drizzle-orm"
 import { addresses } from "./AddressesTable.ts"
 import { assetRepresentations } from "./AssetRepresentationsTable.ts"
 import { assets } from "./AssetsTable.ts"
+import { movementCorrectionTargets } from "./MovementCorrectionTargetsTable.ts"
 import { principals } from "./PrincipalsTable.ts"
 import { providerAssets } from "./ProviderAssetsTable.ts"
 import { providerTransfers } from "./ProviderTransfersTable.ts"
@@ -71,6 +72,9 @@ export const transactionLegs = pgTable(
   "transaction_legs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+
+    /** Exact durable movement target selected by the producer and retained across replay. */
+    movementCorrectionTargetId: uuid("movement_correction_target_id").notNull(),
 
     sourceId: uuid("source_id") // Owning custody source for factual-ledger replay.
       .notNull()
@@ -141,6 +145,16 @@ export const transactionLegs = pgTable(
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (table) => [
+    foreignKey({
+      columns: [table.movementCorrectionTargetId, table.sourceId, table.principalId],
+      foreignColumns: [
+        movementCorrectionTargets.id,
+        movementCorrectionTargets.sourceId,
+        movementCorrectionTargets.principalId,
+      ],
+      name: "transaction_legs_movement_target_owner_fk",
+    }).onUpdate("cascade"),
+    uniqueIndex("transaction_legs_movement_target_unique").on(table.movementCorrectionTargetId),
     foreignKey({
       columns: [table.assetRepresentationId],
       foreignColumns: [assetRepresentations.id],

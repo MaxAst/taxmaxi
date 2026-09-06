@@ -1,3 +1,4 @@
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { eq } from "drizzle-orm"
 import * as DateTime from "effect/DateTime"
@@ -105,6 +106,11 @@ const legValues = ({
   readonly providerAssetRowId?: string
   readonly sourceTransferId?: string | null
 } = {}) => ({
+  movementIdentity: {
+    _tag: "identified" as const,
+    sourceRecordKey: "fact-target-record",
+    componentKey: "movement",
+  },
   id,
   sourceId: TEST_SOURCE_ID,
   externalId: `fact-target-leg-${id}`,
@@ -168,7 +174,9 @@ describe("fact target link schema", () => {
             .insert(schema.providerTransfers)
             .values(providerTransferValues(REPRESENTATION_USE_ID))
           yield* db.insert(schema.transfers).values(transferValues())
-          yield* db.insert(schema.transactionLegs).values(legValues())
+          yield* db
+            .insert(schema.transactionLegs)
+            .values(yield* prepareMovementLegFixtures([legValues()]))
           yield* db.insert(schema.transferReconciliations).values({
             id: RECONCILIATION_ID,
             principalId: TEST_PRINCIPAL_ID,
@@ -335,11 +343,13 @@ describe("fact target link schema", () => {
             Effect.gen(function* () {
               const db = yield* drizzle
               yield* db.insert(schema.transactionLegs).values(
-                legValues({
-                  id: "00000000-0000-4000-8000-000000001014",
-                  sourceRepresentationUseId: OTHER_REPRESENTATION_USE_ID,
-                  sourceTransferId: null,
-                })
+                yield* prepareMovementLegFixtures([
+                  legValues({
+                    id: "00000000-0000-4000-8000-000000001014",
+                    sourceRepresentationUseId: OTHER_REPRESENTATION_USE_ID,
+                    sourceTransferId: null,
+                  }),
+                ])
               )
             })
           )

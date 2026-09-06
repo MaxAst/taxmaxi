@@ -270,6 +270,8 @@ type HeliusSolanaWalletTransfer = Schema.Schema.Type<typeof HeliusSolanaWalletTr
 type HeliusSolanaRawRecordPayload = Schema.Schema.Type<typeof HeliusSolanaRawRecordPayloadSchema>
 
 interface SolanaBalanceMovement {
+  /** Source-native component coordinate, absent when the provider exposes no identity. */
+  readonly componentKey: string | null
   readonly asset: HeliusSolanaResolvedAsset
   readonly amount: string
   readonly rawUnits: string
@@ -901,6 +903,7 @@ const buildRefinedNativeMovements = ({
       fromAddress: direction === "inbound" ? transfer.counterparty : walletAddress,
       toAddress: direction === "inbound" ? walletAddress : transfer.counterparty,
       role: nativeMovement.role,
+      componentKey: null,
       position: 0,
       evidenceKind: "transfer_row",
       supplementalTransferRow: transfer,
@@ -990,6 +993,11 @@ const hasTokenAccountCloseInstruction = (payload: HeliusSolanaFullTransactionPay
     ...(payload.meta?.innerInstructions ?? []).flatMap((entry) => entry.instructions),
   ].some(isTokenAccountCloseInstruction)
 
+const canonicalMovementExternalId = (signature: string, movement: SolanaBalanceMovement): string =>
+  movement.componentKey === null
+    ? `${signature}:unidentified:${movement.evidenceKind}:${movement.position}`
+    : `${signature}:component:${movement.componentKey}`
+
 const buildTransferDraft = ({
   source,
   sourceRecord,
@@ -1019,7 +1027,7 @@ const buildTransferDraft = ({
     sourceId: source.id,
     principalId: source.principalId,
     sourceRawRecordId: sourceRecord.id,
-    externalId: `${signature}:${movement.role}:${movement.position}`,
+    externalId: canonicalMovementExternalId(signature, movement),
     externalGroupId: signature,
     addressId: source.addressId,
     blockchainId,
@@ -1059,7 +1067,11 @@ const buildLegPlan = ({
   readonly movement: SolanaBalanceMovement
   readonly signature: string
 }): HeliusSolanaCanonicalLegPlan => ({
-  transferExternalId: `${signature}:${movement.role}:${movement.position}`,
+  movementIdentity:
+    movement.componentKey === null
+      ? { _tag: "unavailable", reason: "missing_movement_identity" }
+      : { _tag: "identified", sourceRecordKey: signature, componentKey: movement.componentKey },
+  transferExternalId: canonicalMovementExternalId(signature, movement),
   kind:
     movement.role === "fee" ? "fee" : movement.direction === "inbound" ? "acquisition" : "disposal",
   role: movement.role,
@@ -1645,6 +1657,7 @@ const make = ({
                 fromAddress: principalDelta > 0n ? counterparty : walletAddress,
                 toAddress: principalDelta > 0n ? walletAddress : counterparty,
                 role: isRentRefund ? "rent" : "principal",
+                componentKey: `native_balance:${walletAddress}`,
                 position: 0,
                 evidenceKind: "balance_delta",
                 supplementalTransferRow: null,
@@ -1668,6 +1681,7 @@ const make = ({
           fromAddress: walletAddress,
           toAddress: "solana:fee",
           role: "fee",
+          componentKey: "meta.fee",
           position: 1,
           evidenceKind: "balance_delta",
           supplementalTransferRow: null,
@@ -1792,6 +1806,29 @@ const make = ({
     const balanceKey = (balance: HeliusSolanaTokenBalance): string =>
       `${balance.accountIndex}:${balance.mint}`
 
+    const ambiguousBalanceKeys = (
+      payload: HeliusSolanaFullTransactionPayload,
+      walletAddress: string
+    ): ReadonlySet<string> => {
+      const sides = [payload.meta?.preTokenBalances ?? [], payload.meta?.postTokenBalances ?? []]
+      const walletKeys = new Set(
+        sides
+          .flat()
+          .filter((balance) => balance.owner === walletAddress)
+          .map(balanceKey)
+      )
+      const ambiguous = new Set<string>()
+      for (const balances of sides) {
+        const seen = new Set<string>()
+        for (const balance of balances) {
+          const key = balanceKey(balance)
+          if (seen.has(key) && walletKeys.has(key)) ambiguous.add(key)
+          seen.add(key)
+        }
+      }
+      return ambiguous
+    }
+
     const buildSplMovements = ({
       payload,
       walletAddress,
@@ -1810,11 +1847,13 @@ const make = ({
 
       const preBalances = meta.preTokenBalances ?? []
       const postBalances = meta.postTokenBalances ?? []
+      const ambiguousKeys = ambiguousBalanceKeys(payload, walletAddress)
       const preByKey = new Map(preBalances.map((balance) => [balanceKey(balance), balance]))
       const postByKey = new Map(postBalances.map((balance) => [balanceKey(balance), balance]))
       const keys = Array.from(new Set([...preByKey.keys(), ...postByKey.keys()]))
 
       return keys.flatMap((key, index) => {
+        if (ambiguousKeys.has(key)) return []
         const pre = preByKey.get(key)
         const post = postByKey.get(key)
         const balance = post ?? pre
@@ -1862,6 +1901,7 @@ const make = ({
             fromAddress: direction === "inbound" ? counterparty : walletAddress,
             toAddress: direction === "inbound" ? walletAddress : counterparty,
             role: "principal",
+            componentKey: `token_balance:${balance.accountIndex}:${balance.mint}`,
             position: offset + index,
             evidenceKind: "token_balance_delta",
             supplementalTransferRow: null,
@@ -1918,6 +1958,7 @@ const make = ({
             fromAddress: fromAddress ?? "solana:unknown_sender",
             toAddress: toAddress ?? "solana:unknown_recipient",
             role: "principal",
+            componentKey: null,
             position: offset + index,
             evidenceKind: "parsed_transfer",
             supplementalTransferRow: null,
@@ -1963,6 +2004,7 @@ const make = ({
             fromAddress: direction === "inbound" ? transfer.counterparty : walletAddress,
             toAddress: direction === "inbound" ? walletAddress : transfer.counterparty,
             role: "principal",
+            componentKey: null,
             position: offset + index,
             evidenceKind: "transfer_row",
             supplementalTransferRow: transfer,
@@ -2486,6 +2528,7 @@ const make = ({
     }
 
     const buildNormalizationReview = ({
+      walletAddress,
       principalId,
       payload,
       movements,
@@ -2497,7 +2540,15 @@ const make = ({
       readonly movements: ReadonlyArray<SolanaBalanceMovement>
       readonly contradictions: ReadonlyArray<MovementContradiction>
       readonly resolvedTransactionType: ResolvedProviderTransactionTypeMapping
+      readonly walletAddress: string
     }): SourceTransactionReviewDraft | null => {
+      if (payload.meta?.err === null && ambiguousBalanceKeys(payload, walletAddress).size > 0) {
+        return buildReview({
+          principalId,
+          reason: "ambiguous_movement_identity",
+          matchedLayer: "movement_identity",
+        })
+      }
       const hasUnresolvedAssets = movements.some(
         (movement) => movement.asset.kind === "review_required"
       )
@@ -2934,8 +2985,8 @@ const make = ({
               signature,
               timestamp,
               movement,
-              externalId: `${signature}:provider:${movement.role}:${movement.position}`,
-              canonicalTransferExternalId: `${signature}:${movement.role}:${movement.position}`,
+              externalId: `${canonicalMovementExternalId(signature, movement)}:provider`,
+              canonicalTransferExternalId: canonicalMovementExternalId(signature, movement),
               processingMode: hasObservedMatch ? "accounting_and_evidence" : "accounting_only",
               observedRepresentationIdentityKnown: true,
             })
@@ -2969,6 +3020,7 @@ const make = ({
           )
 
           const transactionReview = buildNormalizationReview({
+            walletAddress,
             principalId: source.principalId,
             payload,
             movements,
@@ -3056,9 +3108,13 @@ const make = ({
             }
 
             return Effect.succeed({
+              movementIdentity: plan.movementIdentity,
               sourceId: transfer.sourceId,
               sourceRawRecordId: transfer.sourceRawRecordId,
-              externalId: `${transfer.externalId ?? transfer.id}:leg`,
+              externalId:
+                plan.movementIdentity._tag === "identified"
+                  ? `${plan.movementIdentity.sourceRecordKey}:movement:${plan.movementIdentity.componentKey}:leg`
+                  : `${plan.transferExternalId}:unidentified_leg`,
               txHash: transfer.txHash,
               timestamp: transfer.timestamp,
               principalId: transaction.principalId,

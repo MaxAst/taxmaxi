@@ -28,6 +28,7 @@ const make = Effect.gen(function* () {
     readonly sourceId: string
   }) =>
     Effect.gen(function* () {
+      // Durable movement correction targets and history survive derived-row recreation.
       yield* tx
         .delete(schema.transactionLegs)
         .where(eq(schema.transactionLegs.sourceId, sourceId))

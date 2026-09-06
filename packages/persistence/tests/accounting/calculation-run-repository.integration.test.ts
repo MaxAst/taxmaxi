@@ -1,3 +1,4 @@
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { PgClient } from "@effect/sql-pg"
 import type { TaxAccountingResult } from "@my/accounting"
@@ -354,19 +355,24 @@ const seedAcquisitionFact = ({
       return yield* Effect.die("Failed to seed acquisition transaction")
     }
 
-    yield* db.insert(schema.transactionLegs).values({
-      id: eventId,
-      sourceId: TEST_SOURCE_ID,
-      externalId: `${externalId}-leg`,
-      timestamp: occurredAt,
-      principalId: TEST_PRINCIPAL_ID,
-      assetId: TEST_BTC_ASSET_ID,
-      amount: "1",
-      kind: "acquisition",
-      provenance: "deterministic",
-      originKind: "none" as const,
-      transactionId: transaction.id,
-    })
+    yield* db.insert(schema.transactionLegs).values(
+      yield* prepareMovementLegFixtures([
+        {
+          movementIdentity: { sourceRecordKey: `${externalId}-leg`, componentKey: "movement" },
+          id: eventId,
+          sourceId: TEST_SOURCE_ID,
+          externalId: `${externalId}-leg`,
+          timestamp: occurredAt,
+          principalId: TEST_PRINCIPAL_ID,
+          assetId: TEST_BTC_ASSET_ID,
+          amount: "1",
+          kind: "acquisition",
+          provenance: "deterministic",
+          originKind: "none" as const,
+          transactionId: transaction.id,
+        },
+      ])
+    )
   })
 
 const seedCalculationRunFixture = ({

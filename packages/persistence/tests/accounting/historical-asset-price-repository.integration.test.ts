@@ -1,3 +1,4 @@
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { PrincipalId } from "@my/core/ownership"
 import { eq } from "drizzle-orm"
@@ -82,63 +83,85 @@ describe("HistoricalAssetPriceRepositoryLive", () => {
         runPg(
           Effect.gen(function* () {
             const db = yield* drizzle
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                sourceId: TEST_ONCHAIN_SOURCE_ID,
-                externalId: "historical-price-acquisition",
-                timestamp: utcDate("2025-03-04T01:00:00.000Z"),
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "2",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-              },
-              {
-                sourceId: TEST_ONCHAIN_SOURCE_ID,
-                externalId: "historical-price-income-same-day",
-                timestamp: utcDate("2025-03-04T23:59:59.000Z"),
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "income",
-                provenance: "deterministic",
-                originKind: "none" as const,
-              },
-              {
-                sourceId: TEST_ONCHAIN_SOURCE_ID,
-                externalId: "historical-price-disposition",
-                timestamp: utcDate("2025-03-05T12:00:00.000Z"),
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-              },
-              {
-                sourceId: TEST_ONCHAIN_SOURCE_ID,
-                externalId: "historical-price-no-coin-id",
-                timestamp: utcDate("2025-03-04T12:00:00.000Z"),
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_EUR_ASSET_ID,
-                amount: "1",
-                kind: "fee",
-                provenance: "deterministic",
-                originKind: "none" as const,
-              },
-              {
-                sourceId: TEST_CEX_SOURCE_ID,
-                externalId: "historical-price-cex",
-                timestamp: utcDate("2025-03-06T12:00:00.000Z"),
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* prepareMovementLegFixtures([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "historical-price-acquisition",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_ONCHAIN_SOURCE_ID,
+                  externalId: "historical-price-acquisition",
+                  timestamp: utcDate("2025-03-04T01:00:00.000Z"),
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "2",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "historical-price-income-same-day",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_ONCHAIN_SOURCE_ID,
+                  externalId: "historical-price-income-same-day",
+                  timestamp: utcDate("2025-03-04T23:59:59.000Z"),
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "income",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "historical-price-disposition",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_ONCHAIN_SOURCE_ID,
+                  externalId: "historical-price-disposition",
+                  timestamp: utcDate("2025-03-05T12:00:00.000Z"),
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "historical-price-no-coin-id",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_ONCHAIN_SOURCE_ID,
+                  externalId: "historical-price-no-coin-id",
+                  timestamp: utcDate("2025-03-04T12:00:00.000Z"),
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_EUR_ASSET_ID,
+                  amount: "1",
+                  kind: "fee",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "historical-price-cex",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_CEX_SOURCE_ID,
+                  externalId: "historical-price-cex",
+                  timestamp: utcDate("2025-03-06T12:00:00.000Z"),
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                },
+              ])
+            )
             yield* db.insert(schema.assetPrices).values({
               assetId: TEST_BTC_ASSET_ID,
               timestamp: utcDate("2025-03-05T00:00:00.000Z"),

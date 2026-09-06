@@ -1,3 +1,4 @@
+import { prepareMovementLegFixtures } from "../../persistence/tests/support/movement-leg-fixtures.ts"
 import { nextTestUuid } from "./support/TestUuid.ts"
 import { HttpApiClient } from "effect/unstable/httpapi"
 import { Cookies, Headers, HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
@@ -641,40 +642,44 @@ const seedSourceReportRows = ({
       },
     ])
 
-    yield* db.insert(schema.transactionLegs).values([
-      {
-        id: reportFixtureIds.acquisitionLegId,
-        sourceId,
-        principalId,
-        externalId: "report-buy-1:btc",
-        timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-10T12:00:00.000Z")),
-        assetId: TEST_BTC_ASSET_ID,
-        amount: "1",
-        kind: "acquisition",
-        provenance: "deterministic",
-        originKind: "none" as const,
-        derivationRule: "test_fixture_buy",
-        transactionId: reportFixtureIds.buyTransactionId,
-        fiatAmount: "10000",
-        fiatCurrency: "EUR",
-      },
-      {
-        id: reportFixtureIds.disposalLegId,
-        sourceId,
-        principalId,
-        externalId: "report-sell-1:btc",
-        timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-10T12:00:00.000Z")),
-        assetId: TEST_BTC_ASSET_ID,
-        amount: "0.4",
-        kind: "disposal",
-        provenance: "deterministic",
-        originKind: "none" as const,
-        derivationRule: "test_fixture_sell",
-        transactionId: reportFixtureIds.sellTransactionId,
-        fiatAmount: "6000",
-        fiatCurrency: "EUR",
-      },
-    ])
+    yield* db.insert(schema.transactionLegs).values(
+      yield* prepareMovementLegFixtures([
+        {
+          movementIdentity: { sourceRecordKey: "report-buy-1:btc", componentKey: "movement" },
+          id: reportFixtureIds.acquisitionLegId,
+          sourceId,
+          principalId,
+          externalId: "report-buy-1:btc",
+          timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-10T12:00:00.000Z")),
+          assetId: TEST_BTC_ASSET_ID,
+          amount: "1",
+          kind: "acquisition",
+          provenance: "deterministic",
+          originKind: "none" as const,
+          derivationRule: "test_fixture_buy",
+          transactionId: reportFixtureIds.buyTransactionId,
+          fiatAmount: "10000",
+          fiatCurrency: "EUR",
+        },
+        {
+          movementIdentity: { sourceRecordKey: "report-sell-1:btc", componentKey: "movement" },
+          id: reportFixtureIds.disposalLegId,
+          sourceId,
+          principalId,
+          externalId: "report-sell-1:btc",
+          timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-10T12:00:00.000Z")),
+          assetId: TEST_BTC_ASSET_ID,
+          amount: "0.4",
+          kind: "disposal",
+          provenance: "deterministic",
+          originKind: "none" as const,
+          derivationRule: "test_fixture_sell",
+          transactionId: reportFixtureIds.sellTransactionId,
+          fiatAmount: "6000",
+          fiatCurrency: "EUR",
+        },
+      ])
+    )
   })
 
 const seedSourceReportActiveRun = ({
@@ -1231,19 +1236,27 @@ const seedClaimFactualRows = ({
       timestamp: occurredAt,
       transactionType: "buy_fiat",
     })
-    yield* db.insert(schema.transactionLegs).values({
-      id: acquisitionEventId,
-      sourceId,
-      principalId: anonymousPrincipalId,
-      transactionId,
-      externalId: `claim-graph-leg-${acquisitionEventId}`,
-      timestamp: occurredAt,
-      assetId,
-      amount: "1",
-      kind: "acquisition",
-      provenance: "deterministic",
-      originKind: "none" as const,
-    })
+    yield* db.insert(schema.transactionLegs).values(
+      yield* prepareMovementLegFixtures([
+        {
+          movementIdentity: {
+            sourceRecordKey: "claim-graph-record",
+            componentKey: "movement",
+          },
+          id: acquisitionEventId,
+          sourceId,
+          principalId: anonymousPrincipalId,
+          transactionId,
+          externalId: `claim-graph-leg-${acquisitionEventId}`,
+          timestamp: occurredAt,
+          assetId,
+          amount: "1",
+          kind: "acquisition",
+          provenance: "deterministic",
+          originKind: "none" as const,
+        },
+      ])
+    )
   })
 
 const seedClaimRunHistory = ({
@@ -1362,6 +1375,78 @@ const seedClaimActivePointers = ({
       },
     ])
   )
+
+const loadClaimMovementLinks = (sourceId: string) =>
+  Effect.flatMap(drizzle, (db) =>
+    db
+      .select({
+        legId: schema.transactionLegs.id,
+        targetId: schema.movementCorrectionTargets.id,
+        sourceRecordKey: schema.movementCorrectionTargets.sourceRecordKey,
+        componentKey: schema.movementCorrectionTargets.componentKey,
+        legPrincipalId: schema.transactionLegs.principalId,
+        targetPrincipalId: schema.movementCorrectionTargets.principalId,
+        sourcePrincipalId: schema.sources.principalId,
+      })
+      .from(schema.transactionLegs)
+      .innerJoin(
+        schema.movementCorrectionTargets,
+        eq(schema.movementCorrectionTargets.id, schema.transactionLegs.movementCorrectionTargetId)
+      )
+      .innerJoin(schema.sources, eq(schema.sources.id, schema.transactionLegs.sourceId))
+      .where(eq(schema.transactionLegs.sourceId, sourceId))
+      .orderBy(schema.transactionLegs.id)
+  )
+
+const assertClaimMovementOwnership = ({
+  sourceId,
+  anonymousPrincipalId,
+  principalId,
+  before,
+}: {
+  readonly sourceId: string
+  readonly anonymousPrincipalId: string
+  readonly principalId: string
+  readonly before: Effect.Success<ReturnType<typeof loadClaimMovementLinks>>
+}) =>
+  Effect.gen(function* () {
+    expect(before).toHaveLength(1)
+    expect(before[0]).toMatchObject({
+      legPrincipalId: anonymousPrincipalId,
+      targetPrincipalId: anonymousPrincipalId,
+      sourcePrincipalId: anonymousPrincipalId,
+    })
+    const after = yield* loadClaimMovementLinks(sourceId)
+    expect(after).toEqual(
+      before.map((link) => ({
+        ...link,
+        legPrincipalId: principalId,
+        targetPrincipalId: principalId,
+        sourcePrincipalId: principalId,
+      }))
+    )
+    const db = yield* drizzle
+    const oldPrincipalTargets = yield* db
+      .select({ id: schema.movementCorrectionTargets.id })
+      .from(schema.movementCorrectionTargets)
+      .where(
+        and(
+          eq(schema.movementCorrectionTargets.sourceId, sourceId),
+          eq(schema.movementCorrectionTargets.principalId, anonymousPrincipalId)
+        )
+      )
+    const oldPrincipalLegs = yield* db
+      .select({ id: schema.transactionLegs.id })
+      .from(schema.transactionLegs)
+      .where(
+        and(
+          eq(schema.transactionLegs.sourceId, sourceId),
+          eq(schema.transactionLegs.principalId, anonymousPrincipalId)
+        )
+      )
+    expect(oldPrincipalTargets).toEqual([])
+    expect(oldPrincipalLegs).toEqual([])
+  })
 
 const seedClaimCalculationGraph = ({
   anonymousPrincipalId,
@@ -1690,56 +1775,67 @@ const seedSourceReportTaxTreatmentRows = ({
       },
     ])
 
-    yield* db.insert(schema.transactionLegs).values([
-      {
-        id: reportFixtureIds.feeLegId,
-        sourceId,
-        principalId,
-        externalId: "report-fee-1:fee",
-        timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-10T12:00:00.000Z")),
-        assetId: TEST_BTC_ASSET_ID,
-        amount: "0.01",
-        kind: "fee",
-        provenance: "deterministic",
-        originKind: "none" as const,
-        derivationRule: "gas_fee",
-        transactionId: reportFixtureIds.feeTransactionId,
-        fiatAmount: "2",
-        fiatCurrency: "EUR",
-      },
-      {
-        id: reportFixtureIds.internalTransferLegId,
-        sourceId,
-        principalId,
-        externalId: "report-transfer-1:internal_transfer_out",
-        timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-11T12:00:00.000Z")),
-        assetId: TEST_BTC_ASSET_ID,
-        amount: "0.1",
-        kind: "disposal",
-        provenance: "deterministic",
-        originKind: "none" as const,
-        derivationRule: "internal_transfer_out",
-        transactionId: reportFixtureIds.internalTransferTransactionId,
-        fiatAmount: "500",
-        fiatCurrency: "EUR",
-      },
-      {
-        id: reportFixtureIds.internalTransferInLegId,
-        sourceId,
-        principalId,
-        externalId: "report-transfer-2:internal_transfer_in",
-        timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-12T12:00:00.000Z")),
-        assetId: TEST_BTC_ASSET_ID,
-        amount: "0.1",
-        kind: "acquisition",
-        provenance: "deterministic",
-        originKind: "none" as const,
-        derivationRule: "internal_transfer_in",
-        transactionId: reportFixtureIds.internalTransferInTransactionId,
-        fiatAmount: "500",
-        fiatCurrency: "EUR",
-      },
-    ])
+    yield* db.insert(schema.transactionLegs).values(
+      yield* prepareMovementLegFixtures([
+        {
+          movementIdentity: { sourceRecordKey: "report-fee-1:fee", componentKey: "movement" },
+          id: reportFixtureIds.feeLegId,
+          sourceId,
+          principalId,
+          externalId: "report-fee-1:fee",
+          timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-10T12:00:00.000Z")),
+          assetId: TEST_BTC_ASSET_ID,
+          amount: "0.01",
+          kind: "fee",
+          provenance: "deterministic",
+          originKind: "none" as const,
+          derivationRule: "gas_fee",
+          transactionId: reportFixtureIds.feeTransactionId,
+          fiatAmount: "2",
+          fiatCurrency: "EUR",
+        },
+        {
+          movementIdentity: {
+            sourceRecordKey: "report-transfer-1:internal_transfer_out",
+            componentKey: "movement",
+          },
+          id: reportFixtureIds.internalTransferLegId,
+          sourceId,
+          principalId,
+          externalId: "report-transfer-1:internal_transfer_out",
+          timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-11T12:00:00.000Z")),
+          assetId: TEST_BTC_ASSET_ID,
+          amount: "0.1",
+          kind: "disposal",
+          provenance: "deterministic",
+          originKind: "none" as const,
+          derivationRule: "internal_transfer_out",
+          transactionId: reportFixtureIds.internalTransferTransactionId,
+          fiatAmount: "500",
+          fiatCurrency: "EUR",
+        },
+        {
+          movementIdentity: {
+            sourceRecordKey: "report-transfer-2:internal_transfer_in",
+            componentKey: "movement",
+          },
+          id: reportFixtureIds.internalTransferInLegId,
+          sourceId,
+          principalId,
+          externalId: "report-transfer-2:internal_transfer_in",
+          timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-12T12:00:00.000Z")),
+          assetId: TEST_BTC_ASSET_ID,
+          amount: "0.1",
+          kind: "acquisition",
+          provenance: "deterministic",
+          originKind: "none" as const,
+          derivationRule: "internal_transfer_in",
+          transactionId: reportFixtureIds.internalTransferInTransactionId,
+          fiatAmount: "500",
+          fiatCurrency: "EUR",
+        },
+      ])
+    )
   })
 
 const seedDailyQuoteMonetaryRows = ({
@@ -1791,38 +1887,48 @@ const seedDailyQuoteMonetaryRows = ({
         transactionType: "sell_fiat",
       },
     ])
-    yield* db.insert(schema.transactionLegs).values([
-      {
-        id: acquisitionEventId,
-        sourceId,
-        principalId,
-        transactionId: acquisitionTransactionId,
-        externalId: "daily-quote-acquisition-leg",
-        timestamp: acquisitionAt,
-        assetId: TEST_BTC_ASSET_ID,
-        assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
-        sourceRepresentationUseId: sourceUse.id,
-        amount: "1",
-        kind: "acquisition",
-        provenance: "deterministic",
-        originKind: "none" as const,
-      },
-      {
-        id: dispositionEventId,
-        sourceId,
-        principalId,
-        transactionId: dispositionTransactionId,
-        externalId: "daily-quote-disposition-leg",
-        timestamp: dispositionAt,
-        assetId: TEST_BTC_ASSET_ID,
-        assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
-        sourceRepresentationUseId: sourceUse.id,
-        amount: "0.4",
-        kind: "disposal",
-        provenance: "deterministic",
-        originKind: "none" as const,
-      },
-    ])
+    yield* db.insert(schema.transactionLegs).values(
+      yield* prepareMovementLegFixtures([
+        {
+          movementIdentity: {
+            sourceRecordKey: "daily-quote-acquisition-leg",
+            componentKey: "movement",
+          },
+          id: acquisitionEventId,
+          sourceId,
+          principalId,
+          transactionId: acquisitionTransactionId,
+          externalId: "daily-quote-acquisition-leg",
+          timestamp: acquisitionAt,
+          assetId: TEST_BTC_ASSET_ID,
+          assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
+          sourceRepresentationUseId: sourceUse.id,
+          amount: "1",
+          kind: "acquisition",
+          provenance: "deterministic",
+          originKind: "none" as const,
+        },
+        {
+          movementIdentity: {
+            sourceRecordKey: "daily-quote-disposition-leg",
+            componentKey: "movement",
+          },
+          id: dispositionEventId,
+          sourceId,
+          principalId,
+          transactionId: dispositionTransactionId,
+          externalId: "daily-quote-disposition-leg",
+          timestamp: dispositionAt,
+          assetId: TEST_BTC_ASSET_ID,
+          assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
+          sourceRepresentationUseId: sourceUse.id,
+          amount: "0.4",
+          kind: "disposal",
+          provenance: "deterministic",
+          originKind: "none" as const,
+        },
+      ])
+    )
     yield* db.insert(schema.assetPrices).values([
       {
         assetId: TEST_BTC_ASSET_ID,
@@ -2011,6 +2117,11 @@ const makeEndToEndProviderRegistryLive = (taxYear: number) => {
         deriveLegs: ({ transaction }) =>
           Effect.succeed([
             {
+              movementIdentity: {
+                _tag: "identified" as const,
+                sourceRecordKey: `${event.externalRecordId}-leg`,
+                componentKey: "movement",
+              },
               sourceId: source.id,
               sourceRawRecordId: sourceRecord.id,
               externalId: `${event.externalRecordId}-leg`,
@@ -2622,22 +2733,30 @@ describe("SourcesApiLive", () => {
         providerStatus: "completed",
         providerDescription: "Grouped custody disposal",
       })
-      yield* db.insert(schema.transactionLegs).values({
-        id: reportFixtureIds.otherDisposalEventId,
-        sourceId: reportFixtureIds.otherSourceId,
-        principalId: fixture.principalId,
-        externalId: "report-other-source-disposal:btc",
-        timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-15T12:00:00.000Z")),
-        assetId: TEST_BTC_ASSET_ID,
-        amount: "0.1",
-        kind: "disposal",
-        provenance: "deterministic",
-        originKind: "none" as const,
-        derivationRule: "test_fixture_sell",
-        transactionId: reportFixtureIds.otherDisposalTransactionId,
-        fiatAmount: "1500",
-        fiatCurrency: "EUR",
-      })
+      yield* db.insert(schema.transactionLegs).values(
+        yield* prepareMovementLegFixtures([
+          {
+            movementIdentity: {
+              sourceRecordKey: "report-other-source-disposal:btc",
+              componentKey: "movement",
+            },
+            id: reportFixtureIds.otherDisposalEventId,
+            sourceId: reportFixtureIds.otherSourceId,
+            principalId: fixture.principalId,
+            externalId: "report-other-source-disposal:btc",
+            timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-15T12:00:00.000Z")),
+            assetId: TEST_BTC_ASSET_ID,
+            amount: "0.1",
+            kind: "disposal",
+            provenance: "deterministic",
+            originKind: "none" as const,
+            derivationRule: "test_fixture_sell",
+            transactionId: reportFixtureIds.otherDisposalTransactionId,
+            fiatAmount: "1500",
+            fiatCurrency: "EUR",
+          },
+        ])
+      )
       yield* db.insert(schema.calculationRunAllocations).values({
         runId: reportFixtureIds.activeCalculationRunId,
         principalId: fixture.principalId,
@@ -2873,40 +2992,50 @@ describe("SourcesApiLive", () => {
           providerDescription: "Unvalued disposal",
         },
       ])
-      yield* db.insert(schema.transactionLegs).values([
-        {
-          id: reportFixtureIds.incomeEventId,
-          sourceId: fixture.sourceId,
-          principalId: fixture.principalId,
-          externalId: "report-income-unvalued:btc",
-          timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-09T12:00:00.000Z")),
-          assetId: TEST_BTC_ASSET_ID,
-          amount: "0.01",
-          kind: "income",
-          provenance: "deterministic",
-          originKind: "none" as const,
-          derivationRule: "test_fixture_income",
-          transactionId: reportFixtureIds.incomeTransactionId,
-          fiatAmount: "777",
-          fiatCurrency: "EUR",
-        },
-        {
-          id: reportFixtureIds.unvaluedDisposalEventId,
-          sourceId: fixture.sourceId,
-          principalId: fixture.principalId,
-          externalId: "report-disposal-unvalued:btc",
-          timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-10T12:00:00.000Z")),
-          assetId: TEST_BTC_ASSET_ID,
-          amount: "0.2",
-          kind: "disposal",
-          provenance: "deterministic",
-          originKind: "none" as const,
-          derivationRule: "test_fixture_sell",
-          transactionId: reportFixtureIds.unvaluedDisposalTransactionId,
-          fiatAmount: "2000",
-          fiatCurrency: "EUR",
-        },
-      ])
+      yield* db.insert(schema.transactionLegs).values(
+        yield* prepareMovementLegFixtures([
+          {
+            movementIdentity: {
+              sourceRecordKey: "report-income-unvalued:btc",
+              componentKey: "movement",
+            },
+            id: reportFixtureIds.incomeEventId,
+            sourceId: fixture.sourceId,
+            principalId: fixture.principalId,
+            externalId: "report-income-unvalued:btc",
+            timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-09T12:00:00.000Z")),
+            assetId: TEST_BTC_ASSET_ID,
+            amount: "0.01",
+            kind: "income",
+            provenance: "deterministic",
+            originKind: "none" as const,
+            derivationRule: "test_fixture_income",
+            transactionId: reportFixtureIds.incomeTransactionId,
+            fiatAmount: "777",
+            fiatCurrency: "EUR",
+          },
+          {
+            movementIdentity: {
+              sourceRecordKey: "report-disposal-unvalued:btc",
+              componentKey: "movement",
+            },
+            id: reportFixtureIds.unvaluedDisposalEventId,
+            sourceId: fixture.sourceId,
+            principalId: fixture.principalId,
+            externalId: "report-disposal-unvalued:btc",
+            timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-10T12:00:00.000Z")),
+            assetId: TEST_BTC_ASSET_ID,
+            amount: "0.2",
+            kind: "disposal",
+            provenance: "deterministic",
+            originKind: "none" as const,
+            derivationRule: "test_fixture_sell",
+            transactionId: reportFixtureIds.unvaluedDisposalTransactionId,
+            fiatAmount: "2000",
+            fiatCurrency: "EUR",
+          },
+        ])
+      )
       yield* db.insert(schema.calculationRunAllocations).values({
         runId: reportFixtureIds.activeCalculationRunId,
         principalId: fixture.principalId,
@@ -3518,9 +3647,22 @@ describe("SourcesApiLive", () => {
         .update(schema.transactions)
         .set({ sourceId: reportFixtureIds.otherSourceId })
         .where(eq(schema.transactions.id, reportFixtureIds.sellTransactionId))
+      const [disposalTarget] = yield* db
+        .insert(schema.movementCorrectionTargets)
+        .values({
+          principalId: fixture.principalId,
+          sourceId: reportFixtureIds.otherSourceId,
+          sourceRecordKey: "grouped-report-disposal",
+          componentKey: "principal",
+        })
+        .returning({ id: schema.movementCorrectionTargets.id })
+      if (disposalTarget === undefined) return yield* Effect.die("Missing disposal movement target")
       yield* db
         .update(schema.transactionLegs)
-        .set({ sourceId: reportFixtureIds.otherSourceId })
+        .set({
+          sourceId: reportFixtureIds.otherSourceId,
+          movementCorrectionTargetId: disposalTarget.id,
+        })
         .where(eq(schema.transactionLegs.id, reportFixtureIds.disposalLegId))
       yield* db
         .update(schema.calculationRunRealizedResults)
@@ -3895,6 +4037,7 @@ describe("SourcesApiLive", () => {
         sourceId: created.source.id,
         targetPrincipalId: principalId,
       })
+      const movementLinksBefore = yield* loadClaimMovementLinks(created.source.id)
       const preClaimRevision = yield* captureClaimInputLedgerRevision({
         principalId: created.source.principalId,
       })
@@ -3910,6 +4053,12 @@ describe("SourcesApiLive", () => {
       })
 
       expect(claimResponse.sourceId).toBe(created.source.id)
+      yield* assertClaimMovementOwnership({
+        sourceId: created.source.id,
+        anonymousPrincipalId: created.source.principalId,
+        principalId,
+        before: movementLinksBefore,
+      })
 
       const sources = yield* authenticatedClient.sources.listSources()
       expect(sources.sources.map((source) => source.id)).toContain(created.source.id)
@@ -4380,6 +4529,7 @@ describe("SourcesApiLive", () => {
         sourceId: created.source.id,
         targetPrincipalId: principalId,
       })
+      const movementLinksBefore = yield* loadClaimMovementLinks(created.source.id)
       const preClaimRevision = yield* captureClaimInputLedgerRevision({
         principalId: created.source.principalId,
       })
@@ -4426,6 +4576,12 @@ describe("SourcesApiLive", () => {
       yield* removeClaimPointerPause
 
       expect(claimResponse.sourceId).toBe(created.source.id)
+      yield* assertClaimMovementOwnership({
+        sourceId: created.source.id,
+        anonymousPrincipalId: created.source.principalId,
+        principalId,
+        before: movementLinksBefore,
+      })
 
       const db = yield* drizzle
       const [storedSource] = yield* db

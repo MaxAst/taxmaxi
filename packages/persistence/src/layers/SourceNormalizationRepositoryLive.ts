@@ -25,6 +25,7 @@ import {
   type PersistedSourceTransfer,
   type SourceOnchainContextDraft,
   SourceNormalizationRepository,
+  SourceMovementIdentity,
   type SourceProviderAssetDecision,
   type SourceProviderAssetDecisionTarget,
   type SourceProviderAssetTransferCandidate,
@@ -54,6 +55,7 @@ import {
 } from "./PrincipalAssetOverrideDecisionLoader.ts"
 
 interface PersistedSourceLegRecord {
+  readonly movementCorrectionTargetId: string
   readonly id: string
   readonly sourceId: string
   readonly sourceRawRecordId: string | null
@@ -723,6 +725,7 @@ const make = Effect.gen(function* () {
   } as const
 
   const selectPersistedLegFields = {
+    movementCorrectionTargetId: schema.transactionLegs.movementCorrectionTargetId,
     id: schema.transactionLegs.id,
     sourceId: schema.transactionLegs.sourceId,
     sourceRawRecordId: schema.transactionLegs.sourceRawRecordId,
@@ -1547,6 +1550,55 @@ const make = Effect.gen(function* () {
       }))
     )
 
+  const recordMovementTarget = ({
+    executor,
+    leg,
+  }: {
+    readonly executor: SourceNormalizationExecutor
+    readonly leg: LinkedSourceTransactionLegDraft
+  }) =>
+    Effect.gen(function* () {
+      const identity = leg.movementIdentity
+      if (identity._tag !== "identified") {
+        return yield* toSyncEngineStorageError({
+          operation: "sourceNormalizationRepository.recordMovementTarget",
+          error: "An unidentified movement passed the transaction withholding check",
+        })
+      }
+      const target = schema.movementCorrectionTargets
+      yield* executor
+        .insert(target)
+        .values({
+          sourceId: leg.sourceId,
+          principalId: leg.principalId,
+          sourceRecordKey: identity.sourceRecordKey,
+          componentKey: identity.componentKey,
+        })
+        .onConflictDoNothing({
+          target: [target.sourceId, target.sourceRecordKey, target.componentKey],
+        })
+        .pipe(wrapSyncEngineSqlError("sourceNormalizationRepository.recordMovementTarget.insert"))
+      const [recorded] = yield* executor
+        .select({ id: target.id })
+        .from(target)
+        .where(
+          and(
+            eq(target.sourceId, leg.sourceId),
+            eq(target.principalId, leg.principalId),
+            eq(target.sourceRecordKey, identity.sourceRecordKey),
+            eq(target.componentKey, identity.componentKey)
+          )
+        )
+        .pipe(wrapSyncEngineSqlError("sourceNormalizationRepository.recordMovementTarget.read"))
+      if (recorded === undefined) {
+        return yield* toSyncEngineStorageError({
+          operation: "sourceNormalizationRepository.recordMovementTarget",
+          error: "The movement target does not belong to the leg's source and principal",
+        })
+      }
+      return recorded.id
+    })
+
   const upsertTransactionLegs = ({
     executor,
     legs,
@@ -1556,18 +1608,20 @@ const make = Effect.gen(function* () {
   }) =>
     Effect.forEach(legs, (leg) =>
       Effect.gen(function* () {
+        const movementCorrectionTargetId = yield* recordMovementTarget({ executor, leg })
         const now = nowDate()
         const [persisted] = yield* executor
           .insert(schema.transactionLegs)
           .values({
             ...leg,
+            movementCorrectionTargetId,
             createdAt: now,
             updatedAt: now,
           })
           .onConflictDoUpdate({
-            target: [schema.transactionLegs.sourceId, schema.transactionLegs.externalId],
-            targetWhere: sql`${schema.transactionLegs.externalId} is not null`,
+            target: schema.transactionLegs.movementCorrectionTargetId,
             set: {
+              externalId: sql.raw("excluded.external_id"),
               sourceRawRecordId: sql.raw("excluded.source_raw_record_id"),
               txHash: sql.raw("excluded.tx_hash"),
               timestamp: sql.raw("excluded.timestamp"),
@@ -2821,6 +2875,38 @@ const make = Effect.gen(function* () {
                   },
                 })
               : params.legs
+          // Validate producer facts before any accounting leg or inventory movement is written.
+          // Duplicate explicit components are ambiguous; rows are never matched to discover identity.
+          const movementKeys = new Map<string, Set<string>>()
+          let movementIdentityIssue:
+            | "missing_movement_identity"
+            | "ambiguous_movement_identity"
+            | null = null
+          for (const leg of derivedLegs) {
+            const decoded = Schema.decodeOption(SourceMovementIdentity)(leg.movementIdentity)
+            if (
+              Option.isNone(decoded) ||
+              leg.sourceId !== persistedTransaction.sourceId ||
+              leg.principalId !== persistedTransaction.principalId
+            ) {
+              movementIdentityIssue = "missing_movement_identity"
+              break
+            }
+            const identity = decoded.value
+            if (identity._tag === "unavailable") {
+              movementIdentityIssue = identity.reason
+              break
+            }
+            const components = movementKeys.get(identity.sourceRecordKey) ?? new Set<string>()
+            if (components.has(identity.componentKey)) {
+              movementIdentityIssue = "ambiguous_movement_identity"
+              break
+            }
+            components.add(identity.componentKey)
+            movementKeys.set(identity.sourceRecordKey, components)
+          }
+          if (movementIdentityIssue !== null) derivationTechnicalBlockers.push("malformed_movement")
+
           const derivedLegAssetRepresentationIds = derivedLegs.flatMap(
             ({ assetRepresentationId }) =>
               assetRepresentationId === null || assetRepresentationId === undefined
@@ -3048,7 +3134,22 @@ const make = Effect.gen(function* () {
           yield* upsertTransactionReview({
             executor: tx,
             transactionId: persistedTransaction.id,
-            transactionReview: technicalBlockerReview,
+            transactionReview:
+              movementIdentityIssue === null
+                ? technicalBlockerReview
+                : {
+                    principalId: persistedTransaction.principalId,
+                    reviewStatus: "needs_review",
+                    originalTypeKey: params.transaction.transactionType,
+                    originalConfidence: null,
+                    currentTypeKey: params.transaction.transactionType,
+                    legalRuleSetVersion: null,
+                    matchedLayer: "movement_identity",
+                    categorizationReason: movementIdentityIssue,
+                    needsReview: true,
+                    userNotes: technicalBlockerReview?.userNotes ?? null,
+                    reviewedAt: null,
+                  },
           })
           if (persistedTransaction.sourceRawRecordId !== null) {
             yield* tx

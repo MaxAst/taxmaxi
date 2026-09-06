@@ -1,3 +1,4 @@
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { asc, eq, inArray, sql } from "drizzle-orm"
 import * as Effect from "effect/Effect"
@@ -36,6 +37,7 @@ import {
   SourceSyncCreditExhaustedError,
   SyncEngineStorageError,
   type SourceTransactionReviewDraft,
+  type SourceMovementIdentity,
 } from "@my/sync-engine/services"
 import {
   CoinbaseLegDerivationServiceLive,
@@ -297,6 +299,8 @@ const seedAdditionalOverrideSource = ({
   })
 
 interface ExactOverrideArtifactOptions {
+  readonly movementIdentities?: ReadonlyArray<SourceMovementIdentity>
+  readonly movementKind?: "acquisition" | "fee"
   readonly beforePersist?: Effect.Effect<void>
   readonly sourceId?: string
   readonly cexAccountId?: string
@@ -319,6 +323,8 @@ const persistExactOverrideArtifact = ({
   providerObservedRepresentationType = "token",
   sourceRawRecordId = null,
   beforePersist,
+  movementIdentities,
+  movementKind = "acquisition",
 }: ExactOverrideArtifactOptions & {
   readonly externalId: string
   readonly fixture: SyncEngineRepositoryFixture
@@ -415,31 +421,41 @@ const persistExactOverrideArtifact = ({
             ]
           : [],
         providerAssetRowIds: [],
-        legs: [
-          {
-            sourceId,
-            sourceRawRecordId,
-            externalId: `${externalId}-leg`,
-            txHash: null,
-            timestamp: occurredAt,
-            principalId,
-            addressId: null,
-            assetId: inputAssetId,
-            assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
-            amount: "1",
-            kind: "acquisition",
-            provenance: "deterministic",
-            derivationRule: "exact_override_fixture",
-            metadata: { evidence: externalId },
-            transactionId: null,
-            originKind: "none" as const,
-            providerTransferId: null,
-            sourceTransferId: null,
-            fiatAmount: null,
-            fiatCurrency: null,
-            feeForTransactionId: null,
-          },
-        ],
+        deriveLegs: ({ transaction }) =>
+          Effect.succeed(
+            (
+              movementIdentities ?? [
+                {
+                  _tag: "identified",
+                  sourceRecordKey: `${externalId}-leg`,
+                  componentKey: "movement",
+                },
+              ]
+            ).map((movementIdentity, index) => ({
+              movementIdentity,
+              sourceId,
+              sourceRawRecordId,
+              externalId: index === 0 ? `${externalId}-leg` : `${externalId}-leg-${index}`,
+              txHash: null,
+              timestamp: occurredAt,
+              principalId,
+              addressId: null,
+              assetId: inputAssetId,
+              assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
+              amount: "1",
+              kind: movementKind,
+              provenance: "deterministic" as const,
+              derivationRule: "exact_override_fixture",
+              metadata: { evidence: externalId },
+              transactionId: movementKind === "fee" ? transaction.id : null,
+              originKind: "none" as const,
+              providerTransferId: null,
+              sourceTransferId: null,
+              fiatAmount: null,
+              fiatCurrency: null,
+              feeForTransactionId: movementKind === "fee" ? transaction.id : null,
+            }))
+          ),
         transactionReview: null,
         resolvedTransactionType: APPROVED_MAPPING,
       })
@@ -558,6 +574,11 @@ const persistExactOverrideCallbackArtifact = ({
 
           return Effect.succeed([
             {
+              movementIdentity: {
+                _tag: "identified" as const,
+                sourceRecordKey: externalId,
+                componentKey: "principal",
+              },
               sourceId,
               sourceRawRecordId: null,
               externalId: `${externalId}-leg`,
@@ -1058,6 +1079,12 @@ const persistCoinbaseNormalization = ({
                     ? [
                         ...legs,
                         {
+                          movementIdentity: {
+                            _tag: "identified" as const,
+                            sourceRecordKey:
+                              sourceRecord.externalRecordId ?? "originless-sibling-fixture",
+                            componentKey: "movement",
+                          },
                           sourceId: transaction.sourceId,
                           sourceRawRecordId: transaction.sourceRawRecordId,
                           externalId: `${transaction.externalId ?? transaction.id}:unrelated`,
@@ -1516,6 +1543,11 @@ describe("SourceNormalizationRepositoryLive", () => {
                 yield* afterProviderDecision
               }
               return legs.map((leg) => ({
+                movementIdentity: {
+                  _tag: "identified" as const,
+                  sourceRecordKey: leg.externalId,
+                  componentKey: "movement",
+                },
                 sourceId,
                 sourceRawRecordId: null,
                 externalId: leg.externalId,
@@ -1709,6 +1741,11 @@ describe("SourceNormalizationRepositoryLive", () => {
 
               return [
                 {
+                  movementIdentity: {
+                    _tag: "identified" as const,
+                    sourceRecordKey: `${externalId}-principal-leg`,
+                    componentKey: "movement",
+                  },
                   sourceId: TEST_SOURCE_ID,
                   sourceRawRecordId: null,
                   externalId: `${externalId}-principal-leg`,
@@ -1733,6 +1770,11 @@ describe("SourceNormalizationRepositoryLive", () => {
                   feeForTransactionId: null,
                 },
                 {
+                  movementIdentity: {
+                    _tag: "identified" as const,
+                    sourceRecordKey: `${externalId}-fee-leg`,
+                    componentKey: "movement",
+                  },
                   sourceId: TEST_SOURCE_ID,
                   sourceRawRecordId: null,
                   externalId: `${externalId}-fee-leg`,
@@ -7563,20 +7605,28 @@ describe("SourceNormalizationRepositoryLive", () => {
             })
             const [feeLeg] = yield* db
               .insert(schema.transactionLegs)
-              .values({
-                sourceId: TEST_SOURCE_ID,
-                sourceRawRecordId: TEST_RAW_RECORD_ID,
-                externalId: feeLegExternalId,
-                timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-02T10:00:00.000Z")),
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.10000000",
-                kind: "fee",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: oldTransactionId,
-                feeForTransactionId: oldTransactionId,
-              })
+              .values(
+                yield* prepareMovementLegFixtures([
+                  {
+                    movementIdentity: {
+                      sourceRecordKey: feeLegExternalId,
+                      componentKey: "movement",
+                    },
+                    sourceId: TEST_SOURCE_ID,
+                    sourceRawRecordId: TEST_RAW_RECORD_ID,
+                    externalId: feeLegExternalId,
+                    timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-02T10:00:00.000Z")),
+                    principalId: TEST_PRINCIPAL_ID,
+                    assetId: TEST_BTC_ASSET_ID,
+                    amount: "0.10000000",
+                    kind: "fee",
+                    provenance: "deterministic",
+                    originKind: "none" as const,
+                    transactionId: oldTransactionId,
+                    feeForTransactionId: oldTransactionId,
+                  },
+                ])
+              )
               .returning({ id: schema.transactionLegs.id })
 
             if (feeLeg === undefined) {
@@ -7649,6 +7699,11 @@ describe("SourceNormalizationRepositoryLive", () => {
               deriveLegs: ({ transaction }) =>
                 Effect.succeed([
                   {
+                    movementIdentity: {
+                      _tag: "identified" as const,
+                      sourceRecordKey: feeLegExternalId,
+                      componentKey: "movement",
+                    },
                     sourceId: TEST_SOURCE_ID,
                     sourceRawRecordId: newRawRecordId,
                     externalId: feeLegExternalId,
@@ -7891,5 +7946,156 @@ describe("SourceNormalizationRepositoryLive", () => {
         },
       ])
     })
+  )
+  it.effect("records distinct same-token fee components and retains them through replay", () =>
+    Effect.gen(function* () {
+      const occurredAt = DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-01T00:00:00.000Z"))
+      const movementIdentities: ReadonlyArray<SourceMovementIdentity> = [
+        {
+          _tag: "identified",
+          sourceRecordKey: "synthetic-two-fees",
+          componentKey: "network.transaction_fee",
+        },
+        { _tag: "identified", sourceRecordKey: "synthetic-two-fees", componentKey: "commission" },
+      ]
+      const persist = () =>
+        persistExactOverrideArtifact({
+          externalId: "synthetic-two-fees",
+          fixture,
+          occurredAt,
+          movementIdentities,
+          movementKind: "fee",
+          includeCanonicalTransfer: false,
+        })
+      const first = yield* Effect.promise(persist)
+      expect(first.legs).toHaveLength(2)
+      expect(new Set(first.legs.map((leg) => leg.movementCorrectionTargetId)).size).toBe(2)
+      yield* Effect.promise(() =>
+        runReplayRepository(
+          Effect.flatMap(SourceReplayRepository, (repository) =>
+            repository.resetSourceDerivedState({ sourceId: TEST_SOURCE_ID })
+          )
+        )
+      )
+      const replayed = yield* Effect.promise(persist)
+      expect(replayed.legs.map((leg) => leg.movementCorrectionTargetId)).toEqual(
+        first.legs.map((leg) => leg.movementCorrectionTargetId)
+      )
+      expect(replayed.legs.every((leg) => first.legs.every((old) => old.id !== leg.id))).toBe(true)
+    })
+  )
+
+  it.effect(
+    "withholds duplicate explicit producer components and preserves unrelated records",
+    () =>
+      Effect.gen(function* () {
+        const occurredAt = DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-01T00:00:00.000Z"))
+        const identity: SourceMovementIdentity = {
+          _tag: "identified",
+          sourceRecordKey: "synthetic-ambiguous",
+          componentKey: "amount",
+        }
+        const result = yield* Effect.promise(() =>
+          persistExactOverrideArtifact({
+            externalId: "synthetic-ambiguous",
+            fixture,
+            occurredAt,
+            movementIdentities: [identity, identity],
+          })
+        )
+        expect(result.legs).toHaveLength(0)
+        const review = yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({ reason: schema.transactionReviews.categorizationReason })
+                .from(schema.transactionReviews)
+                .where(eq(schema.transactionReviews.transactionId, result.transaction.id))
+            })
+          )
+        )
+        expect(review).toEqual([{ reason: "ambiguous_movement_identity" }])
+        const next = yield* Effect.promise(() =>
+          persistExactOverrideArtifact({ externalId: "synthetic-unrelated", fixture, occurredAt })
+        )
+        expect(next.legs).toHaveLength(1)
+      })
+  )
+
+  it.effect(
+    "rejects foreign-owned target links and retains targets when source deletion is attempted",
+    () =>
+      Effect.gen(function* () {
+        const occurredAt = DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-01T00:00:00.000Z"))
+        yield* Effect.promise(() =>
+          persistExactOverrideArtifact({
+            externalId: "synthetic-owned-target",
+            fixture,
+            occurredAt,
+          })
+        )
+        const foreignPrincipalId = "00000000-0000-4000-8000-000000008501"
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db
+                .insert(schema.principals)
+                .values({ id: foreignPrincipalId, kind: "anonymous_wallet" })
+            })
+          )
+        )
+        const targetOwnerChange = yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .update(schema.movementCorrectionTargets)
+                .set({ principalId: foreignPrincipalId })
+                .where(eq(schema.movementCorrectionTargets.sourceId, TEST_SOURCE_ID))
+                .pipe(Effect.exit)
+            })
+          )
+        )
+        expect(targetOwnerChange._tag).toBe("Failure")
+        const legOwnerChange = yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .update(schema.transactionLegs)
+                .set({ principalId: foreignPrincipalId })
+                .where(eq(schema.transactionLegs.sourceId, TEST_SOURCE_ID))
+                .pipe(Effect.exit)
+            })
+          )
+        )
+        expect(legOwnerChange._tag).toBe("Failure")
+        const sourceDeletion = yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .delete(schema.sources)
+                .where(eq(schema.sources.id, TEST_SOURCE_ID))
+                .pipe(Effect.exit)
+            })
+          )
+        )
+        expect(sourceDeletion._tag).toBe("Failure")
+        const targetCount = yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({ id: schema.movementCorrectionTargets.id })
+                .from(schema.movementCorrectionTargets)
+                .where(eq(schema.movementCorrectionTargets.sourceId, TEST_SOURCE_ID))
+            })
+          )
+        )
+        expect(targetCount).toHaveLength(1)
+      })
   )
 })

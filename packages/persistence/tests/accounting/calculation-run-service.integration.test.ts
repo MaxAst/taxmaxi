@@ -1,3 +1,4 @@
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { JurisdictionCode, TaxYear } from "@my/core/accounting"
 import { CurrencyCode } from "@my/core/currency"
@@ -151,47 +152,61 @@ describe("CalculationRunServiceLive", () => {
               return yield* Effect.die("Failed to create staking calculation transactions")
             }
 
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                id: stakingEventId,
-                sourceId: SOURCE_ID,
-                externalId: "coinbase-staking-payout-leg",
-                timestamp: transactionInputs[0].timestamp,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "income",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: stakingTransactionId,
-              },
-              {
-                id: saleEventId,
-                sourceId: SOURCE_ID,
-                externalId: "coinbase-staking-sale-leg",
-                timestamp: transactionInputs[1].timestamp,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.5",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: saleTransactionId,
-              },
-              {
-                id: missingValueEventId,
-                sourceId: SOURCE_ID,
-                externalId: "coinbase-interest-without-value-leg",
-                timestamp: transactionInputs[2].timestamp,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.25",
-                kind: "income",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: missingValueTransactionId,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* prepareMovementLegFixtures([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "coinbase-staking-payout-leg",
+                    componentKey: "movement",
+                  },
+                  id: stakingEventId,
+                  sourceId: SOURCE_ID,
+                  externalId: "coinbase-staking-payout-leg",
+                  timestamp: transactionInputs[0].timestamp,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "income",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: stakingTransactionId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "coinbase-staking-sale-leg",
+                    componentKey: "movement",
+                  },
+                  id: saleEventId,
+                  sourceId: SOURCE_ID,
+                  externalId: "coinbase-staking-sale-leg",
+                  timestamp: transactionInputs[1].timestamp,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.5",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: saleTransactionId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "coinbase-interest-without-value-leg",
+                    componentKey: "movement",
+                  },
+                  id: missingValueEventId,
+                  sourceId: SOURCE_ID,
+                  externalId: "coinbase-interest-without-value-leg",
+                  timestamp: transactionInputs[2].timestamp,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.25",
+                  kind: "income",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: missingValueTransactionId,
+                },
+              ])
+            )
           })
         )
       )
@@ -307,19 +322,27 @@ describe("CalculationRunServiceLive", () => {
               .returning({ id: schema.transactions.id })
             if (transaction === undefined) return yield* Effect.die("Failed to create fact")
 
-            yield* db.insert(schema.transactionLegs).values({
-              sourceId: SOURCE_ID,
-              externalId: "override-revision-input-leg",
-              timestamp: occurredAt,
-              principalId: PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
-              amount: "1",
-              kind: "acquisition",
-              provenance: "deterministic",
-              originKind: "none" as const,
-              transactionId: transaction.id,
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* prepareMovementLegFixtures([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "override-revision-input-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: SOURCE_ID,
+                  externalId: "override-revision-input-leg",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                },
+              ])
+            )
 
             const [target] = yield* db
               .insert(schema.principalAssetOverrideTargets)
@@ -480,19 +503,27 @@ describe("CalculationRunServiceLive", () => {
                 .returning({ id: schema.transactions.id })
               if (transaction === undefined) return yield* Effect.die("Failed to create fact")
 
-              yield* db.insert(schema.transactionLegs).values({
-                sourceId: SOURCE_ID,
-                externalId: "provider-override-revision-input-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                metadata: { providerAssetRowId: PROVIDER_ASSET_ROW_ID },
-                transactionId: transaction.id,
-              })
+              yield* db.insert(schema.transactionLegs).values(
+                yield* prepareMovementLegFixtures([
+                  {
+                    movementIdentity: {
+                      sourceRecordKey: "provider-override-revision-input-leg",
+                      componentKey: "movement",
+                    },
+                    sourceId: SOURCE_ID,
+                    externalId: "provider-override-revision-input-leg",
+                    timestamp: occurredAt,
+                    principalId: PRINCIPAL_ID,
+                    assetId: TEST_BTC_ASSET_ID,
+                    amount: "1",
+                    kind: "acquisition",
+                    provenance: "deterministic",
+                    originKind: "none" as const,
+                    metadata: { providerAssetRowId: PROVIDER_ASSET_ROW_ID },
+                    transactionId: transaction.id,
+                  },
+                ])
+              )
 
               const [target] = yield* db
                 .insert(schema.principalAssetOverrideTargets)

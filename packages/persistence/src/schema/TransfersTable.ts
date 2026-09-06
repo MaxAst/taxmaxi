@@ -131,7 +131,8 @@ export const transfers = pgTable(
       .on(table.sourceId, table.externalId)
       .where(sql`${table.externalId} is not null`),
 
-    // Unique constraint for idempotent processing - prevents duplicate transfers on retry
+    // Transfers without an explicit external identity retain the existing shape guard.
+    // Identified producer components use source/external uniqueness, including equal siblings.
     uniqueIndex("idx_transfers_unique")
       .on(
         table.txHash,
@@ -143,7 +144,7 @@ export const transfers = pgTable(
         table.assetRepresentationId
       )
       .where(
-        sql`${table.txHash} is not null and ${table.addressId} is not null and ${table.fromAddress} is not null and ${table.toAddress} is not null`
+        sql`${table.externalId} is null and ${table.txHash} is not null and ${table.addressId} is not null and ${table.fromAddress} is not null and ${table.toAddress} is not null`
       ),
 
     index("idx_transfers_source_timestamp").on(table.sourceId, table.timestamp),

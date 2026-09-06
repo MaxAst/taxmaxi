@@ -1,3 +1,4 @@
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { PgClient } from "@effect/sql-pg"
 import { eq } from "drizzle-orm"
 import * as DateTime from "effect/DateTime"
@@ -74,6 +75,11 @@ const makeLeg = ({
   readonly assetRepresentationId?: string
   readonly externalId?: string
 } = {}) => ({
+  movementIdentity: {
+    _tag: "identified" as const,
+    sourceRecordKey: externalId,
+    componentKey: "movement",
+  },
   sourceId: TEST_SOURCE_ID,
   sourceRawRecordId: null,
   externalId,
@@ -130,10 +136,12 @@ describe("principal asset override fact pairs", () => {
             const [leg] = yield* db
               .insert(schema.transactionLegs)
               .values(
-                makeLeg({
-                  assetId: TEST_EUR_ASSET_ID,
-                  externalId: "override-pair-leg",
-                })
+                yield* prepareMovementLegFixtures([
+                  makeLeg({
+                    assetId: TEST_EUR_ASSET_ID,
+                    externalId: "override-pair-leg",
+                  }),
+                ])
               )
               .returning({
                 assetId: schema.transactionLegs.assetId,
@@ -176,7 +184,11 @@ describe("principal asset override fact pairs", () => {
             const db = yield* drizzle
             yield* db
               .insert(schema.transactionLegs)
-              .values(makeLeg({ assetId, assetRepresentationId, externalId }))
+              .values(
+                yield* prepareMovementLegFixtures([
+                  makeLeg({ assetId, assetRepresentationId, externalId }),
+                ])
+              )
           })
         )
 

@@ -126,6 +126,11 @@ describe("SourceReplayRepositoryLive", () => {
               providerAssetRowIds: [],
               legs: [
                 {
+                  movementIdentity: {
+                    _tag: "identified" as const,
+                    sourceRecordKey: "leg-replay-1",
+                    componentKey: "movement",
+                  },
                   sourceId: TEST_SOURCE_ID,
                   sourceRawRecordId: TEST_RAW_RECORD_ID,
                   externalId: "leg-replay-1",

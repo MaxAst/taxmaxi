@@ -1,3 +1,14 @@
+import * as DateTime from "effect/DateTime"
+import { SourceNormalizationRepository, SourceReplayRepository } from "@my/sync-engine/services"
+import { SourceNormalizationRepositoryLive } from "../../../persistence/src/layers/SourceNormalizationRepositoryLive.ts"
+import { SourceReplayRepositoryLive } from "../../../persistence/src/layers/SourceReplayRepositoryLive.ts"
+import {
+  TEST_SOURCE_ID,
+  TEST_PRINCIPAL_ID,
+  seedSyncEngineRepositoryFixture,
+} from "../../../persistence/tests/support/integration-test-kit.ts"
+import { HeliusSolanaSourceSyncProviderFromClientAndAssetResolutionLive } from "../../src/providers/helius-solana/layers/HeliusSolanaSourceSyncProviderLive.ts"
+import { HeliusSolanaSourceSyncProvider } from "../../src/providers/helius-solana/services/HeliusSolanaSourceSyncProvider.ts"
 import { SOLANA_USDC_MINT, SOLANA_USDT_MINT, SOLANA_WRAPPED_NATIVE_MINT } from "@my/core/assets"
 import { and, eq, inArray, sql } from "drizzle-orm"
 import * as Effect from "effect/Effect"
@@ -1452,5 +1463,338 @@ describe("HeliusSolanaAssetResolutionServiceLive", () => {
           mappingStatus: "approved",
         })
       })
+  )
+})
+
+describe("Helius movement target persistence and replay", () => {
+  const wallet = "11111111111111111111111111111111ab"
+  const addressId = "00000000-0000-4000-8000-000000007501"
+  const time = DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-01T00:00:00.000Z"))
+  const client = Layer.succeed(HeliusSolanaSyncClient, {
+    fetchTransactionsForAddress: () => Effect.die("Cached normalization must not fetch history"),
+    fetchTransfersForAddress: () => Effect.die("Cached normalization must not fetch transfers"),
+    fetchAssetBatch: () =>
+      Effect.succeed({
+        result: [
+          makeDasAsset({
+            mintAddress: SOLANA_USDC_MINT,
+            symbol: "USDC",
+            name: "USD Coin",
+            decimals: 6,
+          }),
+        ],
+      }),
+  })
+  const assets = HeliusSolanaAssetResolutionServiceLive.pipe(
+    Layer.provide(AssetRepositoryLive),
+    Layer.provide(AssetResolutionJobRepositoryLive),
+    Layer.provide(ProviderAssetRepositoryLive),
+    Layer.provide(client)
+  )
+  const provider = HeliusSolanaSourceSyncProviderFromClientAndAssetResolutionLive.pipe(
+    Layer.provide(assets),
+    Layer.provide(client),
+    Layer.provide(AssetRepositoryLive),
+    Layer.provide(ProviderAssetRepositoryLive)
+  )
+  const layer = Layer.mergeAll(
+    provider,
+    SourceNormalizationRepositoryLive,
+    SourceReplayRepositoryLive
+  )
+
+  const run = <A, E>(
+    effect: Effect.Effect<
+      A,
+      E,
+      HeliusSolanaSourceSyncProvider | SourceNormalizationRepository | SourceReplayRepository
+    >
+  ) => Effect.runPromise(context.runWithLayer({ effect, layer }))
+
+  const normalize = ({
+    recordKey,
+    order = [1, 2],
+    parsed = false,
+    amounts,
+  }: {
+    readonly recordKey: string
+    readonly order?: ReadonlyArray<number>
+    readonly parsed?: boolean
+    readonly amounts?: ReadonlyArray<string>
+  }) =>
+    run(
+      Effect.gen(function* () {
+        const provider = yield* HeliusSolanaSourceSyncProvider
+        const repository = yield* SourceNormalizationRepository
+        const balances = order.map((accountIndex, index) => ({
+          accountIndex,
+          mint: SOLANA_USDC_MINT,
+          owner: wallet,
+          uiTokenAmount: {
+            amount: amounts?.[index] ?? "1000000",
+            decimals: 6,
+            uiAmount: 1,
+            uiAmountString: "1",
+          },
+        }))
+        const prepared = yield* provider.prepareNormalization({
+          source: {
+            id: TEST_SOURCE_ID,
+            principalId: TEST_PRINCIPAL_ID,
+            providerKey: "helius-solana",
+            cexAccountId: null,
+            addressId,
+            walletAddress: wallet,
+          },
+          sourceRecord: {
+            id: "00000000-0000-4000-8000-000000007502",
+            sourceId: TEST_SOURCE_ID,
+            provider: "helius-solana",
+            recordType: "solana_transaction_full",
+            externalAccountId: wallet,
+            externalRecordId: recordKey,
+            externalParentId: null,
+            occurredAt: time,
+            importedAt: time,
+            normalizedAt: null,
+            normalizationError: null,
+            createdAt: time,
+            updatedAt: time,
+            payload: {
+              fullTransaction: {
+                slot: 1,
+                transaction: {
+                  signatures: [recordKey],
+                  message: { accountKeys: [wallet, "token-account-one", "token-account-two"] },
+                },
+                blockTime: 1735689600,
+                meta: {
+                  err: null,
+                  fee: 5000,
+                  preBalances: [1000000000, 0, 0],
+                  postBalances: [999995000, 0, 0],
+                  preTokenBalances: [],
+                  postTokenBalances: parsed ? [] : balances,
+                },
+                ...(parsed
+                  ? {
+                      tokenTransfers: [
+                        {
+                          mint: SOLANA_USDC_MINT,
+                          tokenAmount: "1",
+                          fromUserAccount: "external",
+                          toUserAccount: wallet,
+                        },
+                      ],
+                    }
+                  : {}),
+              },
+              walletTransferEvidence: [],
+            },
+          },
+          lookups: yield* provider.loadNormalizationLookups,
+        })
+        return yield* repository.persistNormalizedArtifacts({
+          transaction: { ...prepared.transaction, sourceRawRecordId: null },
+          venueContext: prepared.venueContext,
+          onchainContext: prepared.onchainContext,
+          canonicalTransfers: prepared.canonicalTransfers.map((transfer) => ({
+            ...transfer,
+            sourceRawRecordId: null,
+          })),
+          providerTransfers: prepared.providerTransfers.map((transfer) => ({
+            ...transfer,
+            sourceRawRecordId: null,
+          })),
+          providerAssetRowIds: prepared.providerAssetRowIds,
+          transactionReview: prepared.transactionReview,
+          resolvedTransactionType: prepared.resolvedTransactionType,
+          deriveLegs: ({ transaction, venueContext, canonicalTransfers }) =>
+            prepared.legDerivationStrategy === "skip"
+              ? Effect.succeed([])
+              : provider.deriveLegs({
+                  transaction,
+                  venueContext,
+                  canonicalTransfers,
+                  legPlans: prepared.legPlans,
+                }),
+        })
+      })
+    )
+
+  const links = () =>
+    context.runPg(
+      Effect.gen(function* () {
+        const db = yield* drizzle
+        return yield* db
+          .select({
+            legId: schema.transactionLegs.id,
+            targetId: schema.movementCorrectionTargets.id,
+            recordKey: schema.movementCorrectionTargets.sourceRecordKey,
+            component: schema.movementCorrectionTargets.componentKey,
+          })
+          .from(schema.transactionLegs)
+          .innerJoin(
+            schema.movementCorrectionTargets,
+            eq(
+              schema.transactionLegs.movementCorrectionTargetId,
+              schema.movementCorrectionTargets.id
+            )
+          )
+          .where(eq(schema.transactionLegs.sourceId, TEST_SOURCE_ID))
+          .orderBy(schema.movementCorrectionTargets.componentKey)
+      })
+    )
+
+  beforeEach(() =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        yield* context.recreateTestDatabase()
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              yield* resetAssetResolutionFixture
+              yield* seedSyncEngineRepositoryFixture()
+              const db = yield* drizzle
+              yield* db.insert(schema.addresses).values({
+                id: addressId,
+                address: wallet,
+                principalId: TEST_PRINCIPAL_ID,
+                type: "solana",
+                name: "Synthetic target wallet",
+              })
+              yield* db
+                .update(schema.sources)
+                .set({
+                  sourceableType: "onchain",
+                  addressId,
+                  cexAccountId: null,
+                  providerKey: "helius-solana",
+                })
+                .where(eq(schema.sources.id, TEST_SOURCE_ID))
+            })
+          )
+        )
+        yield* Effect.promise(() =>
+          run(
+            Effect.flatMap(
+              HeliusSolanaSourceSyncProvider,
+              (provider) => provider.refreshReferenceData
+            )
+          )
+        )
+      })
+    )
+  )
+
+  it.effect(
+    "keeps equal-token components distinct through reordered normalization, replay, and disappearance",
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => normalize({ recordKey: "synthetic-components" }))
+        const first = yield* Effect.promise(links)
+        expect(first).toHaveLength(3)
+        expect(new Set(first.map((row) => row.targetId)).size).toBe(3)
+        expect(first.map((row) => row.component)).toEqual([
+          "meta.fee",
+          `token_balance:1:${SOLANA_USDC_MINT}`,
+          `token_balance:2:${SOLANA_USDC_MINT}`,
+        ])
+        yield* Effect.promise(() => normalize({ recordKey: "synthetic-components", order: [2, 1] }))
+        expect(yield* Effect.promise(links)).toEqual(first)
+        yield* Effect.promise(() =>
+          run(
+            Effect.flatMap(SourceReplayRepository, (repository) =>
+              repository.resetSourceDerivedState({ sourceId: TEST_SOURCE_ID })
+            )
+          )
+        )
+        yield* Effect.promise(() => normalize({ recordKey: "synthetic-components", order: [2, 1] }))
+        const replayed = yield* Effect.promise(links)
+        expect(replayed.map(({ targetId }) => targetId)).toEqual(
+          first.map(({ targetId }) => targetId)
+        )
+        expect(replayed.every((row) => first.every((old) => old.legId !== row.legId))).toBe(true)
+        yield* Effect.promise(() =>
+          run(
+            Effect.flatMap(SourceReplayRepository, (repository) =>
+              repository.resetSourceDerivedState({ sourceId: TEST_SOURCE_ID })
+            )
+          )
+        )
+        yield* Effect.promise(() => normalize({ recordKey: "synthetic-components", order: [1] }))
+        expect(yield* Effect.promise(links)).toHaveLength(2)
+        const targets = yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({ id: schema.movementCorrectionTargets.id })
+                .from(schema.movementCorrectionTargets)
+                .where(eq(schema.movementCorrectionTargets.sourceId, TEST_SOURCE_ID))
+            })
+          )
+        )
+        expect(targets).toHaveLength(3)
+      })
+  )
+
+  it.effect(
+    "withholds an unidentified parsed movement with a review while the next source record continues",
+    () =>
+      Effect.gen(function* () {
+        const withheld = yield* Effect.promise(() =>
+          normalize({ recordKey: "synthetic-no-component", parsed: true })
+        )
+        expect(withheld.legs).toHaveLength(0)
+        const review = yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({
+                  reason: schema.transactionReviews.categorizationReason,
+                  needsReview: schema.transactionReviews.needsReview,
+                })
+                .from(schema.transactionReviews)
+                .where(eq(schema.transactionReviews.transactionId, withheld.transaction.id))
+            })
+          )
+        )
+        expect(review).toEqual([{ reason: "missing_movement_identity", needsReview: true }])
+        const next = yield* Effect.promise(() => normalize({ recordKey: "synthetic-next-record" }))
+        expect(next.legs).toHaveLength(3)
+        expect(yield* Effect.promise(links)).toHaveLength(3)
+      })
+  )
+  it.effect("withholds repeated source-native components instead of merging their identity", () =>
+    Effect.gen(function* () {
+      for (const amounts of [
+        ["1000000", "1000000"],
+        ["1000000", "0"],
+        ["0", "1000000"],
+      ]) {
+        const result = yield* Effect.promise(() =>
+          normalize({
+            recordKey: `synthetic-duplicate-component-${amounts.join("-")}`,
+            order: [1, 1],
+            amounts,
+          })
+        )
+        expect(result.legs).toHaveLength(0)
+        const review = yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({ reason: schema.transactionReviews.categorizationReason })
+                .from(schema.transactionReviews)
+                .where(eq(schema.transactionReviews.transactionId, result.transaction.id))
+            })
+          )
+        )
+        expect(review).toEqual([{ reason: "ambiguous_movement_identity" }])
+      }
+    })
   )
 })

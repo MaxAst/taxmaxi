@@ -13,6 +13,7 @@ import type {
   PersistedSourceTransfer,
   PersistedSourceVenueContext,
   SourceLegKind,
+  SourceMovementIdentity,
   SourceProviderTransferDraft,
   SourceTransactionDraft,
   SourceTransactionLegDraft,
@@ -72,6 +73,7 @@ export interface PrepareHeliusSolanaNormalizationParams {
  * persisted transfer row to its accounting leg.
  */
 export interface HeliusSolanaCanonicalLegPlan {
+  readonly movementIdentity: SourceMovementIdentity
   readonly transferExternalId: string
   readonly kind: SourceLegKind
   readonly role: "principal" | "fee" | "rent"
