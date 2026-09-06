@@ -66,19 +66,41 @@ export const MarketQuoteFact = Schema.TaggedStruct("market_quote", {
 /** The MarketQuoteFact type. */
 export type MarketQuoteFact = typeof MarketQuoteFact.Type
 
+/** Resolved non-negative total supplied by a user for exactly one accounting event. */
+export const UserValuationFact = Schema.TaggedStruct("user_valuation", {
+  eventId: AccountingEventId,
+  amount: SupportedFiatMonetaryAmount.check(
+    Schema.makeFilter((amount) =>
+      amount.isNegative ? "User valuation must not be negative." : undefined
+    )
+  ),
+  evidenceReference: NonEmptyString,
+}).annotate({
+  identifier: "UserValuationFact",
+  title: "User Valuation Fact",
+  description: "Resolved exact user-supplied total; zero is known valuation, not missing evidence",
+})
+
+/** The UserValuationFact type. */
+export type UserValuationFact = typeof UserValuationFact.Type
+
 /**
  * Money evidence available to the accounting engine for one event.
  *
- * Provider-observed consideration and estimated market quotes remain distinct
- * so the engine can prefer the observation and explain the source it used. A
+ * User valuation, provider-observed consideration and market quotes remain distinct.
+ * A single user valuation wins; otherwise the engine prefers provider evidence. A
  * stored amount that was calculated from a quote is not observed consideration.
- * When an event needs money and has neither kind, the engine returns a
+ * When an event needs money and has none of these facts, the engine returns a
  * machine-readable blocker and never substitutes zero.
  */
-export const ValuationFact = Schema.Union([ObservedConsiderationFact, MarketQuoteFact]).annotate({
+export const ValuationFact = Schema.Union([
+  ObservedConsiderationFact,
+  MarketQuoteFact,
+  UserValuationFact,
+]).annotate({
   identifier: "ValuationFact",
   title: "Valuation Fact",
-  description: "Observed consideration or a market quote for one accounting event",
+  description: "User valuation, observed consideration or market quote for one accounting event",
 })
 
 /** The ValuationFact type. */

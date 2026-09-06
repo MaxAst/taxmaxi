@@ -9,6 +9,7 @@ import {
   type AccountingEvent as AccountingEventType,
   type ValuationFact as ValuationFactType,
 } from "@my/core/accounting"
+import * as BigDecimal from "effect/BigDecimal"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import { calculate } from "../src/index.ts"
@@ -63,6 +64,45 @@ const runCalculation = ({
     accountingChoices: choices,
     valuationFacts,
   })
+
+const userValuation = ({
+  eventId,
+  amount,
+  currency = "EUR",
+  reference = "synthetic-user-evidence",
+}: {
+  readonly eventId: string
+  readonly amount: string
+  readonly currency?: string
+  readonly reference?: string
+}) =>
+  decodeValuationFact({
+    _tag: "user_valuation",
+    eventId,
+    amount: { amount, currency },
+    evidenceReference: reference,
+  })
+
+const purchaseAndSale = (quantity = "10") => [
+  decodeEvent({
+    _tag: "acquisition",
+    id: ACQUISITION_ONE,
+    occurredAt: { epochMillis: 1_000 },
+    assetId: ASSET_ID,
+    quantity,
+    custodySourceId: SOURCE_ONE,
+    cause: "purchase",
+  }),
+  decodeEvent({
+    _tag: "disposition",
+    id: DISPOSITION,
+    occurredAt: { epochMillis: 2_000 },
+    assetId: ASSET_ID,
+    quantity,
+    custodySourceId: SOURCE_ONE,
+    cause: "sale",
+  }),
+]
 
 describe("calculate", () => {
   it.effect("sorts the ledger and matches same-unit lots FIFO", () =>
@@ -1152,5 +1192,329 @@ describe("calculate", () => {
         value: "average_cost",
       })
     })
+  )
+  it.effect(
+    "uses resolved user totals before provider and market values while preserving evidence kinds",
+    () =>
+      Effect.gen(function* () {
+        const ledger = purchaseAndSale()
+        const provider = decodeValuationFact({
+          _tag: "observed_consideration",
+          eventId: ACQUISITION_ONE,
+          amount: { amount: "99", currency: "EUR" },
+          evidenceReference: "synthetic-provider",
+        })
+        const market = decodeValuationFact({
+          _tag: "market_quote",
+          eventId: ACQUISITION_ONE,
+          unitPrice: { amount: "100", currency: "EUR" },
+          quotedAt: { epochMillis: 1_000 },
+          source: "synthetic-market",
+        })
+        const sale = decodeValuationFact({
+          _tag: "observed_consideration",
+          eventId: DISPOSITION,
+          amount: { amount: "30", currency: "EUR" },
+          evidenceReference: "synthetic-sale",
+        })
+        const unknown = yield* runCalculation({ ledger, valuationFacts: [sale] })
+        expect(unknown.status).toBe("partial")
+        expect(unknown.allocations[0]?.costBasis).toBeNull()
+        for (const { basis, gain } of [
+          { basis: "20", gain: "10" },
+          { basis: "30", gain: "0" },
+        ]) {
+          const valuationFacts = [
+            market,
+            userValuation({ eventId: ACQUISITION_ONE, amount: basis }),
+            provider,
+            sale,
+          ]
+          const result = yield* runCalculation({ ledger, valuationFacts })
+          expect(result.status).toBe("complete")
+          expect(result.realizedResults[0]?.costBasis.format()).toBe(basis)
+          expect(result.realizedResults[0]?.gainLoss.format()).toBe(gain)
+          expect(result.explanationTrace).toContainEqual(
+            expect.objectContaining({ eventId: ACQUISITION_ONE, valuationKind: "user_valuation" })
+          )
+          expect(result.explanationTrace).toContainEqual(
+            expect.objectContaining({
+              eventId: DISPOSITION,
+              valuationKind: "observed_consideration",
+            })
+          )
+          const reordered = yield* runCalculation({
+            ledger,
+            valuationFacts: [...valuationFacts].reverse(),
+          })
+          expect(reordered.status).toBe(result.status)
+          expect(reordered.explanationTrace).toEqual(result.explanationTrace)
+          expect(reordered.realizedResults[0]?.costBasis.format()).toBe(basis)
+          expect(reordered.realizedResults[0]?.gainLoss.format()).toBe(gain)
+        }
+        if (provider._tag === "observed_consideration") expect(provider.amount.format()).toBe("99")
+        expect(unknown.allocations[0]?.costBasis).toBeNull()
+      })
+  )
+
+  it.effect(
+    "blocks ambiguous user facts even when they agree and lower-priority evidence is available",
+    () =>
+      Effect.gen(function* () {
+        const ledger = purchaseAndSale("1")
+        const first = userValuation({
+          eventId: ACQUISITION_ONE,
+          amount: "1",
+          reference: "synthetic-a",
+        })
+        const second = userValuation({
+          eventId: ACQUISITION_ONE,
+          amount: "1",
+          reference: "synthetic-b",
+        })
+        const provider = decodeValuationFact({
+          _tag: "observed_consideration",
+          eventId: ACQUISITION_ONE,
+          amount: { amount: "10", currency: "EUR" },
+          evidenceReference: "synthetic-provider",
+        })
+        const sale = userValuation({ eventId: DISPOSITION, amount: "2" })
+        const result = yield* runCalculation({
+          ledger,
+          valuationFacts: [first, provider, sale, second],
+        })
+        expect(result.status).toBe("partial")
+        expect(result.blockers.map((blocker) => blocker.code)).toEqual(["ambiguous_valuation"])
+        expect(result.allocations[0]?.costBasis).toBeNull()
+        expect(result.realizedResults).toEqual([])
+        expect(
+          yield* runCalculation({ ledger, valuationFacts: [second, sale, provider, first] })
+        ).toEqual(result)
+      })
+  )
+
+  it.effect("retains zero, large and tiny user amounts through sale without relabelling them", () =>
+    Effect.gen(function* () {
+      for (const values of [
+        { basis: "0", proceeds: "1", gain: "1" },
+        { basis: "9007199254740993", proceeds: "9007199254740995", gain: "2" },
+        {
+          basis: "0.000000000000000001",
+          proceeds: "0.000000000000000002",
+          gain: "0.000000000000000001",
+        },
+      ]) {
+        const result = yield* runCalculation({
+          ledger: purchaseAndSale("1"),
+          valuationFacts: [
+            userValuation({ eventId: ACQUISITION_ONE, amount: values.basis }),
+            userValuation({ eventId: DISPOSITION, amount: values.proceeds }),
+          ],
+        })
+        expect(result.status).toBe("complete")
+        expect(result.realizedResults[0]?.costBasis.format()).toBe(
+          BigDecimal.format(BigDecimal.fromStringUnsafe(values.basis))
+        )
+        expect(result.realizedResults[0]?.proceeds.format()).toBe(
+          BigDecimal.format(BigDecimal.fromStringUnsafe(values.proceeds))
+        )
+        expect(result.realizedResults[0]?.gainLoss.format()).toBe(
+          BigDecimal.format(BigDecimal.fromStringUnsafe(values.gain))
+        )
+      }
+    })
+  )
+
+  it.effect("uses authoritative user totals for indivisible unit prices", () =>
+    Effect.gen(function* () {
+      const result = yield* runCalculation({
+        ledger: purchaseAndSale("3"),
+        valuationFacts: [
+          userValuation({ eventId: ACQUISITION_ONE, amount: "1" }),
+          userValuation({ eventId: DISPOSITION, amount: "2" }),
+        ],
+      })
+      expect(result.realizedResults[0]?.costBasis.format()).toBe("1")
+      expect(result.realizedResults[0]?.proceeds.format()).toBe("2")
+      expect(result.realizedResults[0]?.gainLoss.format()).toBe("1")
+    })
+  )
+
+  it.effect("keeps currency mismatch blocked without falling back from user evidence", () =>
+    Effect.gen(function* () {
+      const result = yield* runCalculation({
+        ledger: purchaseAndSale("1"),
+        valuationFacts: [
+          userValuation({ eventId: ACQUISITION_ONE, amount: "1", currency: "USD" }),
+          userValuation({ eventId: DISPOSITION, amount: "2" }),
+          decodeValuationFact({
+            _tag: "observed_consideration",
+            eventId: ACQUISITION_ONE,
+            amount: { amount: "1", currency: "EUR" },
+            evidenceReference: "synthetic-provider",
+          }),
+        ],
+      })
+      expect(result.status).toBe("partial")
+      expect(result.blockers.map((blocker) => blocker.code)).toEqual([
+        "valuation_currency_mismatch",
+      ])
+      expect(result.realizedResults).toEqual([])
+    })
+  )
+  it.effect("conserves a user basis remainder through partial disposals and custody splits", () =>
+    Effect.gen(function* () {
+      const movementId = "99999999-9999-4999-8999-999999999999"
+      const lastSaleId = "aaaaaaaa-1111-4111-8111-111111111111"
+      const acquisition = decodeEvent({
+        _tag: "acquisition",
+        id: ACQUISITION_ONE,
+        occurredAt: { epochMillis: 1_000 },
+        assetId: ASSET_ID,
+        quantity: "3",
+        custodySourceId: SOURCE_ONE,
+        cause: "purchase",
+      })
+      for (const withCustody of [false, true]) {
+        const movement = decodeEvent({
+          _tag: "custody_movement",
+          id: movementId,
+          occurredAt: { epochMillis: 2_000 },
+          assetId: ASSET_ID,
+          quantity: "2",
+          fromCustodySourceId: SOURCE_ONE,
+          toCustodySourceId: SOURCE_TWO,
+        })
+        const sales = [DISPOSITION, PRIOR_DISPOSITION, lastSaleId].map((id, index) =>
+          decodeEvent({
+            _tag: "disposition",
+            id,
+            occurredAt: { epochMillis: 3_000 + index * 1_000 },
+            assetId: ASSET_ID,
+            quantity: "1",
+            custodySourceId: withCustody && index > 0 ? SOURCE_TWO : SOURCE_ONE,
+            cause: "sale",
+          })
+        )
+        const facts = [
+          userValuation({ eventId: ACQUISITION_ONE, amount: "1" }),
+          ...sales.map((sale) => userValuation({ eventId: sale.id, amount: "1" })),
+        ]
+        const result = yield* runCalculation({
+          ledger: [acquisition, ...(withCustody ? [movement] : []), ...sales],
+          valuationFacts: facts,
+        })
+        expect(result.status).toBe("complete")
+        expect(result.realizedResults.map((row) => row.costBasis.format())).toEqual([
+          "3.33333333333333333e-1",
+          "3.33333333333333334e-1",
+          "3.33333333333333333e-1",
+        ])
+        expect(result.derivedLots).toEqual([])
+        const basis = result.realizedResults.reduce(
+          (total, row) => BigDecimal.sum(total, row.costBasis.amount),
+          BigDecimal.fromBigInt(0n)
+        )
+        expect(BigDecimal.equals(basis, BigDecimal.fromBigInt(1n))).toBe(true)
+        const open = yield* runCalculation({
+          ledger: [acquisition, ...(withCustody ? [movement] : [])],
+          valuationFacts: facts,
+        })
+        expect(open.derivedLots.every((lot) => !Object.hasOwn(lot, "userBasis"))).toBe(true)
+      }
+    })
+  )
+
+  it.effect(
+    "conserves user proceeds across FIFO matches and leaves shortage proceeds unmatched",
+    () =>
+      Effect.gen(function* () {
+        const thirdId = "aaaaaaaa-1111-4111-8111-111111111111"
+        const acquisitions = [ACQUISITION_ONE, ACQUISITION_TWO, thirdId].map((id, index) =>
+          decodeEvent({
+            _tag: "acquisition",
+            id,
+            occurredAt: { epochMillis: 1_000 + index * 1_000 },
+            assetId: ASSET_ID,
+            quantity: "1",
+            custodySourceId: SOURCE_ONE,
+            cause: "purchase",
+          })
+        )
+        const sale = decodeEvent({
+          _tag: "disposition",
+          id: DISPOSITION,
+          occurredAt: { epochMillis: 4_000 },
+          assetId: ASSET_ID,
+          quantity: "3",
+          custodySourceId: SOURCE_ONE,
+          cause: "sale",
+        })
+        const valuationFacts = [
+          ...acquisitions.map((event) => userValuation({ eventId: event.id, amount: "0" })),
+          userValuation({ eventId: DISPOSITION, amount: "1" }),
+        ]
+        const full = yield* runCalculation({ ledger: [...acquisitions, sale], valuationFacts })
+        expect(full.status).toBe("complete")
+        expect(full.realizedResults.map((row) => row.proceeds.format())).toEqual([
+          "3.33333333333333333e-1",
+          "3.33333333333333334e-1",
+          "3.33333333333333333e-1",
+        ])
+        const short = yield* runCalculation({
+          ledger: [...acquisitions.slice(0, 2), sale],
+          valuationFacts,
+        })
+        expect(short.status).toBe("partial")
+        expect(short.blockers.map((blocker) => blocker.code)).toEqual(["inventory_shortage"])
+        expect(short.realizedResults.map((row) => row.proceeds.format())).toEqual([
+          "3.33333333333333333e-1",
+          "3.33333333333333334e-1",
+        ])
+      })
+  )
+
+  it.effect(
+    "retains user precision beyond eighteen fractional places and rounds a half away from zero",
+    () =>
+      Effect.gen(function* () {
+        const precise = yield* runCalculation({
+          ledger: purchaseAndSale("3"),
+          valuationFacts: [
+            userValuation({ eventId: ACQUISITION_ONE, amount: "0.000000000000000000001" }),
+            userValuation({ eventId: DISPOSITION, amount: "0.000000000000000000002" }),
+          ],
+        })
+        expect(precise.realizedResults[0]?.costBasis.format()).toBe("1e-21")
+        expect(precise.realizedResults[0]?.proceeds.format()).toBe("2e-21")
+        const acquisition = decodeEvent({
+          _tag: "acquisition",
+          id: ACQUISITION_ONE,
+          occurredAt: { epochMillis: 1_000 },
+          assetId: ASSET_ID,
+          quantity: "2",
+          custodySourceId: SOURCE_ONE,
+          cause: "purchase",
+        })
+        const sales = [DISPOSITION, PRIOR_DISPOSITION].map((id, index) =>
+          decodeEvent({
+            _tag: "disposition",
+            id,
+            occurredAt: { epochMillis: 2_000 + index * 1_000 },
+            assetId: ASSET_ID,
+            quantity: "1",
+            custodySourceId: SOURCE_ONE,
+            cause: "sale",
+          })
+        )
+        const result = yield* runCalculation({
+          ledger: [acquisition, ...sales],
+          valuationFacts: [
+            userValuation({ eventId: ACQUISITION_ONE, amount: "0.000000000000000001" }),
+            ...sales.map((event) => userValuation({ eventId: event.id, amount: "0" })),
+          ],
+        })
+        expect(result.realizedResults.map((row) => row.costBasis.format())).toEqual(["1e-18", "0"])
+      })
   )
 })

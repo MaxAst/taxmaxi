@@ -176,11 +176,24 @@ const utcDay = (date: Date): string => date.toISOString().slice(0, 10)
 const utcDayStart = (day: string): Date =>
   DateTime.toDateUtc(DateTime.makeUnsafe(`${day}T00:00:00.000Z`))
 
+const VALUATION_FACT_ORDER = {
+  user_valuation: 0,
+  observed_consideration: 1,
+  market_quote: 2,
+} satisfies Record<ValuationFact["_tag"], number>
+
 const compareValuationFacts = (left: ValuationFact, right: ValuationFact): number => {
   const eventOrder = left.eventId.localeCompare(right.eventId)
   if (eventOrder !== 0) return eventOrder
+  if (left._tag === "user_valuation" && right._tag === "user_valuation") {
+    return (
+      left.evidenceReference.localeCompare(right.evidenceReference) ||
+      left.amount.currency.localeCompare(right.amount.currency) ||
+      left.amount.format().localeCompare(right.amount.format())
+    )
+  }
   if (left._tag === right._tag) return 0
-  return left._tag === "observed_consideration" ? -1 : 1
+  return VALUATION_FACT_ORDER[left._tag] - VALUATION_FACT_ORDER[right._tag]
 }
 
 type FactDecisionOutcome =

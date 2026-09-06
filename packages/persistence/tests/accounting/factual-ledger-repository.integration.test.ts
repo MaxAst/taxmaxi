@@ -2260,7 +2260,7 @@ describe("FactualLedgerRepositoryLive", () => {
 
       expect(
         result.valuationFacts.map((fact) =>
-          fact._tag === "observed_consideration"
+          fact._tag === "observed_consideration" || fact._tag === "user_valuation"
             ? {
                 type: fact._tag,
                 eventId: fact.eventId,
