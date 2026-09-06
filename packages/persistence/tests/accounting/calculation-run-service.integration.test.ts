@@ -193,6 +193,206 @@ beforeEach(() =>
 
 describe("CalculationRunServiceLive", () => {
   it.effect(
+    "captures the consumed custody event through the corrected leg's exact reconciliation links",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => runPg(seedCorrectionMovement))
+        yield* Effect.promise(() => recompute(FIRST_RUN_ID))
+        const before = yield* Effect.promise(() => readCorrectionInputs(FIRST_RUN_ID))
+        const reconciliationId = "00000000-0000-4000-8000-000000000987"
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              const otherSourceId = "00000000-0000-4000-8000-000000000988"
+              const canonicalUseId = "00000000-0000-4000-8000-000000000989"
+              const providerUseId = "00000000-0000-4000-8000-000000000990"
+              const [address] = yield* db
+                .insert(schema.addresses)
+                .values({
+                  principalId: PRINCIPAL_ID,
+                  address: "synthetic-custody-address",
+                  name: "Synthetic custody source",
+                  type: "bitcoin",
+                })
+                .returning({ id: schema.addresses.id })
+              if (address === undefined) return yield* Effect.die("Missing synthetic address")
+              yield* db.insert(schema.sources).values({
+                id: otherSourceId,
+                principalId: PRINCIPAL_ID,
+                name: "Synthetic custody source",
+                sourceableType: "onchain",
+                addressId: address.id,
+              })
+              const [representation] = yield* db
+                .select({
+                  blockchainId: schema.assetRepresentations.blockchainId,
+                  representationType: schema.assetRepresentations.type,
+                  contractAddress: schema.assetRepresentations.contractAddress,
+                  mintAddress: schema.assetRepresentations.mintAddress,
+                })
+                .from(schema.assetRepresentations)
+                .where(eq(schema.assetRepresentations.id, TEST_BTC_REPRESENTATION_ID))
+              if (representation === undefined)
+                return yield* Effect.die("Missing synthetic representation")
+              yield* db.insert(schema.sourceRepresentationUses).values([
+                { id: canonicalUseId, sourceId: SOURCE_ID, ...representation },
+                { id: providerUseId, sourceId: otherSourceId, ...representation },
+              ])
+              const [transaction] = yield* db
+                .insert(schema.transactions)
+                .values({
+                  sourceId: otherSourceId,
+                  principalId: PRINCIPAL_ID,
+                  externalId: "synthetic-custody-provider",
+                  timestamp: fixture.draft.inspectedOccurredAt,
+                  transactionType: "internal_transfer",
+                })
+                .returning({ id: schema.transactions.id })
+              if (transaction === undefined)
+                return yield* Effect.die("Missing synthetic custody transaction")
+              const [provider] = yield* db
+                .insert(schema.providerTransfers)
+                .values({
+                  sourceId: otherSourceId,
+                  transactionId: transaction.id,
+                  externalId: "synthetic-custody-provider-transfer",
+                  timestamp: fixture.draft.inspectedOccurredAt,
+                  direction: "inbound",
+                  processingMode: "accounting_only",
+                  fromAccountRef: "synthetic-origin",
+                  toAccountRef: "synthetic-destination",
+                  sourceRepresentationUseId: providerUseId,
+                  amount: "3",
+                })
+                .returning({ id: schema.providerTransfers.id })
+              const [canonical] = yield* db
+                .insert(schema.transfers)
+                .values({
+                  sourceId: SOURCE_ID,
+                  principalId: PRINCIPAL_ID,
+                  externalId: "synthetic-custody-canonical-transfer",
+                  timestamp: fixture.draft.inspectedOccurredAt,
+                  type: "cex",
+                  fromAccountRef: "synthetic-origin",
+                  toAccountRef: "synthetic-destination",
+                  assetId: TEST_BTC_ASSET_ID,
+                  assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
+                  sourceRepresentationUseId: canonicalUseId,
+                  amount: "3",
+                })
+                .returning({ id: schema.transfers.id })
+              if (provider === undefined || canonical === undefined)
+                return yield* Effect.die("Missing synthetic custody transfers")
+              yield* db.insert(schema.inventoryMovements).values({
+                principalId: PRINCIPAL_ID,
+                sourceId: otherSourceId,
+                transactionId: transaction.id,
+                providerTransferId: provider.id,
+                assetId: TEST_BTC_ASSET_ID,
+                timestamp: fixture.draft.inspectedOccurredAt,
+                direction: "inbound",
+                purpose: "principal",
+                taxTreatment: "non_taxable",
+                reconciliationStatus: "matched",
+                amount: "3",
+              })
+              const laterProviderTime = DateTime.toDateUtc(
+                DateTime.makeUnsafe("2026-01-01T00:00:00Z")
+              )
+              const [providerLeg] = yield* db
+                .insert(schema.transactionLegs)
+                .values(
+                  yield* prepareMovementLegFixtures([
+                    {
+                      movementIdentity: {
+                        sourceRecordKey: "synthetic-custody-provider",
+                        componentKey: "principal",
+                      },
+                      sourceId: otherSourceId,
+                      principalId: PRINCIPAL_ID,
+                      externalId: "synthetic-custody-provider-leg",
+                      transactionId: transaction.id,
+                      timestamp: laterProviderTime,
+                      assetId: TEST_BTC_ASSET_ID,
+                      amount: "3",
+                      kind: "acquisition",
+                      provenance: "deterministic",
+                      originKind: "provider_transfer",
+                      providerTransferId: provider.id,
+                      sourceRepresentationUseId: providerUseId,
+                    },
+                  ])
+                )
+                .returning({ targetId: schema.transactionLegs.movementCorrectionTargetId })
+              if (providerLeg === undefined)
+                return yield* Effect.die("Missing synthetic provider leg")
+              yield* db.insert(schema.principalTransactionOverrides).values({
+                ...fixture.draft,
+                sourceId: otherSourceId,
+                targetId: providerLeg.targetId,
+                inspectedSourceRecordKey: "synthetic-custody-provider",
+                inspectedOccurredAt: laterProviderTime,
+              })
+              yield* db.insert(schema.transferReconciliations).values({
+                id: reconciliationId,
+                principalId: PRINCIPAL_ID,
+                providerTransferId: provider.id,
+                canonicalTransferId: canonical.id,
+                canonicalTransactionId: fixture.transactionId,
+                status: "approved",
+                matchReason: "Synthetic approved custody",
+                confidence: "1",
+                deterministic: true,
+              })
+              yield* db
+                .update(schema.transactionLegs)
+                .set({
+                  originKind: "canonical_transfer",
+                  sourceTransferId: canonical.id,
+                  sourceRepresentationUseId: canonicalUseId,
+                })
+                .where(eq(schema.transactionLegs.id, fixture.legId))
+            })
+          )
+        )
+        yield* Effect.promise(() => recompute(SECOND_RUN_ID))
+        const inputs = yield* Effect.promise(() => readCorrectionInputs(SECOND_RUN_ID))
+        expect(inputs).toHaveLength(2)
+        const after = inputs.find(({ captured }) => captured.history.id === fixture.historyId)
+        const providerCapture = inputs.find(
+          ({ captured }) => captured.current?.originKind === "provider_transfer"
+        )
+        expect(providerCapture?.captured).toMatchObject({
+          currentOutcome: "included",
+          current: { effectiveAssetId: TEST_BTC_ASSET_ID, occurredAt: "2026-01-01T00:00:00.000Z" },
+          system: { event: { id: reconciliationId, _tag: "custody_movement" } },
+        })
+        expect(after?.captured).toMatchObject({
+          currentOutcome: "included",
+          application: "not_applied",
+          current: {
+            legId: fixture.legId,
+            targetId: fixture.targetId,
+            structure: "custody",
+            effectiveAssetId: TEST_BTC_ASSET_ID,
+          },
+          system: {
+            event: {
+              _tag: "custody_movement",
+              id: reconciliationId,
+              assetId: TEST_BTC_ASSET_ID,
+            },
+            valuationFacts: [],
+          },
+        })
+        expect(storedDecimalEquals(after?.captured.system.event?.quantity, "3")).toBe(true)
+        expect(after?.captured.effective).toEqual(after?.captured.system)
+        expect(yield* Effect.promise(() => readCorrectionInputs(FIRST_RUN_ID))).toEqual(before)
+      })
+  )
+
+  it.effect(
     "captures independent inactive history and changes revision for equal-valued replacement without applying it",
     () =>
       Effect.gen(function* () {

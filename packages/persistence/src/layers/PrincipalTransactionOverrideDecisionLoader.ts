@@ -87,14 +87,14 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
     reportingCurrency,
     occurredBefore,
     legContexts,
-    events,
+    eventsByTarget,
     valuationFacts,
   }: {
     readonly principalId: PrincipalId
     readonly reportingCurrency: CurrencyCode
     readonly occurredBefore: Date | undefined
     readonly legContexts: ReadonlyArray<MovementCorrectionLegContext>
-    readonly events: ReadonlyArray<AccountingEvent>
+    readonly eventsByTarget: ReadonlyMap<string, AccountingEvent>
     readonly valuationFacts: ReadonlyArray<ValuationFact>
   }) =>
     Effect.gen(function* () {
@@ -127,7 +127,6 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
           asc(schema.principalTransactionOverrides.id)
         )
       const contextByTarget = new Map(legContexts.map((context) => [context.targetId, context]))
-      const eventById = new Map<string, AccountingEvent>(events.map((event) => [event.id, event]))
       const valuationsByEvent = new Map<string, ValuationFact[]>()
       for (const fact of valuationFacts) {
         const existing = valuationsByEvent.get(fact.eventId)
@@ -140,13 +139,14 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
       const captured: CalculationRunCorrectionInput[] = []
       for (const row of rows) {
         const current = contextByTarget.get(row.targetId) ?? null
+        const event = current === null ? undefined : eventsByTarget.get(current.targetId)
         if (
+          event === undefined &&
           occurredBefore !== undefined &&
           row.inspectedOccurredAt.getTime() >= occurredBefore.getTime() &&
           (current === null || current.occurredAt >= occurredBefore.toISOString())
         )
           continue
-        const event = current === null ? undefined : eventById.get(current.legId)
         const system = {
           event: event === undefined ? null : yield* Schema.encodeEffect(AccountingEvent)(event),
           valuationFacts: yield* Effect.forEach(
@@ -163,13 +163,13 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
           history: yield* captureHistory(row),
           current,
           currentOutcome:
-            current === null
-              ? "absent"
-              : occurredBefore !== undefined && current.occurredAt >= occurredBefore.toISOString()
-                ? "outside_period"
-                : event === undefined
-                  ? "withheld"
-                  : "included",
+            event !== undefined
+              ? "included"
+              : current === null
+                ? "absent"
+                : occurredBefore !== undefined && current.occurredAt >= occurredBefore.toISOString()
+                  ? "outside_period"
+                  : "withheld",
           streamState,
           application: streamState === "active" ? "not_applied" : "inactive",
           reportingCurrency,

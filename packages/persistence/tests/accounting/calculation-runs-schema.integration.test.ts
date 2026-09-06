@@ -636,6 +636,7 @@ describe("calculation-runs schema", () => {
             yield* db.execute(sql`drop table calculation_run_allocations`)
             yield* db.execute(sql`drop table calculation_run_custody_unit_sources`)
             yield* db.execute(sql`drop table calculation_run_custody_units`)
+            yield* db.execute(sql`drop table calculation_run_correction_inputs`)
             yield* db.execute(sql`drop table calculation_runs`)
             yield* db.execute(sql`drop table custody_unit_sources`)
             yield* db.execute(sql`drop table custody_units`)

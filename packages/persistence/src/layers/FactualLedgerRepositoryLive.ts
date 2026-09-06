@@ -1103,6 +1103,8 @@ const make = Effect.gen(function* () {
 
       const eventRows: Array<{
         readonly event: AccountingEvent
+        readonly canonicalTransferId: string
+        readonly providerTransferId: string
         readonly canonicalTransactionId: string | null
         readonly providerTransactionId: string
       }> = []
@@ -1272,6 +1274,8 @@ const make = Effect.gen(function* () {
             },
             operation: "factualLedgerRepository.load.event",
           }),
+          canonicalTransferId: row.canonicalTransferId,
+          providerTransferId: row.providerTransferId,
           canonicalTransactionId: row.canonicalTransactionId,
           providerTransactionId: row.providerTransactionId,
         })
@@ -1573,13 +1577,12 @@ const make = Effect.gen(function* () {
         reconciledProviderTransferIds: custodyMovementEvents.reconciledProviderTransferIds,
         withheldTransactionIds,
       })
-      const custodyEvents = custodyMovementEvents.eventRows
-        .filter(
-          ({ canonicalTransactionId, providerTransactionId }) =>
-            !withheldTransactionIds.has(providerTransactionId) &&
-            (canonicalTransactionId === null || !withheldTransactionIds.has(canonicalTransactionId))
-        )
-        .map(({ event }) => event)
+      const custodyEventRows = custodyMovementEvents.eventRows.filter(
+        ({ canonicalTransactionId, providerTransactionId }) =>
+          !withheldTransactionIds.has(providerTransactionId) &&
+          (canonicalTransactionId === null || !withheldTransactionIds.has(canonicalTransactionId))
+      )
+      const custodyEvents = custodyEventRows.map(({ event }) => event)
       const events = [...legEvents.events, ...custodyEvents].sort(compareEvents)
       const valuationEvents = events.filter((event) => event._tag !== "custody_movement")
       const observedValuationFacts = yield* makeObservedValuationFacts({
@@ -1608,12 +1611,37 @@ const make = Effect.gen(function* () {
         blockerKey(left).localeCompare(blockerKey(right))
       )
 
+      // These IDs were carried when creating the custody event above. Fees keep their
+      // own leg event even when they share an origin transfer with a custody movement.
+      const custodyByCanonicalTransfer = new Map(
+        custodyEventRows.map((row) => [row.canonicalTransferId, row.event])
+      )
+      const custodyByProviderTransfer = new Map(
+        custodyEventRows.map((row) => [row.providerTransferId, row.event])
+      )
+      const eventByLegId = new Map<string, AccountingEvent>(
+        legEvents.events.map((event) => [event.id, event])
+      )
+      const eventsByTarget = new Map<string, AccountingEvent>()
+      const correctionLegContexts = legEvents.legContexts.map((context) => {
+        const event =
+          context.structure === "custody"
+            ? context.originKind === "canonical_transfer" && context.sourceTransferId !== null
+              ? custodyByCanonicalTransfer.get(context.sourceTransferId)
+              : context.originKind === "provider_transfer" && context.providerTransferId !== null
+                ? custodyByProviderTransfer.get(context.providerTransferId)
+                : undefined
+            : eventByLegId.get(context.legId)
+        if (event === undefined) return context
+        eventsByTarget.set(context.targetId, event)
+        return { ...context, effectiveAssetId: event.assetId }
+      })
       const correctionInputs = yield* movementCorrectionLoader.load({
         principalId,
         reportingCurrency: supportedReportingCurrency,
         occurredBefore,
-        legContexts: legEvents.legContexts,
-        events,
+        legContexts: correctionLegContexts,
+        eventsByTarget,
         valuationFacts,
       })
       return {
