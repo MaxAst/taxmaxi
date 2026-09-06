@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { CurrencyCode } from "@my/core/currency"
 import { PrincipalId } from "@my/core/ownership"
@@ -318,7 +318,7 @@ const seedProviderBoundaryTransaction = ({
     }
 
     yield* db.insert(schema.transactionLegs).values(
-      yield* seedMovementLegs(
+      yield* prepareMovementLegFixtures(
         legs.map((leg) => ({
           movementIdentity: { sourceRecordKey: leg.externalId, componentKey: "movement" },
           sourceId: TEST_CUSTODY_SOURCE_ID,
@@ -604,7 +604,7 @@ describe("FactualLedgerRepositoryLive", () => {
             }
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "factual-ledger-purchase-leg",
@@ -805,7 +805,7 @@ describe("FactualLedgerRepositoryLive", () => {
               })
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs(
+              yield* prepareMovementLegFixtures(
                 transactions.map((transaction, index) => {
                   return {
                     movementIdentity: {
@@ -968,7 +968,7 @@ describe("FactualLedgerRepositoryLive", () => {
             )
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs(
+              yield* prepareMovementLegFixtures(
                 factTransactions.map((transaction, index) => ({
                   movementIdentity: {
                     sourceRecordKey: `adapter-exact-leg-${index}`,
@@ -1235,7 +1235,7 @@ describe("FactualLedgerRepositoryLive", () => {
             })
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "provider-adapter-selected-row-leg",
@@ -1763,7 +1763,7 @@ describe("FactualLedgerRepositoryLive", () => {
             }
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "paid-operation-fee-leg",
@@ -1814,7 +1814,7 @@ describe("FactualLedgerRepositoryLive", () => {
             Effect.gen(function* () {
               const db = yield* drizzle
               yield* db.insert(schema.transactionLegs).values(
-                yield* seedMovementLegs([
+                yield* prepareMovementLegFixtures([
                   {
                     movementIdentity: {
                       sourceRecordKey: `invalid-quantity-${amount}`,
@@ -1928,7 +1928,7 @@ describe("FactualLedgerRepositoryLive", () => {
             }
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "unsupported-reporting-currency-leg",
@@ -2036,7 +2036,7 @@ describe("FactualLedgerRepositoryLive", () => {
             }
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "foreign-source-leg",
@@ -2176,7 +2176,7 @@ describe("FactualLedgerRepositoryLive", () => {
             }
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "factual-ledger-valued-purchase-leg",
@@ -2344,7 +2344,7 @@ describe("FactualLedgerRepositoryLive", () => {
             }
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs(
+              yield* prepareMovementLegFixtures(
                 quoteFixtures.map(({ day, id }) => ({
                   movementIdentity: {
                     sourceRecordKey: `quote-source-leg-${day}`,
@@ -2441,7 +2441,7 @@ describe("FactualLedgerRepositoryLive", () => {
             }
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "negative-provider-money-leg",
@@ -2678,7 +2678,7 @@ describe("FactualLedgerRepositoryLive", () => {
               return yield* Effect.die("Failed to create unrelated canonical transfer")
             }
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "custody-unrelated-provider-sibling",
@@ -2907,7 +2907,7 @@ describe("FactualLedgerRepositoryLive", () => {
               deterministic: false,
             })
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "cross-year-provider-origin-leg",
@@ -3067,7 +3067,7 @@ describe("FactualLedgerRepositoryLive", () => {
               deterministic: true,
             })
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "excluded-custody-provider-leg",

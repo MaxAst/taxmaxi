@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../../persistence/tests/support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../../persistence/tests/support/movement-leg-fixtures.ts"
 import { nextTestUuid } from "./support/TestUuid.ts"
 import { HttpApiClient } from "effect/unstable/httpapi"
 import { Cookies, Headers, HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
@@ -643,7 +643,7 @@ const seedSourceReportRows = ({
     ])
 
     yield* db.insert(schema.transactionLegs).values(
-      yield* seedMovementLegs([
+      yield* prepareMovementLegFixtures([
         {
           movementIdentity: { sourceRecordKey: "report-buy-1:btc", componentKey: "movement" },
           id: reportFixtureIds.acquisitionLegId,
@@ -1237,7 +1237,7 @@ const seedClaimFactualRows = ({
       transactionType: "buy_fiat",
     })
     yield* db.insert(schema.transactionLegs).values(
-      yield* seedMovementLegs([
+      yield* prepareMovementLegFixtures([
         {
           movementIdentity: {
             sourceRecordKey: "claim-graph-record",
@@ -1776,7 +1776,7 @@ const seedSourceReportTaxTreatmentRows = ({
     ])
 
     yield* db.insert(schema.transactionLegs).values(
-      yield* seedMovementLegs([
+      yield* prepareMovementLegFixtures([
         {
           movementIdentity: { sourceRecordKey: "report-fee-1:fee", componentKey: "movement" },
           id: reportFixtureIds.feeLegId,
@@ -1888,7 +1888,7 @@ const seedDailyQuoteMonetaryRows = ({
       },
     ])
     yield* db.insert(schema.transactionLegs).values(
-      yield* seedMovementLegs([
+      yield* prepareMovementLegFixtures([
         {
           movementIdentity: {
             sourceRecordKey: "daily-quote-acquisition-leg",
@@ -2734,7 +2734,7 @@ describe("SourcesApiLive", () => {
         providerDescription: "Grouped custody disposal",
       })
       yield* db.insert(schema.transactionLegs).values(
-        yield* seedMovementLegs([
+        yield* prepareMovementLegFixtures([
           {
             movementIdentity: {
               sourceRecordKey: "report-other-source-disposal:btc",
@@ -2993,7 +2993,7 @@ describe("SourcesApiLive", () => {
         },
       ])
       yield* db.insert(schema.transactionLegs).values(
-        yield* seedMovementLegs([
+        yield* prepareMovementLegFixtures([
           {
             movementIdentity: {
               sourceRecordKey: "report-income-unvalued:btc",

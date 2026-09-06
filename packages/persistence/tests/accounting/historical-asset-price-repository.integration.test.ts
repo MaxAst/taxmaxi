@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { PrincipalId } from "@my/core/ownership"
 import { eq } from "drizzle-orm"
@@ -84,7 +84,7 @@ describe("HistoricalAssetPriceRepositoryLive", () => {
           Effect.gen(function* () {
             const db = yield* drizzle
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "historical-price-acquisition",

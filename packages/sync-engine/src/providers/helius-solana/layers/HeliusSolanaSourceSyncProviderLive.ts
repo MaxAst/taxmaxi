@@ -272,7 +272,6 @@ type HeliusSolanaRawRecordPayload = Schema.Schema.Type<typeof HeliusSolanaRawRec
 interface SolanaBalanceMovement {
   /** Source-native component coordinate, absent when the provider exposes no identity. */
   readonly componentKey: string | null
-  readonly identityIssue?: "ambiguous_movement_identity"
   readonly asset: HeliusSolanaResolvedAsset
   readonly amount: string
   readonly rawUnits: string
@@ -1070,7 +1069,7 @@ const buildLegPlan = ({
 }): HeliusSolanaCanonicalLegPlan => ({
   movementIdentity:
     movement.componentKey === null
-      ? { _tag: "unavailable", reason: movement.identityIssue ?? "missing_movement_identity" }
+      ? { _tag: "unavailable", reason: "missing_movement_identity" }
       : { _tag: "identified", sourceRecordKey: signature, componentKey: movement.componentKey },
   transferExternalId: canonicalMovementExternalId(signature, movement),
   kind:
@@ -1807,6 +1806,29 @@ const make = ({
     const balanceKey = (balance: HeliusSolanaTokenBalance): string =>
       `${balance.accountIndex}:${balance.mint}`
 
+    const ambiguousBalanceKeys = (
+      payload: HeliusSolanaFullTransactionPayload,
+      walletAddress: string
+    ): ReadonlySet<string> => {
+      const sides = [payload.meta?.preTokenBalances ?? [], payload.meta?.postTokenBalances ?? []]
+      const walletKeys = new Set(
+        sides
+          .flat()
+          .filter((balance) => balance.owner === walletAddress)
+          .map(balanceKey)
+      )
+      const ambiguous = new Set<string>()
+      for (const balances of sides) {
+        const seen = new Set<string>()
+        for (const balance of balances) {
+          const key = balanceKey(balance)
+          if (seen.has(key) && walletKeys.has(key)) ambiguous.add(key)
+          seen.add(key)
+        }
+      }
+      return ambiguous
+    }
+
     const buildSplMovements = ({
       payload,
       walletAddress,
@@ -1825,11 +1847,13 @@ const make = ({
 
       const preBalances = meta.preTokenBalances ?? []
       const postBalances = meta.postTokenBalances ?? []
+      const ambiguousKeys = ambiguousBalanceKeys(payload, walletAddress)
       const preByKey = new Map(preBalances.map((balance) => [balanceKey(balance), balance]))
       const postByKey = new Map(postBalances.map((balance) => [balanceKey(balance), balance]))
       const keys = Array.from(new Set([...preByKey.keys(), ...postByKey.keys()]))
 
       return keys.flatMap((key, index) => {
+        if (ambiguousKeys.has(key)) return []
         const pre = preByKey.get(key)
         const post = postByKey.get(key)
         const balance = post ?? pre
@@ -1855,9 +1879,6 @@ const make = ({
           return []
         }
 
-        const componentIsAmbiguous =
-          preBalances.filter((entry) => balanceKey(entry) === key).length > 1 ||
-          postBalances.filter((entry) => balanceKey(entry) === key).length > 1
         const absoluteDelta = delta < 0n ? -delta : delta
         const direction = delta > 0n ? "inbound" : "outbound"
         const counterparty = inferCounterparty({
@@ -1880,12 +1901,7 @@ const make = ({
             fromAddress: direction === "inbound" ? counterparty : walletAddress,
             toAddress: direction === "inbound" ? walletAddress : counterparty,
             role: "principal",
-            componentKey: componentIsAmbiguous
-              ? null
-              : `token_balance:${balance.accountIndex}:${balance.mint}`,
-            ...(componentIsAmbiguous
-              ? { identityIssue: "ambiguous_movement_identity" as const }
-              : {}),
+            componentKey: `token_balance:${balance.accountIndex}:${balance.mint}`,
             position: offset + index,
             evidenceKind: "token_balance_delta",
             supplementalTransferRow: null,
@@ -2512,6 +2528,7 @@ const make = ({
     }
 
     const buildNormalizationReview = ({
+      walletAddress,
       principalId,
       payload,
       movements,
@@ -2523,7 +2540,15 @@ const make = ({
       readonly movements: ReadonlyArray<SolanaBalanceMovement>
       readonly contradictions: ReadonlyArray<MovementContradiction>
       readonly resolvedTransactionType: ResolvedProviderTransactionTypeMapping
+      readonly walletAddress: string
     }): SourceTransactionReviewDraft | null => {
+      if (payload.meta?.err === null && ambiguousBalanceKeys(payload, walletAddress).size > 0) {
+        return buildReview({
+          principalId,
+          reason: "ambiguous_movement_identity",
+          matchedLayer: "movement_identity",
+        })
+      }
       const hasUnresolvedAssets = movements.some(
         (movement) => movement.asset.kind === "review_required"
       )
@@ -2995,6 +3020,7 @@ const make = ({
           )
 
           const transactionReview = buildNormalizationReview({
+            walletAddress,
             principalId: source.principalId,
             payload,
             movements,

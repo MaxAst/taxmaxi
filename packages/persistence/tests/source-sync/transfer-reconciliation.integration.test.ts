@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { eq, inArray, sql } from "drizzle-orm"
 import * as Deferred from "effect/Deferred"
@@ -886,7 +886,7 @@ describe("TransferReconciliationServiceLive", () => {
               amount: "0.10000000",
             })
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "provider-transfer-deterministic:disposition",
@@ -1090,7 +1090,7 @@ describe("TransferReconciliationServiceLive", () => {
               },
             ])
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "legacy-multilayer-review-internal-leg",
@@ -1834,7 +1834,7 @@ describe("TransferReconciliationServiceLive", () => {
               const [giftLeg] = yield* db
                 .insert(schema.transactionLegs)
                 .values(
-                  yield* seedMovementLegs([
+                  yield* prepareMovementLegFixtures([
                     {
                       movementIdentity: {
                         sourceRecordKey: `reviewed-${reviewStatus}-${reviewedSide}:gift`,
@@ -2047,7 +2047,7 @@ describe("TransferReconciliationServiceLive", () => {
               needsReview: true,
             })
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "stale-facts-legacy-internal-leg",
@@ -4357,7 +4357,7 @@ describe("TransferReconciliationServiceLive", () => {
               addressId: address.id,
             })
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "source-replay-lock-derived-leg",

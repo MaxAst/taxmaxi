@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { eq } from "drizzle-orm"
 import * as DateTime from "effect/DateTime"
@@ -174,7 +174,9 @@ describe("fact target link schema", () => {
             .insert(schema.providerTransfers)
             .values(providerTransferValues(REPRESENTATION_USE_ID))
           yield* db.insert(schema.transfers).values(transferValues())
-          yield* db.insert(schema.transactionLegs).values(yield* seedMovementLegs([legValues()]))
+          yield* db
+            .insert(schema.transactionLegs)
+            .values(yield* prepareMovementLegFixtures([legValues()]))
           yield* db.insert(schema.transferReconciliations).values({
             id: RECONCILIATION_ID,
             principalId: TEST_PRINCIPAL_ID,
@@ -341,7 +343,7 @@ describe("fact target link schema", () => {
             Effect.gen(function* () {
               const db = yield* drizzle
               yield* db.insert(schema.transactionLegs).values(
-                yield* seedMovementLegs([
+                yield* prepareMovementLegFixtures([
                   legValues({
                     id: "00000000-0000-4000-8000-000000001014",
                     sourceRepresentationUseId: OTHER_REPRESENTATION_USE_ID,

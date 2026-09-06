@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { PgClient } from "@effect/sql-pg"
 import type { TaxAccountingResult } from "@my/accounting"
@@ -356,7 +356,7 @@ const seedAcquisitionFact = ({
     }
 
     yield* db.insert(schema.transactionLegs).values(
-      yield* seedMovementLegs([
+      yield* prepareMovementLegFixtures([
         {
           movementIdentity: { sourceRecordKey: `${externalId}-leg`, componentKey: "movement" },
           id: eventId,

@@ -12,8 +12,8 @@ type MovementLegFixture = Omit<
   }
 }
 
-/** Test writers record each synthetic source movement before inserting its leg. */
-export const seedMovementLegs = (legs: readonly MovementLegFixture[]) =>
+/** Insert synthetic movement targets and return leg values for the caller to insert. */
+export const prepareMovementLegFixtures = (legs: readonly MovementLegFixture[]) =>
   Effect.gen(function* () {
     const db = yield* drizzle
     return yield* Effect.forEach(legs, ({ movementIdentity, ...leg }) =>

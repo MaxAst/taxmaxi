@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../../persistence/tests/support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../../persistence/tests/support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
 import { HttpApiClient } from "effect/unstable/httpapi"
@@ -270,7 +270,7 @@ const seedTransactions = Effect.gen(function* () {
     },
   ])
   yield* db.insert(schema.transactionLegs).values(
-    yield* seedMovementLegs([
+    yield* prepareMovementLegFixtures([
       {
         movementIdentity: {
           sourceRecordKey: "other-principal-transaction:acquisition",
@@ -531,7 +531,7 @@ const seedSourceFilterFixtures = Effect.gen(function* () {
     transactionType: "buy_fiat",
   })
   yield* db.insert(schema.transactionLegs).values(
-    yield* seedMovementLegs([
+    yield* prepareMovementLegFixtures([
       {
         movementIdentity: {
           sourceRecordKey: "other-owned-source-acquisition:leg",
@@ -731,7 +731,7 @@ describe("TransactionsApiLive", () => {
           fiatCurrency: "EUR",
         }
         yield* db.insert(schema.transactionLegs).values(
-          yield* seedMovementLegs([
+          yield* prepareMovementLegFixtures([
             {
               movementIdentity: {
                 sourceRecordKey: `mismatched-orphan-${index}`,
@@ -757,7 +757,7 @@ describe("TransactionsApiLive", () => {
         const [disposal] = yield* db
           .insert(schema.transactionLegs)
           .values(
-            yield* seedMovementLegs([
+            yield* prepareMovementLegFixtures([
               {
                 movementIdentity: {
                   sourceRecordKey: `mismatched-disposal-${index}`,
@@ -944,7 +944,7 @@ describe("TransactionsApiLive", () => {
           transactionType: "sell_fiat",
         })
         yield* db.insert(schema.transactionLegs).values(
-          yield* seedMovementLegs([
+          yield* prepareMovementLegFixtures([
             {
               movementIdentity: {
                 sourceRecordKey: "transaction-german-year-boundary:disposal",
@@ -1117,7 +1117,7 @@ describe("TransactionsApiLive", () => {
           amount: "0.2",
         })
         yield* db.insert(schema.transactionLegs).values(
-          yield* seedMovementLegs([
+          yield* prepareMovementLegFixtures([
             {
               movementIdentity: {
                 sourceRecordKey: "provider-transfer-transaction:disposal",
@@ -1287,7 +1287,7 @@ describe("TransactionsApiLive", () => {
           }))
         )
         yield* db.insert(schema.transactionLegs).values(
-          yield* seedMovementLegs(
+          yield* prepareMovementLegFixtures(
             fixtureIds.tieLegIds.map((id, index) => ({
               movementIdentity: {
                 sourceRecordKey: `transaction-tie-${index + 1}:acquisition`,
@@ -1496,7 +1496,7 @@ describe("TransactionsApiLive", () => {
           },
         ])
         yield* db.insert(schema.transactionLegs).values(
-          yield* seedMovementLegs([
+          yield* prepareMovementLegFixtures([
             {
               movementIdentity: {
                 sourceRecordKey: "transaction-internal-transfer:in",

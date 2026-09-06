@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../../persistence/tests/support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../../persistence/tests/support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
 import { NodeHttpServer } from "@effect/platform-node"
@@ -282,7 +282,7 @@ const seedFactualLedgerOnly = Effect.gen(function* () {
   const db = yield* drizzle
   const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-05-01T10:00:00.000Z"))
   yield* db.insert(schema.transactionLegs).values(
-    yield* seedMovementLegs([
+    yield* prepareMovementLegFixtures([
       {
         movementIdentity: {
           sourceRecordKey: "portfolio-factual-only-leg",
@@ -348,7 +348,7 @@ const seedValuedAndUnpricedFacts = Effect.gen(function* () {
     },
   ])
   yield* db.insert(schema.transactionLegs).values(
-    yield* seedMovementLegs([
+    yield* prepareMovementLegFixtures([
       {
         movementIdentity: {
           sourceRecordKey: "t17-valued-acquisition-leg",

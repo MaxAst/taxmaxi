@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { JurisdictionCode, TaxYear } from "@my/core/accounting"
 import { CurrencyCode } from "@my/core/currency"
@@ -265,7 +265,7 @@ const seedProviderTransaction = ({
 
     if (legId !== undefined) {
       yield* db.insert(schema.transactionLegs).values(
-        yield* seedMovementLegs([
+        yield* prepareMovementLegFixtures([
           {
             movementIdentity: { sourceRecordKey: `${externalId}-leg`, componentKey: "movement" },
             id: legId,
@@ -447,7 +447,7 @@ describe("principal asset override application", () => {
               return yield* Effect.die("Failed to create exact-link fixture")
             }
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "exact-with-provider-identity-leg",
@@ -644,7 +644,7 @@ describe("principal asset override application", () => {
               .returning({ id: schema.transactions.id })
             if (transaction === undefined) return yield* Effect.die("Failed to create transaction")
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "atomic-exclusion-disposal",
@@ -730,7 +730,7 @@ describe("principal asset override application", () => {
               .returning({ id: schema.transactions.id })
             if (transaction === undefined) return yield* Effect.die("Failed to create transaction")
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "fiat-linked-accounting-leg",
@@ -807,7 +807,7 @@ describe("principal asset override application", () => {
               .returning({ id: schema.transactions.id })
             if (transaction === undefined) return yield* Effect.die("Failed to create transaction")
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "blocked-internal-transfer-leg",
@@ -900,7 +900,7 @@ describe("principal asset override application", () => {
               return yield* Effect.die("Failed to create fee transaction fixtures")
             }
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "fee-atomic-operation-leg",
@@ -975,7 +975,7 @@ describe("principal asset override application", () => {
               .returning({ id: schema.transactions.id })
             if (operation === undefined) return yield* Effect.die("Failed to create operation")
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "transactionless-fee-operation-leg",
@@ -1278,7 +1278,7 @@ describe("principal asset override application", () => {
               return yield* Effect.die("Failed to create pre-catalog transaction")
             }
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "pre-catalog-exact-leg",
@@ -1325,7 +1325,7 @@ describe("principal asset override application", () => {
               providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
             })
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "crypto-sibling-of-fiat-evidence",
@@ -1465,7 +1465,7 @@ describe("principal asset override application", () => {
             const [linkless] = yield* db
               .insert(schema.transactionLegs)
               .values(
-                yield* seedMovementLegs([
+                yield* prepareMovementLegFixtures([
                   {
                     movementIdentity: { sourceRecordKey: "linkless-leg", componentKey: "movement" },
                     id: "10000000-0000-4000-8000-000000000104",
@@ -1504,7 +1504,7 @@ describe("principal asset override application", () => {
             const [transferLinked] = yield* db
               .insert(schema.transactionLegs)
               .values(
-                yield* seedMovementLegs([
+                yield* prepareMovementLegFixtures([
                   {
                     movementIdentity: {
                       sourceRecordKey: "targetless-source-transfer-leg",
@@ -1706,7 +1706,7 @@ describe("principal asset override application", () => {
             const [leg] = yield* db
               .insert(schema.transactionLegs)
               .values(
-                yield* seedMovementLegs([
+                yield* prepareMovementLegFixtures([
                   {
                     movementIdentity: {
                       sourceRecordKey: "open-use-sibling-leg",
@@ -1994,7 +1994,7 @@ describe("principal asset override application", () => {
             })
             const db = yield* drizzle
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "unsupported-provider-type-sibling",
@@ -2113,7 +2113,7 @@ describe("principal asset override application", () => {
               return yield* Effect.die("Failed to create post-tax-year fee transaction")
             }
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "post-tax-year-blocked-fee-leg",

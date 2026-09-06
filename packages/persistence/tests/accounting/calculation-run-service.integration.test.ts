@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { JurisdictionCode, TaxYear } from "@my/core/accounting"
 import { CurrencyCode } from "@my/core/currency"
@@ -153,7 +153,7 @@ describe("CalculationRunServiceLive", () => {
             }
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "coinbase-staking-payout-leg",
@@ -323,7 +323,7 @@ describe("CalculationRunServiceLive", () => {
             if (transaction === undefined) return yield* Effect.die("Failed to create fact")
 
             yield* db.insert(schema.transactionLegs).values(
-              yield* seedMovementLegs([
+              yield* prepareMovementLegFixtures([
                 {
                   movementIdentity: {
                     sourceRecordKey: "override-revision-input-leg",
@@ -504,7 +504,7 @@ describe("CalculationRunServiceLive", () => {
               if (transaction === undefined) return yield* Effect.die("Failed to create fact")
 
               yield* db.insert(schema.transactionLegs).values(
-                yield* seedMovementLegs([
+                yield* prepareMovementLegFixtures([
                   {
                     movementIdentity: {
                       sourceRecordKey: "provider-override-revision-input-leg",

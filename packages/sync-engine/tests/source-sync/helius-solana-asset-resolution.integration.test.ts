@@ -1515,20 +1515,27 @@ describe("Helius movement target persistence and replay", () => {
     recordKey,
     order = [1, 2],
     parsed = false,
+    amounts,
   }: {
     readonly recordKey: string
     readonly order?: ReadonlyArray<number>
     readonly parsed?: boolean
+    readonly amounts?: ReadonlyArray<string>
   }) =>
     run(
       Effect.gen(function* () {
         const provider = yield* HeliusSolanaSourceSyncProvider
         const repository = yield* SourceNormalizationRepository
-        const balances = order.map((accountIndex) => ({
+        const balances = order.map((accountIndex, index) => ({
           accountIndex,
           mint: SOLANA_USDC_MINT,
           owner: wallet,
-          uiTokenAmount: { amount: "1000000", decimals: 6, uiAmount: 1, uiAmountString: "1" },
+          uiTokenAmount: {
+            amount: amounts?.[index] ?? "1000000",
+            decimals: 6,
+            uiAmount: 1,
+            uiAmountString: "1",
+          },
         }))
         const prepared = yield* provider.prepareNormalization({
           source: {
@@ -1603,12 +1610,14 @@ describe("Helius movement target persistence and replay", () => {
           transactionReview: prepared.transactionReview,
           resolvedTransactionType: prepared.resolvedTransactionType,
           deriveLegs: ({ transaction, venueContext, canonicalTransfers }) =>
-            provider.deriveLegs({
-              transaction,
-              venueContext,
-              canonicalTransfers,
-              legPlans: prepared.legPlans,
-            }),
+            prepared.legDerivationStrategy === "skip"
+              ? Effect.succeed([])
+              : provider.deriveLegs({
+                  transaction,
+                  venueContext,
+                  canonicalTransfers,
+                  legPlans: prepared.legPlans,
+                }),
         })
       })
     )
@@ -1760,22 +1769,32 @@ describe("Helius movement target persistence and replay", () => {
   )
   it.effect("withholds repeated source-native components instead of merging their identity", () =>
     Effect.gen(function* () {
-      const result = yield* Effect.promise(() =>
-        normalize({ recordKey: "synthetic-duplicate-component", order: [1, 1] })
-      )
-      expect(result.legs).toHaveLength(0)
-      const review = yield* Effect.promise(() =>
-        context.runPg(
-          Effect.gen(function* () {
-            const db = yield* drizzle
-            return yield* db
-              .select({ reason: schema.transactionReviews.categorizationReason })
-              .from(schema.transactionReviews)
-              .where(eq(schema.transactionReviews.transactionId, result.transaction.id))
+      for (const amounts of [
+        ["1000000", "1000000"],
+        ["1000000", "0"],
+        ["0", "1000000"],
+      ]) {
+        const result = yield* Effect.promise(() =>
+          normalize({
+            recordKey: `synthetic-duplicate-component-${amounts.join("-")}`,
+            order: [1, 1],
+            amounts,
           })
         )
-      )
-      expect(review).toEqual([{ reason: "ambiguous_movement_identity" }])
+        expect(result.legs).toHaveLength(0)
+        const review = yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({ reason: schema.transactionReviews.categorizationReason })
+                .from(schema.transactionReviews)
+                .where(eq(schema.transactionReviews.transactionId, result.transaction.id))
+            })
+          )
+        )
+        expect(review).toEqual([{ reason: "ambiguous_movement_identity" }])
+      }
     })
   )
 })

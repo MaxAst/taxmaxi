@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { NO_CURRENT_ASSET_CONCLUSION, NO_CURRENT_ASSET_POLICY_EVALUATION } from "@my/core/assets"
 import { AssetExceptionRepository, ProviderAssetRepository } from "@my/sync-engine/services"
@@ -2377,7 +2377,7 @@ describe("AssetExceptionRepositoryLive", () => {
             const [leg] = yield* db
               .insert(schema.transactionLegs)
               .values(
-                yield* seedMovementLegs([
+                yield* prepareMovementLegFixtures([
                   {
                     movementIdentity: {
                       sourceRecordKey: "ownership-correction-leg",

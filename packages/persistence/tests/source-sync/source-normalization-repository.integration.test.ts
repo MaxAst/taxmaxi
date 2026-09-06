@@ -1,4 +1,4 @@
-import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { asc, eq, inArray, sql } from "drizzle-orm"
 import * as Effect from "effect/Effect"
@@ -7606,7 +7606,7 @@ describe("SourceNormalizationRepositoryLive", () => {
             const [feeLeg] = yield* db
               .insert(schema.transactionLegs)
               .values(
-                yield* seedMovementLegs([
+                yield* prepareMovementLegFixtures([
                   {
                     movementIdentity: {
                       sourceRecordKey: feeLegExternalId,
