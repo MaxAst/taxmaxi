@@ -1,3 +1,4 @@
+import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { JurisdictionCode, TaxYear } from "@my/core/accounting"
 import { CurrencyCode } from "@my/core/currency"
@@ -263,23 +264,28 @@ const seedProviderTransaction = ({
     }
 
     if (legId !== undefined) {
-      yield* db.insert(schema.transactionLegs).values({
-        id: legId,
-        sourceId: SOURCE_ID,
-        sourceRawRecordId: rawRecord.id,
-        externalId: `${externalId}-leg`,
-        timestamp: occurredAt,
-        principalId: PRINCIPAL_ID,
-        assetId: TEST_BTC_ASSET_ID,
-        sourceRepresentationUseId,
-        providerAssetRowId,
-        amount: "1",
-        kind: "acquisition",
-        provenance: "deterministic",
-        originKind: "provider_transfer",
-        providerTransferId: providerTransfer.id,
-        transactionId: transaction.id,
-      })
+      yield* db.insert(schema.transactionLegs).values(
+        yield* seedMovementLegs([
+          {
+            movementIdentity: { sourceRecordKey: `${externalId}-leg`, componentKey: "movement" },
+            id: legId,
+            sourceId: SOURCE_ID,
+            sourceRawRecordId: rawRecord.id,
+            externalId: `${externalId}-leg`,
+            timestamp: occurredAt,
+            principalId: PRINCIPAL_ID,
+            assetId: TEST_BTC_ASSET_ID,
+            sourceRepresentationUseId,
+            providerAssetRowId,
+            amount: "1",
+            kind: "acquisition",
+            provenance: "deterministic",
+            originKind: "provider_transfer",
+            providerTransferId: providerTransfer.id,
+            transactionId: transaction.id,
+          },
+        ])
+      )
     }
 
     return { providerTransferId: providerTransfer.id, transactionId: transaction.id }
@@ -440,21 +446,29 @@ describe("principal asset override application", () => {
             if (sourceUse === undefined || transaction === undefined) {
               return yield* Effect.die("Failed to create exact-link fixture")
             }
-            yield* db.insert(schema.transactionLegs).values({
-              id: legId,
-              sourceId: SOURCE_ID,
-              externalId: "exact-with-provider-identity-leg",
-              timestamp: occurredAt,
-              principalId: PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              sourceRepresentationUseId: sourceUse.id,
-              providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
-              amount: "1",
-              kind: "acquisition",
-              provenance: "deterministic",
-              originKind: "none",
-              transactionId: transaction.id,
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "exact-with-provider-identity-leg",
+                    componentKey: "movement",
+                  },
+                  id: legId,
+                  sourceId: SOURCE_ID,
+                  externalId: "exact-with-provider-identity-leg",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: sourceUse.id,
+                  providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none",
+                  transactionId: transaction.id,
+                },
+              ])
+            )
           })
         )
       )
@@ -629,34 +643,44 @@ describe("principal asset override application", () => {
               })
               .returning({ id: schema.transactions.id })
             if (transaction === undefined) return yield* Effect.die("Failed to create transaction")
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                sourceId: SOURCE_ID,
-                externalId: "atomic-exclusion-disposal",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
-                amount: "1",
-                kind: "disposal" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: transaction.id,
-              },
-              {
-                sourceId: SOURCE_ID,
-                externalId: "atomic-exclusion-acquisition",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                providerAssetRowId: BLOCKED_PROVIDER_ASSET_ID,
-                amount: "2",
-                kind: "acquisition" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: transaction.id,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "atomic-exclusion-disposal",
+                    componentKey: "movement",
+                  },
+                  sourceId: SOURCE_ID,
+                  externalId: "atomic-exclusion-disposal",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
+                  amount: "1",
+                  kind: "disposal" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "atomic-exclusion-acquisition",
+                    componentKey: "movement",
+                  },
+                  sourceId: SOURCE_ID,
+                  externalId: "atomic-exclusion-acquisition",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  providerAssetRowId: BLOCKED_PROVIDER_ASSET_ID,
+                  amount: "2",
+                  kind: "acquisition" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                },
+              ])
+            )
           })
         )
       )
@@ -705,36 +729,46 @@ describe("principal asset override application", () => {
               })
               .returning({ id: schema.transactions.id })
             if (transaction === undefined) return yield* Effect.die("Failed to create transaction")
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                id: fiatLegId,
-                sourceId: SOURCE_ID,
-                externalId: "fiat-linked-accounting-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
-                amount: "1",
-                kind: "disposal" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: transaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000117",
-                sourceId: SOURCE_ID,
-                externalId: "fiat-linked-crypto-sibling",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: SOURCE_USE_ID,
-                amount: "1",
-                kind: "acquisition" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: transaction.id,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "fiat-linked-accounting-leg",
+                    componentKey: "movement",
+                  },
+                  id: fiatLegId,
+                  sourceId: SOURCE_ID,
+                  externalId: "fiat-linked-accounting-leg",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
+                  amount: "1",
+                  kind: "disposal" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "fiat-linked-crypto-sibling",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000117",
+                  sourceId: SOURCE_ID,
+                  externalId: "fiat-linked-crypto-sibling",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "acquisition" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                },
+              ])
+            )
           })
         )
       )
@@ -772,37 +806,47 @@ describe("principal asset override application", () => {
               })
               .returning({ id: schema.transactions.id })
             if (transaction === undefined) return yield* Effect.die("Failed to create transaction")
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                id: internalLegId,
-                sourceId: SOURCE_ID,
-                externalId: "blocked-internal-transfer-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                providerAssetRowId: BLOCKED_PROVIDER_ASSET_ID,
-                amount: "1",
-                kind: "acquisition" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                derivationRule: "internal_transfer_in" as const,
-                transactionId: transaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000119",
-                sourceId: SOURCE_ID,
-                externalId: "internal-transfer-sibling",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: SOURCE_USE_ID,
-                amount: "1",
-                kind: "disposal" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: transaction.id,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "blocked-internal-transfer-leg",
+                    componentKey: "movement",
+                  },
+                  id: internalLegId,
+                  sourceId: SOURCE_ID,
+                  externalId: "blocked-internal-transfer-leg",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  providerAssetRowId: BLOCKED_PROVIDER_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  derivationRule: "internal_transfer_in" as const,
+                  transactionId: transaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "internal-transfer-sibling",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000119",
+                  sourceId: SOURCE_ID,
+                  externalId: "internal-transfer-sibling",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "disposal" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                },
+              ])
+            )
           })
         )
       )
@@ -855,37 +899,47 @@ describe("principal asset override application", () => {
             if (operation === undefined || feeTransaction === undefined) {
               return yield* Effect.die("Failed to create fee transaction fixtures")
             }
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                id: "10000000-0000-4000-8000-000000000110",
-                sourceId: SOURCE_ID,
-                externalId: "fee-atomic-operation-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: SOURCE_USE_ID,
-                amount: "1",
-                kind: "acquisition" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: operation.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000111",
-                sourceId: SOURCE_ID,
-                externalId: "fee-atomic-fee-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                providerAssetRowId: BLOCKED_PROVIDER_ASSET_ID,
-                amount: "0.01",
-                kind: "fee" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: feeTransaction.id,
-                feeForTransactionId: operation.id,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "fee-atomic-operation-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000110",
+                  sourceId: SOURCE_ID,
+                  externalId: "fee-atomic-operation-leg",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "acquisition" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: operation.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "fee-atomic-fee-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000111",
+                  sourceId: SOURCE_ID,
+                  externalId: "fee-atomic-fee-leg",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  providerAssetRowId: BLOCKED_PROVIDER_ASSET_ID,
+                  amount: "0.01",
+                  kind: "fee" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: feeTransaction.id,
+                  feeForTransactionId: operation.id,
+                },
+              ])
+            )
           })
         )
       )
@@ -920,36 +974,46 @@ describe("principal asset override application", () => {
               })
               .returning({ id: schema.transactions.id })
             if (operation === undefined) return yield* Effect.die("Failed to create operation")
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                id: "10000000-0000-4000-8000-000000000113",
-                sourceId: SOURCE_ID,
-                externalId: "transactionless-fee-operation-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                providerAssetRowId: BLOCKED_PROVIDER_ASSET_ID,
-                amount: "1",
-                kind: "acquisition" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: operation.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000114",
-                sourceId: SOURCE_ID,
-                externalId: "transactionless-fee-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: SOURCE_USE_ID,
-                amount: "0.01",
-                kind: "fee" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                feeForTransactionId: operation.id,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "transactionless-fee-operation-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000113",
+                  sourceId: SOURCE_ID,
+                  externalId: "transactionless-fee-operation-leg",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  providerAssetRowId: BLOCKED_PROVIDER_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: operation.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "transactionless-fee-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000114",
+                  sourceId: SOURCE_ID,
+                  externalId: "transactionless-fee-leg",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: SOURCE_USE_ID,
+                  amount: "0.01",
+                  kind: "fee" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  feeForTransactionId: operation.id,
+                },
+              ])
+            )
           })
         )
       )
@@ -1065,6 +1129,11 @@ describe("principal asset override application", () => {
               deriveLegs: ({ transaction }) =>
                 Effect.succeed([
                   {
+                    movementIdentity: {
+                      _tag: "identified" as const,
+                      sourceRecordKey: "exact-inclusion-leg",
+                      componentKey: "movement",
+                    },
                     sourceId: SOURCE_ID,
                     sourceRawRecordId: null,
                     externalId: "exact-inclusion-leg",
@@ -1208,20 +1277,28 @@ describe("principal asset override application", () => {
             if (preCatalogTransaction === undefined) {
               return yield* Effect.die("Failed to create pre-catalog transaction")
             }
-            yield* db.insert(schema.transactionLegs).values({
-              id: "10000000-0000-4000-8000-000000000107",
-              sourceId: SOURCE_ID,
-              externalId: "pre-catalog-exact-leg",
-              timestamp: occurredAt,
-              principalId: PRINCIPAL_ID,
-              assetId: REPLACEMENT_ASSET_ID,
-              sourceRepresentationUseId: sourceUse.id,
-              amount: "1",
-              kind: "acquisition",
-              provenance: "deterministic",
-              originKind: "none",
-              transactionId: preCatalogTransaction.id,
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "pre-catalog-exact-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000107",
+                  sourceId: SOURCE_ID,
+                  externalId: "pre-catalog-exact-leg",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: REPLACEMENT_ASSET_ID,
+                  sourceRepresentationUseId: sourceUse.id,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none",
+                  transactionId: preCatalogTransaction.id,
+                },
+              ])
+            )
 
             yield* db.insert(schema.providerAssets).values({
               id: INCLUDED_PROVIDER_ASSET_ID,
@@ -1247,20 +1324,28 @@ describe("principal asset override application", () => {
               inventoryAssetId: null,
               providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
             })
-            yield* db.insert(schema.transactionLegs).values({
-              id: "10000000-0000-4000-8000-000000000109",
-              sourceId: SOURCE_ID,
-              externalId: "crypto-sibling-of-fiat-evidence",
-              timestamp: occurredAt,
-              principalId: PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              sourceRepresentationUseId: SOURCE_USE_ID,
-              amount: "1",
-              kind: "acquisition",
-              provenance: "deterministic",
-              originKind: "none",
-              transactionId: fiat.transactionId,
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "crypto-sibling-of-fiat-evidence",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000109",
+                  sourceId: SOURCE_ID,
+                  externalId: "crypto-sibling-of-fiat-evidence",
+                  timestamp: occurredAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none",
+                  transactionId: fiat.transactionId,
+                },
+              ])
+            )
 
             yield* seedProviderAsset({ id: BLOCKED_PROVIDER_ASSET_ID })
             const deleted = yield* seedProviderTransaction({
@@ -1379,19 +1464,24 @@ describe("principal asset override application", () => {
             if (rawRecord === undefined) return yield* Effect.die("Failed to create raw record")
             const [linkless] = yield* db
               .insert(schema.transactionLegs)
-              .values({
-                id: "10000000-0000-4000-8000-000000000104",
-                sourceId: SOURCE_ID,
-                sourceRawRecordId: rawRecord.id,
-                externalId: "linkless-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none",
-              })
+              .values(
+                yield* seedMovementLegs([
+                  {
+                    movementIdentity: { sourceRecordKey: "linkless-leg", componentKey: "movement" },
+                    id: "10000000-0000-4000-8000-000000000104",
+                    sourceId: SOURCE_ID,
+                    sourceRawRecordId: rawRecord.id,
+                    externalId: "linkless-leg",
+                    timestamp: occurredAt,
+                    principalId: PRINCIPAL_ID,
+                    assetId: TEST_BTC_ASSET_ID,
+                    amount: "1",
+                    kind: "acquisition",
+                    provenance: "deterministic",
+                    originKind: "none",
+                  },
+                ])
+              )
               .returning({ id: schema.transactionLegs.id })
             if (linkless === undefined) return yield* Effect.die("Failed to create linkless leg")
             const [sourceTransfer] = yield* db
@@ -1413,19 +1503,27 @@ describe("principal asset override application", () => {
             }
             const [transferLinked] = yield* db
               .insert(schema.transactionLegs)
-              .values({
-                id: "10000000-0000-4000-8000-000000000120",
-                sourceId: SOURCE_ID,
-                externalId: "targetless-source-transfer-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "canonical_transfer",
-                sourceTransferId: sourceTransfer.id,
-              })
+              .values(
+                yield* seedMovementLegs([
+                  {
+                    movementIdentity: {
+                      sourceRecordKey: "targetless-source-transfer-leg",
+                      componentKey: "movement",
+                    },
+                    id: "10000000-0000-4000-8000-000000000120",
+                    sourceId: SOURCE_ID,
+                    externalId: "targetless-source-transfer-leg",
+                    timestamp: occurredAt,
+                    principalId: PRINCIPAL_ID,
+                    assetId: TEST_BTC_ASSET_ID,
+                    amount: "1",
+                    kind: "acquisition",
+                    provenance: "deterministic",
+                    originKind: "canonical_transfer",
+                    sourceTransferId: sourceTransfer.id,
+                  },
+                ])
+              )
               .returning({ id: schema.transactionLegs.id })
             if (transferLinked === undefined) {
               return yield* Effect.die("Failed to create targetless transfer-linked leg")
@@ -1607,19 +1705,27 @@ describe("principal asset override application", () => {
             if (transaction === undefined) return yield* Effect.die("Failed to create transaction")
             const [leg] = yield* db
               .insert(schema.transactionLegs)
-              .values({
-                sourceId: SOURCE_ID,
-                externalId: "open-use-sibling-leg",
-                timestamp: occurredAt,
-                principalId: PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none",
-                transactionId: transaction.id,
-              })
+              .values(
+                yield* seedMovementLegs([
+                  {
+                    movementIdentity: {
+                      sourceRecordKey: "open-use-sibling-leg",
+                      componentKey: "movement",
+                    },
+                    sourceId: SOURCE_ID,
+                    externalId: "open-use-sibling-leg",
+                    timestamp: occurredAt,
+                    principalId: PRINCIPAL_ID,
+                    assetId: TEST_BTC_ASSET_ID,
+                    providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
+                    amount: "1",
+                    kind: "acquisition",
+                    provenance: "deterministic",
+                    originKind: "none",
+                    transactionId: transaction.id,
+                  },
+                ])
+              )
               .returning({ id: schema.transactionLegs.id })
             if (leg === undefined) return yield* Effect.die("Failed to create sibling leg")
             yield* db.insert(schema.providerAssetTransactionUses).values({
@@ -1887,20 +1993,28 @@ describe("principal asset override application", () => {
               providerAssetRowId: INCLUDED_PROVIDER_ASSET_ID,
             })
             const db = yield* drizzle
-            yield* db.insert(schema.transactionLegs).values({
-              id: blockedSiblingId,
-              sourceId: SOURCE_ID,
-              externalId: "unsupported-provider-type-sibling",
-              timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-02-10T10:00:00.000Z")),
-              principalId: PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              sourceRepresentationUseId: SOURCE_USE_ID,
-              amount: "1",
-              kind: "acquisition",
-              provenance: "deterministic",
-              originKind: "none",
-              transactionId: blocked.transactionId,
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "unsupported-provider-type-sibling",
+                    componentKey: "movement",
+                  },
+                  id: blockedSiblingId,
+                  sourceId: SOURCE_ID,
+                  externalId: "unsupported-provider-type-sibling",
+                  timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-02-10T10:00:00.000Z")),
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none",
+                  transactionId: blocked.transactionId,
+                },
+              ])
+            )
             yield* db.insert(schema.assetPrices).values({
               assetId: TEST_BTC_ASSET_ID,
               timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-02-10T00:00:00.000Z")),
@@ -1998,21 +2112,29 @@ describe("principal asset override application", () => {
             if (futureTransaction === undefined) {
               return yield* Effect.die("Failed to create post-tax-year fee transaction")
             }
-            yield* db.insert(schema.transactionLegs).values({
-              id: "10000000-0000-4000-8000-000000000122",
-              sourceId: SOURCE_ID,
-              externalId: "post-tax-year-blocked-fee-leg",
-              timestamp: futureAt,
-              principalId: PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              providerAssetRowId: UNRESOLVED_PROVIDER_ASSET_ID,
-              amount: "0.01",
-              kind: "fee",
-              provenance: "deterministic",
-              originKind: "none",
-              transactionId: futureTransaction.id,
-              feeForTransactionId: earlier.transactionId,
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "post-tax-year-blocked-fee-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000122",
+                  sourceId: SOURCE_ID,
+                  externalId: "post-tax-year-blocked-fee-leg",
+                  timestamp: futureAt,
+                  principalId: PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  providerAssetRowId: UNRESOLVED_PROVIDER_ASSET_ID,
+                  amount: "0.01",
+                  kind: "fee",
+                  provenance: "deterministic",
+                  originKind: "none",
+                  transactionId: futureTransaction.id,
+                  feeForTransactionId: earlier.transactionId,
+                },
+              ])
+            )
             yield* db.insert(schema.assetPrices).values({
               assetId: TEST_BTC_ASSET_ID,
               timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-12-31T00:00:00.000Z")),

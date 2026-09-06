@@ -1,3 +1,4 @@
+import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { NO_CURRENT_ASSET_CONCLUSION, NO_CURRENT_ASSET_POLICY_EVALUATION } from "@my/core/assets"
 import { AssetExceptionRepository, ProviderAssetRepository } from "@my/sync-engine/services"
@@ -2375,19 +2376,27 @@ describe("AssetExceptionRepositoryLive", () => {
             })
             const [leg] = yield* db
               .insert(schema.transactionLegs)
-              .values({
-                sourceId: TEST_SOURCE_ID,
-                principalId: TEST_PRINCIPAL_ID,
-                externalId: "ownership-correction-leg",
-                transactionId: transaction.id,
-                timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-02T00:00:00.000Z")),
-                assetId: owner.id,
-                assetRepresentationId: representation.id,
-                amount: "10",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-              })
+              .values(
+                yield* seedMovementLegs([
+                  {
+                    movementIdentity: {
+                      sourceRecordKey: "ownership-correction-leg",
+                      componentKey: "movement",
+                    },
+                    sourceId: TEST_SOURCE_ID,
+                    principalId: TEST_PRINCIPAL_ID,
+                    externalId: "ownership-correction-leg",
+                    transactionId: transaction.id,
+                    timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-02T00:00:00.000Z")),
+                    assetId: owner.id,
+                    assetRepresentationId: representation.id,
+                    amount: "10",
+                    kind: "acquisition",
+                    provenance: "deterministic",
+                    originKind: "none" as const,
+                  },
+                ])
+              )
               .returning({ id: schema.transactionLegs.id })
             if (leg === undefined) {
               return yield* Effect.die("Failed to seed ownership correction leg")

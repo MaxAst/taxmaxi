@@ -202,10 +202,23 @@ export interface SourceProviderTransferDraft {
   readonly metadata: unknown
 }
 
+/** Producer-recorded source component, or an explicit reason identity cannot be supplied. */
+export const SourceMovementIdentity = Schema.Union([
+  Schema.TaggedStruct("identified", {
+    sourceRecordKey: Schema.Trimmed.check(Schema.isNonEmpty()),
+    componentKey: Schema.Trimmed.check(Schema.isNonEmpty()),
+  }),
+  Schema.TaggedStruct("unavailable", {
+    reason: Schema.Literals(["missing_movement_identity", "ambiguous_movement_identity"]),
+  }),
+])
+export type SourceMovementIdentity = typeof SourceMovementIdentity.Type
+
 /**
  * SourceTransactionLegDraft - Canonical transaction leg upsert payload.
  */
 export interface SourceTransactionLegDraft {
+  readonly movementIdentity: SourceMovementIdentity
   readonly sourceId: string
   readonly sourceRawRecordId: string | null
   readonly externalId: string | null
@@ -331,6 +344,7 @@ export interface PersistedSourceProviderTransfer {
  * PersistedSourceLeg - Persisted leg projection used for FIFO side effects.
  */
 export interface PersistedSourceLeg {
+  readonly movementCorrectionTargetId: string
   readonly id: string
   readonly sourceId: string
   readonly timestamp: Date

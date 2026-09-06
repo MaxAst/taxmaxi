@@ -1,3 +1,4 @@
+import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { CurrencyCode } from "@my/core/currency"
 import { PrincipalId } from "@my/core/ownership"
@@ -317,24 +318,27 @@ const seedProviderBoundaryTransaction = ({
     }
 
     yield* db.insert(schema.transactionLegs).values(
-      legs.map((leg) => ({
-        sourceId: TEST_CUSTODY_SOURCE_ID,
-        externalId: leg.externalId,
-        timestamp: occurredAt,
-        principalId: TEST_PRINCIPAL_ID,
-        assetId: leg.assetId,
-        assetRepresentationId: leg.assetRepresentationId,
-        sourceRepresentationUseId:
-          leg.assetRepresentationId === undefined
-            ? undefined
-            : sourceUseByRepresentation.get(leg.assetRepresentationId),
-        amount: "1",
-        kind: leg.kind,
-        provenance: "deterministic" as const,
-        originKind: "none" as const,
-        providerAssetRowId: leg.providerAssetRowId,
-        transactionId: transaction.id,
-      }))
+      yield* seedMovementLegs(
+        legs.map((leg) => ({
+          movementIdentity: { sourceRecordKey: leg.externalId, componentKey: "movement" },
+          sourceId: TEST_CUSTODY_SOURCE_ID,
+          externalId: leg.externalId,
+          timestamp: occurredAt,
+          principalId: TEST_PRINCIPAL_ID,
+          assetId: leg.assetId,
+          assetRepresentationId: leg.assetRepresentationId,
+          sourceRepresentationUseId:
+            leg.assetRepresentationId === undefined
+              ? undefined
+              : sourceUseByRepresentation.get(leg.assetRepresentationId),
+          amount: "1",
+          kind: leg.kind,
+          provenance: "deterministic" as const,
+          originKind: "none" as const,
+          providerAssetRowId: leg.providerAssetRowId,
+          transactionId: transaction.id,
+        }))
+      )
     )
   })
 
@@ -599,64 +603,82 @@ describe("FactualLedgerRepositoryLive", () => {
               return yield* Effect.die("Failed to create factual ledger transactions")
             }
 
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                id: "10000000-0000-4000-8000-000000000002",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "factual-ledger-purchase-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "1.25",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: purchaseTransaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000001",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "factual-ledger-sale-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "0.5",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: saleTransaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000003",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "factual-ledger-sale-acquisition-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "0.75",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: saleTransaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000004",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "factual-ledger-purchase-disposition-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "0.25",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: purchaseTransaction.id,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "factual-ledger-purchase-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000002",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "factual-ledger-purchase-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "1.25",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: purchaseTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "factual-ledger-sale-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000001",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "factual-ledger-sale-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "0.5",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: saleTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "factual-ledger-sale-acquisition-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000003",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "factual-ledger-sale-acquisition-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "0.75",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: saleTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "factual-ledger-purchase-disposition-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000004",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "factual-ledger-purchase-disposition-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "0.25",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: purchaseTransaction.id,
+                },
+              ])
+            )
           })
         )
       )
@@ -783,25 +805,31 @@ describe("FactualLedgerRepositoryLive", () => {
               })
 
             yield* db.insert(schema.transactionLegs).values(
-              transactions.map((transaction, index) => {
-                return {
-                  id: `10000000-0000-4000-8000-00000000001${index}`,
-                  sourceId: transaction.sourceId,
-                  externalId: `${transaction.externalId ?? transaction.id}-leg`,
-                  timestamp: occurredAt,
-                  principalId: TEST_PRINCIPAL_ID,
-                  assetId: TEST_BTC_ASSET_ID,
-                  sourceRepresentationUseId:
-                    transaction.sourceId === TEST_CUSTODY_SOURCE_ID
-                      ? TEST_CUSTODY_SOURCE_USE_ID
-                      : otherSourceUseId,
-                  amount: "1",
-                  kind: "income" as const,
-                  provenance: "deterministic" as const,
-                  originKind: "none" as const,
-                  transactionId: transaction.id,
-                }
-              })
+              yield* seedMovementLegs(
+                transactions.map((transaction, index) => {
+                  return {
+                    movementIdentity: {
+                      sourceRecordKey: transaction.externalId ?? "income-fixture",
+                      componentKey: "movement",
+                    },
+                    id: `10000000-0000-4000-8000-00000000001${index}`,
+                    sourceId: transaction.sourceId,
+                    externalId: `${transaction.externalId ?? transaction.id}-leg`,
+                    timestamp: occurredAt,
+                    principalId: TEST_PRINCIPAL_ID,
+                    assetId: TEST_BTC_ASSET_ID,
+                    sourceRepresentationUseId:
+                      transaction.sourceId === TEST_CUSTODY_SOURCE_ID
+                        ? TEST_CUSTODY_SOURCE_USE_ID
+                        : otherSourceUseId,
+                    amount: "1",
+                    kind: "income" as const,
+                    provenance: "deterministic" as const,
+                    originKind: "none" as const,
+                    transactionId: transaction.id,
+                  }
+                })
+              )
             )
           })
         )
@@ -940,25 +968,31 @@ describe("FactualLedgerRepositoryLive", () => {
             )
 
             yield* db.insert(schema.transactionLegs).values(
-              factTransactions.map((transaction, index) => ({
-                sourceId:
-                  index === 0
-                    ? TEST_CUSTODY_SOURCE_ID
-                    : index === 1
-                      ? TEST_DESTINATION_SOURCE_ID
-                      : OTHER_SOURCE_ID,
-                externalId: `adapter-exact-leg-${index}`,
-                timestamp: occurredAt,
-                principalId: index === 2 ? OTHER_PRINCIPAL_ID : TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
-                sourceRepresentationUseId: sourceUseIds[index],
-                amount: "1",
-                kind: "acquisition" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: transaction.id,
-              }))
+              yield* seedMovementLegs(
+                factTransactions.map((transaction, index) => ({
+                  movementIdentity: {
+                    sourceRecordKey: `adapter-exact-leg-${index}`,
+                    componentKey: "movement",
+                  },
+                  sourceId:
+                    index === 0
+                      ? TEST_CUSTODY_SOURCE_ID
+                      : index === 1
+                        ? TEST_DESTINATION_SOURCE_ID
+                        : OTHER_SOURCE_ID,
+                  externalId: `adapter-exact-leg-${index}`,
+                  timestamp: occurredAt,
+                  principalId: index === 2 ? OTHER_PRINCIPAL_ID : TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  assetRepresentationId: TEST_BTC_REPRESENTATION_ID,
+                  sourceRepresentationUseId: sourceUseIds[index],
+                  amount: "1",
+                  kind: "acquisition" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                }))
+              )
             )
 
             // Evidence-only observations stay as evidence and never become accounting events.
@@ -1200,87 +1234,113 @@ describe("FactualLedgerRepositoryLive", () => {
               sourceId: TEST_CUSTODY_SOURCE_ID,
             })
 
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "provider-adapter-selected-row-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                providerAssetRowId: PROVIDER_ASSET_ROW_ID,
-                transactionId: selectedTransaction.id,
-              },
-              {
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "provider-adapter-duplicate-row-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                providerAssetRowId: DUPLICATE_PROVIDER_ASSET_ROW_ID,
-                transactionId: duplicateTransaction.id,
-              },
-              {
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "provider-adapter-exact-wins-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                providerAssetRowId: PROVIDER_ASSET_ROW_ID,
-                sourceRepresentationUseId: exactSourceUseId,
-                transactionId: exactTransaction.id,
-              },
-              {
-                sourceId: OTHER_SOURCE_ID,
-                externalId: "provider-adapter-other-principal-leg",
-                timestamp: occurredAt,
-                principalId: OTHER_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                providerAssetRowId: PROVIDER_ASSET_ROW_ID,
-                transactionId: otherTransaction.id,
-              },
-              {
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "provider-adapter-contradiction-selected-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                providerAssetRowId: PROVIDER_ASSET_ROW_ID,
-                transactionId: contradictoryTransaction.id,
-              },
-              {
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "provider-adapter-contradiction-system-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                providerAssetRowId: DUPLICATE_PROVIDER_ASSET_ROW_ID,
-                transactionId: contradictoryTransaction.id,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "provider-adapter-selected-row-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "provider-adapter-selected-row-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  providerAssetRowId: PROVIDER_ASSET_ROW_ID,
+                  transactionId: selectedTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "provider-adapter-duplicate-row-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "provider-adapter-duplicate-row-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  providerAssetRowId: DUPLICATE_PROVIDER_ASSET_ROW_ID,
+                  transactionId: duplicateTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "provider-adapter-exact-wins-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "provider-adapter-exact-wins-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  providerAssetRowId: PROVIDER_ASSET_ROW_ID,
+                  sourceRepresentationUseId: exactSourceUseId,
+                  transactionId: exactTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "provider-adapter-other-principal-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: OTHER_SOURCE_ID,
+                  externalId: "provider-adapter-other-principal-leg",
+                  timestamp: occurredAt,
+                  principalId: OTHER_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  providerAssetRowId: PROVIDER_ASSET_ROW_ID,
+                  transactionId: otherTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "provider-adapter-contradiction-selected-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "provider-adapter-contradiction-selected-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  providerAssetRowId: PROVIDER_ASSET_ROW_ID,
+                  transactionId: contradictoryTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "provider-adapter-contradiction-system-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "provider-adapter-contradiction-system-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  providerAssetRowId: DUPLICATE_PROVIDER_ASSET_ROW_ID,
+                  transactionId: contradictoryTransaction.id,
+                },
+              ])
+            )
             yield* db.insert(schema.providerTransfers).values({
               sourceId: TEST_CUSTODY_SOURCE_ID,
               transactionId: exactTransaction.id,
@@ -1702,21 +1762,29 @@ describe("FactualLedgerRepositoryLive", () => {
               return yield* Effect.die("Failed to create fee transaction fixtures")
             }
 
-            yield* db.insert(schema.transactionLegs).values({
-              id: "10000000-0000-4000-8000-000000000005",
-              sourceId: TEST_CUSTODY_SOURCE_ID,
-              externalId: "paid-operation-fee-leg",
-              timestamp: occurredAt,
-              principalId: TEST_PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-              amount: "0.01",
-              kind: "fee",
-              provenance: "deterministic",
-              originKind: "none" as const,
-              transactionId: feeTransaction.id,
-              feeForTransactionId: operation.id,
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "paid-operation-fee-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000005",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "paid-operation-fee-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "0.01",
+                  kind: "fee",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: feeTransaction.id,
+                  feeForTransactionId: operation.id,
+                },
+              ])
+            )
           })
         )
       )
@@ -1745,19 +1813,27 @@ describe("FactualLedgerRepositoryLive", () => {
           runPg(
             Effect.gen(function* () {
               const db = yield* drizzle
-              yield* db.insert(schema.transactionLegs).values({
-                id,
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: `invalid-quantity-${amount}`,
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount,
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-              })
+              yield* db.insert(schema.transactionLegs).values(
+                yield* seedMovementLegs([
+                  {
+                    movementIdentity: {
+                      sourceRecordKey: `invalid-quantity-${amount}`,
+                      componentKey: "movement",
+                    },
+                    id,
+                    sourceId: TEST_CUSTODY_SOURCE_ID,
+                    externalId: `invalid-quantity-${amount}`,
+                    timestamp: occurredAt,
+                    principalId: TEST_PRINCIPAL_ID,
+                    assetId: TEST_BTC_ASSET_ID,
+                    sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                    amount,
+                    kind: "acquisition",
+                    provenance: "deterministic",
+                    originKind: "none" as const,
+                  },
+                ])
+              )
             })
           )
         )
@@ -1851,20 +1927,28 @@ describe("FactualLedgerRepositoryLive", () => {
               return yield* Effect.die("Failed to create unsupported-currency transaction")
             }
 
-            yield* db.insert(schema.transactionLegs).values({
-              id: "10000000-0000-4000-8000-000000000009",
-              sourceId: TEST_CUSTODY_SOURCE_ID,
-              externalId: "unsupported-reporting-currency-leg",
-              timestamp: occurredAt,
-              principalId: TEST_PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-              amount: "1",
-              kind: "acquisition",
-              provenance: "deterministic",
-              originKind: "none" as const,
-              transactionId: transaction.id,
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "unsupported-reporting-currency-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000009",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "unsupported-reporting-currency-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                },
+              ])
+            )
             yield* db.insert(schema.assetPrices).values({
               assetId: TEST_BTC_ASSET_ID,
               timestamp: occurredAt,
@@ -1951,63 +2035,81 @@ describe("FactualLedgerRepositoryLive", () => {
               return yield* Effect.die("Failed to create cross-principal transactions")
             }
 
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                id: "10000000-0000-4000-8000-000000000040",
-                sourceId: OTHER_SOURCE_ID,
-                externalId: "foreign-source-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: foreignSourceTransaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000041",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "owned-source-leg",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "2",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: foreignTransactionOnOwnedSource.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000042",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "owned-source-leg-with-other-source-transaction",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "3",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: mismatchedSourceTransaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000043",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "owned-source-fee-leg-with-foreign-source-target",
-                timestamp: occurredAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "0.01",
-                kind: "fee",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                feeForTransactionId: mismatchedFeeTarget.id,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "foreign-source-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000040",
+                  sourceId: OTHER_SOURCE_ID,
+                  externalId: "foreign-source-leg",
+                  timestamp: occurredAt,
+                  principalId: OTHER_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: foreignSourceTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "owned-source-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000041",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "owned-source-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "2",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: foreignTransactionOnOwnedSource.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "owned-source-leg-with-other-source-transaction",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000042",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "owned-source-leg-with-other-source-transaction",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "3",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: mismatchedSourceTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "owned-source-fee-leg-with-foreign-source-target",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000043",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "owned-source-fee-leg-with-foreign-source-target",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "0.01",
+                  kind: "fee",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  feeForTransactionId: mismatchedFeeTarget.id,
+                },
+              ])
+            )
           })
         )
       )
@@ -2073,22 +2175,30 @@ describe("FactualLedgerRepositoryLive", () => {
               return yield* Effect.die("Failed to create valued factual ledger transaction")
             }
 
-            yield* db.insert(schema.transactionLegs).values({
-              id: "10000000-0000-4000-8000-000000000010",
-              sourceId: TEST_CUSTODY_SOURCE_ID,
-              externalId: "factual-ledger-valued-purchase-leg",
-              timestamp: occurredAt,
-              principalId: TEST_PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-              amount: "2",
-              kind: "acquisition",
-              provenance: "deterministic",
-              originKind: "none" as const,
-              transactionId: transaction.id,
-              fiatAmount: "999.00",
-              fiatCurrency: "EUR",
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "factual-ledger-valued-purchase-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000010",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "factual-ledger-valued-purchase-leg",
+                  timestamp: occurredAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "2",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                  fiatAmount: "999.00",
+                  fiatCurrency: "EUR",
+                },
+              ])
+            )
             yield* db.insert(schema.assetPrices).values([
               {
                 assetId: TEST_BTC_ASSET_ID,
@@ -2234,20 +2344,26 @@ describe("FactualLedgerRepositoryLive", () => {
             }
 
             yield* db.insert(schema.transactionLegs).values(
-              quoteFixtures.map(({ day, id }) => ({
-                id,
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: `quote-source-leg-${day}`,
-                timestamp: DateTime.toDateUtc(DateTime.makeUnsafe(`${day}T10:00:00.000Z`)),
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "1",
-                kind: "acquisition" as const,
-                provenance: "deterministic" as const,
-                originKind: "none" as const,
-                transactionId: transaction.id,
-              }))
+              yield* seedMovementLegs(
+                quoteFixtures.map(({ day, id }) => ({
+                  movementIdentity: {
+                    sourceRecordKey: `quote-source-leg-${day}`,
+                    componentKey: "movement",
+                  },
+                  id,
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: `quote-source-leg-${day}`,
+                  timestamp: DateTime.toDateUtc(DateTime.makeUnsafe(`${day}T10:00:00.000Z`)),
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "acquisition" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                  transactionId: transaction.id,
+                }))
+              )
             )
             yield* db.insert(schema.assetPrices).values(
               quoteFixtures.map(({ day, source }) => ({
@@ -2324,64 +2440,82 @@ describe("FactualLedgerRepositoryLive", () => {
               return yield* Effect.die("Failed to create provider-money fixtures")
             }
 
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                id: "10000000-0000-4000-8000-000000000030",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "negative-provider-money-leg",
-                timestamp: negativeAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "1",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: negativeTransaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000031",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "ambiguous-provider-money-out",
-                timestamp: ambiguousAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "1",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: ambiguousTransaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000032",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "ambiguous-provider-money-in",
-                timestamp: ambiguousAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "2",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: ambiguousTransaction.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000033",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "invalid-provider-money-leg",
-                timestamp: invalidAt,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
-                amount: "1",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                transactionId: invalidTransaction.id,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "negative-provider-money-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000030",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "negative-provider-money-leg",
+                  timestamp: negativeAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: negativeTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "ambiguous-provider-money-out",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000031",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "ambiguous-provider-money-out",
+                  timestamp: ambiguousAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: ambiguousTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "ambiguous-provider-money-in",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000032",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "ambiguous-provider-money-in",
+                  timestamp: ambiguousAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "2",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: ambiguousTransaction.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "invalid-provider-money-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000033",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "invalid-provider-money-leg",
+                  timestamp: invalidAt,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: TEST_CUSTODY_SOURCE_USE_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  transactionId: invalidTransaction.id,
+                },
+              ])
+            )
             yield* db.insert(schema.assetPrices).values([
               {
                 assetId: TEST_BTC_ASSET_ID,
@@ -2543,121 +2677,155 @@ describe("FactualLedgerRepositoryLive", () => {
             if (unrelatedTransfer === undefined) {
               return yield* Effect.die("Failed to create unrelated canonical transfer")
             }
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                id: "10000000-0000-4000-8000-000000000014",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "custody-unrelated-provider-sibling",
-                timestamp: providerTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: finalized.providerSourceRepresentationUseId,
-                amount: "0.25",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none",
-                transactionId: finalized.providerTransactionId,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000017",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "custody-provider-disposition-leg",
-                timestamp: providerTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.75",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "provider_transfer" as const,
-                providerTransferId: finalized.providerTransferId,
-                transactionId: finalized.providerTransactionId,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000018",
-                sourceId: TEST_DESTINATION_SOURCE_ID,
-                externalId: "custody-canonical-acquisition-leg",
-                timestamp: canonicalTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.75",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "canonical_transfer" as const,
-                transactionId: finalized.canonicalTransactionId,
-                sourceTransferId: finalized.canonicalTransferId,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000019",
-                sourceId: TEST_DESTINATION_SOURCE_ID,
-                externalId: "custody-inbound-provider-acquisition-leg",
-                timestamp: inboundProviderTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.5",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "provider_transfer" as const,
-                providerTransferId: finalizedInbound.providerTransferId,
-                transactionId: finalizedInbound.providerTransactionId,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000016",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "custody-inbound-canonical-disposition-leg",
-                timestamp: inboundCanonicalTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.5",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "canonical_transfer" as const,
-                transactionId: finalizedInbound.canonicalTransactionId,
-                sourceTransferId: finalizedInbound.canonicalTransferId,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000015",
-                sourceId: TEST_DESTINATION_SOURCE_ID,
-                externalId: "custody-unrelated-canonical-leg",
-                timestamp: canonicalTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                sourceRepresentationUseId: destinationSourceUseId,
-                amount: "0.125",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "canonical_transfer" as const,
-                transactionId: finalized.canonicalTransactionId,
-                sourceTransferId: unrelatedTransfer.id,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000021",
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "custody-internal-out-leg",
-                timestamp: providerTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.75",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                derivationRule: "internal_transfer_out",
-                transactionId: finalized.providerTransactionId,
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000022",
-                sourceId: TEST_DESTINATION_SOURCE_ID,
-                externalId: "custody-internal-in-leg",
-                timestamp: canonicalTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.75",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                derivationRule: "internal_transfer_in",
-                transactionId: finalized.canonicalTransactionId,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "custody-unrelated-provider-sibling",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000014",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "custody-unrelated-provider-sibling",
+                  timestamp: providerTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: finalized.providerSourceRepresentationUseId,
+                  amount: "0.25",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none",
+                  transactionId: finalized.providerTransactionId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "custody-provider-disposition-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000017",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "custody-provider-disposition-leg",
+                  timestamp: providerTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.75",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "provider_transfer" as const,
+                  providerTransferId: finalized.providerTransferId,
+                  transactionId: finalized.providerTransactionId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "custody-canonical-acquisition-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000018",
+                  sourceId: TEST_DESTINATION_SOURCE_ID,
+                  externalId: "custody-canonical-acquisition-leg",
+                  timestamp: canonicalTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.75",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "canonical_transfer" as const,
+                  transactionId: finalized.canonicalTransactionId,
+                  sourceTransferId: finalized.canonicalTransferId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "custody-inbound-provider-acquisition-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000019",
+                  sourceId: TEST_DESTINATION_SOURCE_ID,
+                  externalId: "custody-inbound-provider-acquisition-leg",
+                  timestamp: inboundProviderTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.5",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "provider_transfer" as const,
+                  providerTransferId: finalizedInbound.providerTransferId,
+                  transactionId: finalizedInbound.providerTransactionId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "custody-inbound-canonical-disposition-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000016",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "custody-inbound-canonical-disposition-leg",
+                  timestamp: inboundCanonicalTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.5",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "canonical_transfer" as const,
+                  transactionId: finalizedInbound.canonicalTransactionId,
+                  sourceTransferId: finalizedInbound.canonicalTransferId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "custody-unrelated-canonical-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000015",
+                  sourceId: TEST_DESTINATION_SOURCE_ID,
+                  externalId: "custody-unrelated-canonical-leg",
+                  timestamp: canonicalTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: destinationSourceUseId,
+                  amount: "0.125",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "canonical_transfer" as const,
+                  transactionId: finalized.canonicalTransactionId,
+                  sourceTransferId: unrelatedTransfer.id,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "custody-internal-out-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000021",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "custody-internal-out-leg",
+                  timestamp: providerTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.75",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  derivationRule: "internal_transfer_out",
+                  transactionId: finalized.providerTransactionId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "custody-internal-in-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000022",
+                  sourceId: TEST_DESTINATION_SOURCE_ID,
+                  externalId: "custody-internal-in-leg",
+                  timestamp: canonicalTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.75",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  derivationRule: "internal_transfer_in",
+                  transactionId: finalized.canonicalTransactionId,
+                },
+              ])
+            )
             yield* db.insert(schema.assetPrices).values({
               assetId: TEST_BTC_ASSET_ID,
               timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-04T00:00:00.000Z")),
@@ -2738,21 +2906,29 @@ describe("FactualLedgerRepositoryLive", () => {
               status: "approved",
               deterministic: false,
             })
-            yield* db.insert(schema.transactionLegs).values({
-              id: "10000000-0000-4000-8000-000000000034",
-              sourceId: TEST_CUSTODY_SOURCE_ID,
-              externalId: "cross-year-provider-origin-leg",
-              timestamp: providerTimestamp,
-              principalId: TEST_PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              sourceRepresentationUseId: reconciliation.providerSourceRepresentationUseId,
-              amount: "0.5",
-              kind: "disposal",
-              provenance: "deterministic",
-              originKind: "provider_transfer",
-              providerTransferId: reconciliation.providerTransferId,
-              transactionId: reconciliation.providerTransactionId,
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "cross-year-provider-origin-leg",
+                    componentKey: "movement",
+                  },
+                  id: "10000000-0000-4000-8000-000000000034",
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "cross-year-provider-origin-leg",
+                  timestamp: providerTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  sourceRepresentationUseId: reconciliation.providerSourceRepresentationUseId,
+                  amount: "0.5",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "provider_transfer",
+                  providerTransferId: reconciliation.providerTransferId,
+                  transactionId: reconciliation.providerTransactionId,
+                },
+              ])
+            )
           })
         )
       )
@@ -2890,60 +3066,78 @@ describe("FactualLedgerRepositoryLive", () => {
               status: "auto_applied",
               deterministic: true,
             })
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "excluded-custody-provider-leg",
-                timestamp: providerTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.75",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "provider_transfer" as const,
-                providerTransferId: excluded.providerTransferId,
-                transactionId: excluded.providerTransactionId,
-              },
-              {
-                sourceId: TEST_DESTINATION_SOURCE_ID,
-                externalId: "excluded-custody-canonical-leg",
-                timestamp: canonicalTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.75",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "canonical_transfer" as const,
-                transactionId: excluded.canonicalTransactionId,
-                sourceTransferId: excluded.canonicalTransferId,
-              },
-              {
-                sourceId: TEST_CUSTODY_SOURCE_ID,
-                externalId: "excluded-custody-synthetic-out",
-                timestamp: providerTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.75",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                derivationRule: "internal_transfer_out",
-                transactionId: excluded.providerTransactionId,
-              },
-              {
-                sourceId: TEST_DESTINATION_SOURCE_ID,
-                externalId: "excluded-custody-synthetic-in",
-                timestamp: canonicalTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.75",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "none" as const,
-                derivationRule: "internal_transfer_in",
-                transactionId: excluded.canonicalTransactionId,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "excluded-custody-provider-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "excluded-custody-provider-leg",
+                  timestamp: providerTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.75",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "provider_transfer" as const,
+                  providerTransferId: excluded.providerTransferId,
+                  transactionId: excluded.providerTransactionId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "excluded-custody-canonical-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_DESTINATION_SOURCE_ID,
+                  externalId: "excluded-custody-canonical-leg",
+                  timestamp: canonicalTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.75",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "canonical_transfer" as const,
+                  transactionId: excluded.canonicalTransactionId,
+                  sourceTransferId: excluded.canonicalTransferId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "excluded-custody-synthetic-out",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_CUSTODY_SOURCE_ID,
+                  externalId: "excluded-custody-synthetic-out",
+                  timestamp: providerTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.75",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  derivationRule: "internal_transfer_out",
+                  transactionId: excluded.providerTransactionId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "excluded-custody-synthetic-in",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_DESTINATION_SOURCE_ID,
+                  externalId: "excluded-custody-synthetic-in",
+                  timestamp: canonicalTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.75",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  derivationRule: "internal_transfer_in",
+                  transactionId: excluded.canonicalTransactionId,
+                },
+              ])
+            )
           })
         )
       )

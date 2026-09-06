@@ -471,6 +471,14 @@ const buildMainLeg = (
     }
 
     return Option.some({
+      movementIdentity:
+        params.transaction.externalId === null
+          ? { _tag: "unavailable", reason: "missing_movement_identity" }
+          : {
+              _tag: "identified",
+              sourceRecordKey: params.transaction.externalId,
+              componentKey: "amount",
+            },
       sourceId: params.transaction.sourceId,
       sourceRawRecordId: params.transaction.sourceRawRecordId,
       externalId: `${params.transaction.externalId ?? params.transaction.id}:main`,
@@ -526,7 +534,21 @@ const buildFeeLegs = (
         quoteCurrency,
       })
 
+      const sourceRecordKey = params.transaction.externalId
+      // The normalizer records these exact source-field names in transfer external IDs.
+      const componentKey =
+        sourceRecordKey === null
+          ? null
+          : transfer.externalId === `${sourceRecordKey}:network_fee`
+            ? "network.transaction_fee"
+            : transfer.externalId === `${sourceRecordKey}:commission`
+              ? "commission"
+              : null
       return {
+        movementIdentity:
+          sourceRecordKey === null || componentKey === null
+            ? { _tag: "unavailable", reason: "missing_movement_identity" }
+            : { _tag: "identified", sourceRecordKey, componentKey },
         sourceId: transfer.sourceId,
         sourceRawRecordId: transfer.sourceRawRecordId,
         externalId: `${transfer.externalId ?? transfer.id}:fee_leg`,

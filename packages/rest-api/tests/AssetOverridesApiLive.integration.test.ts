@@ -550,6 +550,11 @@ const makeExactWalletArtifacts = ({
   deriveLegs: ({ transaction }) =>
     Effect.succeed([
       {
+        movementIdentity: {
+          _tag: "identified" as const,
+          sourceRecordKey: `${externalId}-leg`,
+          componentKey: "movement",
+        },
         sourceId,
         sourceRawRecordId: rawRecordId,
         externalId: `${externalId}-leg`,

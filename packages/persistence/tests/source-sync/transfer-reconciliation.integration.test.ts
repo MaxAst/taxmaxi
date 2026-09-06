@@ -1,3 +1,4 @@
+import { seedMovementLegs } from "../support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { eq, inArray, sql } from "drizzle-orm"
 import * as Deferred from "effect/Deferred"
@@ -884,34 +885,44 @@ describe("TransferReconciliationServiceLive", () => {
               reconciliationStatus: "unmatched",
               amount: "0.10000000",
             })
-            yield* db.insert(schema.transactionLegs).values([
-              {
-                sourceId: TEST_SOURCE_ID,
-                externalId: "provider-transfer-deterministic:disposition",
-                timestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                transactionId: providerTransfer.transactionId,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.10000000",
-                kind: "disposal",
-                provenance: "deterministic",
-                originKind: "provider_transfer" as const,
-                providerTransferId,
-              },
-              {
-                sourceId: ONCHAIN_SOURCE_ID,
-                externalId: "onchain-receipt-deterministic:acquisition",
-                timestamp: receiptTimestamp,
-                principalId: TEST_PRINCIPAL_ID,
-                transactionId: receipt.transactionId,
-                assetId: TEST_BTC_ASSET_ID,
-                amount: "0.10000000",
-                kind: "acquisition",
-                provenance: "deterministic",
-                originKind: "canonical_transfer" as const,
-                sourceTransferId: receipt.transferId,
-              },
-            ])
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "provider-transfer-deterministic:disposition",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_SOURCE_ID,
+                  externalId: "provider-transfer-deterministic:disposition",
+                  timestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  transactionId: providerTransfer.transactionId,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.10000000",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "provider_transfer" as const,
+                  providerTransferId,
+                },
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "onchain-receipt-deterministic:acquisition",
+                    componentKey: "movement",
+                  },
+                  sourceId: ONCHAIN_SOURCE_ID,
+                  externalId: "onchain-receipt-deterministic:acquisition",
+                  timestamp: receiptTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  transactionId: receipt.transactionId,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.10000000",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "canonical_transfer" as const,
+                  sourceTransferId: receipt.transferId,
+                },
+              ])
+            )
             return providerTransfer.transactionId
           })
         )
@@ -1078,20 +1089,28 @@ describe("TransferReconciliationServiceLive", () => {
                 needsReview: true,
               },
             ])
-            yield* db.insert(schema.transactionLegs).values({
-              sourceId: TEST_SOURCE_ID,
-              externalId: "legacy-multilayer-review-internal-leg",
-              timestamp,
-              principalId: TEST_PRINCIPAL_ID,
-              transactionId: legacyReviewTransaction.id,
-              assetId: TEST_BTC_ASSET_ID,
-              amount: "0.10000000",
-              kind: "disposal",
-              provenance: "deterministic",
-              originKind: "none" as const,
-              derivationRule: "internal_transfer_out",
-              metadata: { reconciliation: { providerTransferId } },
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "legacy-multilayer-review-internal-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_SOURCE_ID,
+                  externalId: "legacy-multilayer-review-internal-leg",
+                  timestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  transactionId: legacyReviewTransaction.id,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.10000000",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  derivationRule: "internal_transfer_out",
+                  metadata: { reconciliation: { providerTransferId } },
+                },
+              ])
+            )
             return legacyReviewTransaction.id
           })
         )
@@ -1814,21 +1833,29 @@ describe("TransferReconciliationServiceLive", () => {
               })
               const [giftLeg] = yield* db
                 .insert(schema.transactionLegs)
-                .values({
-                  sourceId: reviewedSourceId,
-                  transactionId: reviewedTransactionId,
-                  externalId: `reviewed-${reviewStatus}-${reviewedSide}:gift`,
-                  timestamp,
-                  principalId: TEST_PRINCIPAL_ID,
-                  assetId: TEST_BTC_ASSET_ID,
-                  amount: "0.10000000",
-                  kind: "disposal",
-                  provenance: "manual",
-                  originKind: "none" as const,
-                  derivationRule: "manual_taxable_disposal",
-                  fiatAmount: "5000.00",
-                  fiatCurrency: "EUR",
-                })
+                .values(
+                  yield* seedMovementLegs([
+                    {
+                      movementIdentity: {
+                        sourceRecordKey: `reviewed-${reviewStatus}-${reviewedSide}:gift`,
+                        componentKey: "movement",
+                      },
+                      sourceId: reviewedSourceId,
+                      transactionId: reviewedTransactionId,
+                      externalId: `reviewed-${reviewStatus}-${reviewedSide}:gift`,
+                      timestamp,
+                      principalId: TEST_PRINCIPAL_ID,
+                      assetId: TEST_BTC_ASSET_ID,
+                      amount: "0.10000000",
+                      kind: "disposal",
+                      provenance: "manual",
+                      originKind: "none" as const,
+                      derivationRule: "manual_taxable_disposal",
+                      fiatAmount: "5000.00",
+                      fiatCurrency: "EUR",
+                    },
+                  ])
+                )
                 .returning({ id: schema.transactionLegs.id })
               if (giftLeg === undefined) {
                 return yield* Effect.die("Failed to create reviewed accounting leg")
@@ -2019,20 +2046,28 @@ describe("TransferReconciliationServiceLive", () => {
               matchedLayer: "transfer_reconciliation",
               needsReview: true,
             })
-            yield* db.insert(schema.transactionLegs).values({
-              sourceId: TEST_SOURCE_ID,
-              externalId: "stale-facts-legacy-internal-leg",
-              timestamp,
-              principalId: TEST_PRINCIPAL_ID,
-              transactionId: providerTransactionId,
-              assetId: TEST_BTC_ASSET_ID,
-              amount: "0.10000000",
-              kind: "disposal",
-              provenance: "deterministic",
-              originKind: "none" as const,
-              derivationRule: "internal_transfer_out",
-              metadata: { reconciliation: { providerTransferId } },
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "stale-facts-legacy-internal-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: TEST_SOURCE_ID,
+                  externalId: "stale-facts-legacy-internal-leg",
+                  timestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  transactionId: providerTransactionId,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.10000000",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  derivationRule: "internal_transfer_out",
+                  metadata: { reconciliation: { providerTransferId } },
+                },
+              ])
+            )
           })
         )
       )
@@ -4321,19 +4356,27 @@ describe("TransferReconciliationServiceLive", () => {
               cexAccountId: null,
               addressId: address.id,
             })
-            yield* db.insert(schema.transactionLegs).values({
-              sourceId: derivedSourceId,
-              externalId: "source-replay-lock-derived-leg",
-              timestamp: providerTimestamp,
-              principalId: TEST_PRINCIPAL_ID,
-              assetId: TEST_BTC_ASSET_ID,
-              amount: "0.12500000",
-              kind: "acquisition",
-              provenance: "deterministic",
-              originKind: "none" as const,
-              derivationRule: "internal_transfer_in",
-              metadata: { reconciliation: { providerTransferId } },
-            })
+            yield* db.insert(schema.transactionLegs).values(
+              yield* seedMovementLegs([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "source-replay-lock-derived-leg",
+                    componentKey: "movement",
+                  },
+                  sourceId: derivedSourceId,
+                  externalId: "source-replay-lock-derived-leg",
+                  timestamp: providerTimestamp,
+                  principalId: TEST_PRINCIPAL_ID,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "0.12500000",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none" as const,
+                  derivationRule: "internal_transfer_in",
+                  metadata: { reconciliation: { providerTransferId } },
+                },
+              ])
+            )
           })
         )
       )
