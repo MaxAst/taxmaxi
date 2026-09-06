@@ -59,7 +59,7 @@ What TaxMaxi currently decides for a target, with the revision the user inspecte
 _Avoid_: Global mapping (when the projection field is meant), default
 
 **Effective decision**:
-The conclusion a principal's calculation actually uses: the active override when one exists, otherwise the system conclusion. Reads expose both halves and the effective result separately.
+The conclusion used to decide a principal's calculation inputs: an applicable active override, otherwise the current system conclusion. An active movement correction can require attention and remain unapplied; system, user, and effective facts remain distinct.
 _Avoid_: Resolved asset, final asset
 
 **Fact target link**:
@@ -79,7 +79,7 @@ The rule that when one accounting movement in a transaction is excluded or block
 _Avoid_: Partial transaction, leg-level exclusion
 
 **Covering run**:
-A calculation run whose snapshot can see an override's active record and every linked replay row in its completed state. Only a covering run answers the override's recomputation status; coverage is decided by snapshot visibility, never by timestamps.
+A calculation run in the requested scope whose snapshot sees the relevant override record and completed linked replay work. For a movement correction, it also retains the selected stream leaf, including withdrawal, and the exact captured inputs and application outcome; coverage is distinct from current attention and work status (ADR 0013), never inferred from timestamps.
 _Avoid_: Latest run, run after the override
 
 ## Wallet input language
