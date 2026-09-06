@@ -290,6 +290,25 @@ describe("CalculationRunServiceLive", () => {
       () =>
         Effect.gen(function* () {
           const fixture = yield* Effect.promise(() => runPg(seedCorrectionMovement))
+          const classification = yield* Effect.promise(() =>
+            runPg(
+              Effect.gen(function* () {
+                const db = yield* drizzle
+                const [record] = yield* db
+                  .insert(schema.principalTransactionOverrides)
+                  .values({
+                    ...fixture.draft,
+                    kind: "classification",
+                    priceInput: null,
+                    classificationInput: { _tag: "inbound", cause: "purchase" },
+                  })
+                  .returning({ id: schema.principalTransactionOverrides.id })
+                if (record === undefined)
+                  return yield* Effect.die("Missing synthetic custody classification")
+                return record
+              })
+            )
+          )
           yield* Effect.promise(() => recompute(FIRST_RUN_ID))
           const before = yield* Effect.promise(() => readCorrectionInputs(FIRST_RUN_ID))
           const reconciliationId = "00000000-0000-4000-8000-000000000987"
@@ -585,7 +604,7 @@ describe("CalculationRunServiceLive", () => {
           )
           yield* Effect.promise(() => recompute(SECOND_RUN_ID))
           const inputs = yield* Effect.promise(() => readCorrectionInputs(SECOND_RUN_ID))
-          expect(inputs).toHaveLength(custodyCase === "included" ? 3 : 2)
+          expect(inputs).toHaveLength(custodyCase === "included" ? 4 : 3)
           const after = inputs.find(({ captured }) => captured.history.id === fixture.historyId)
           const providerCapture = inputs.find(
             ({ captured }) => captured.current?.originKind === "provider_transfer"
@@ -596,7 +615,11 @@ describe("CalculationRunServiceLive", () => {
               : custodyCase === "outside_period"
                 ? "outside_period"
                 : "withheld"
-          for (const input of [after, providerCapture]) {
+          for (const input of [
+            after,
+            providerCapture,
+            inputs.find(({ captured }) => captured.history.id === classification.id),
+          ]) {
             expect(input?.captured).toMatchObject({
               currentOutcome: expectedOutcome,
               application: custodyCase === "outside_period" ? "not_applied" : "needs_attention",
@@ -624,6 +647,7 @@ describe("CalculationRunServiceLive", () => {
                 ],
               },
             })
+            expect(input?.captured.effective.classificationEvidence).toBeUndefined()
             const custody = input?.captured.current?.custody[0]
             expect(custody?.canonicalTransferId).toBe(selected.canonicalTransferId)
             expect(custody?.providerTransferId).toBe(selected.providerTransferId)
@@ -711,7 +735,7 @@ describe("CalculationRunServiceLive", () => {
           expect(captured).toMatchObject({
             currentOutcome: "included",
             streamState: "active",
-            application: captured.history.kind === "price" ? "applied" : "not_applied",
+            application: "applied",
             reportingCurrency: "EUR",
             current: { legId: fixture.legId, targetId: fixture.targetId },
             system: {
@@ -722,7 +746,11 @@ describe("CalculationRunServiceLive", () => {
             },
           })
           expect(storedDecimalEquals(captured.current?.quantity, "3")).toBe(true)
-          expect(captured.effective.event).toEqual(captured.system.event)
+          expect(captured.effective.event).toEqual({ ...captured.system.event, cause: "gift" })
+          expect(captured.effective.classificationEvidence).toEqual({
+            _tag: "user_assertion",
+            overrideId: classification.id,
+          })
           expect(captured.effective.valuationFacts).toContainEqual(
             expect.objectContaining({ _tag: "user_valuation" })
           )

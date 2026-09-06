@@ -11,6 +11,7 @@ import {
   ValuationFact,
   UserValuationFact,
   resolveMovementPrice,
+  validateMovementClassification,
   type CustodyUnitId,
 } from "@my/core/accounting"
 import type { CurrencyCode } from "@my/core/currency"
@@ -25,7 +26,7 @@ import type {
   CalculationRunCorrectionInput,
   CapturedMovementCorrectionHistory,
   MovementCorrectionLegContext,
-  MovementPriceApplicationProblem,
+  MovementCorrectionApplicationProblem,
   FactualLedgerInputBlocker,
 } from "../services/FactualLedgerRepository.ts"
 import { drizzle } from "./PgClientLive.ts"
@@ -85,8 +86,8 @@ const captureHistory = (row: typeof schema.principalTransactionOverrides.$inferS
     } satisfies CapturedMovementCorrectionHistory
   })
 
-/** Apply only the active price stream after the caller has decided event eligibility. */
-const applyPrices = ({
+/** Apply independent active streams after the caller has decided event eligibility. */
+const applyCorrections = ({
   captured,
   eventsByTarget,
   custodyUnitIdBySource,
@@ -106,13 +107,18 @@ const applyPrices = ({
 }) =>
   Effect.gen(function* () {
     const userFacts = new Map<string, UserValuationFact>()
+    const effectiveEvents = new Map<string, AccountingEvent>()
+    const classificationEvidence = new Map<
+      string,
+      { readonly _tag: "user_assertion"; readonly overrideId: string }
+    >()
     const inputBlockers: FactualLedgerInputBlocker[] = []
     const decisions: CalculationRunCorrectionInput[] = []
     for (const capture of captured) {
       const { current, history } = capture
       if (
         capture.streamState !== "active" ||
-        history.input?._tag !== "price" ||
+        history.input === null ||
         capture.currentOutcome === "outside_period"
       ) {
         decisions.push(capture)
@@ -121,7 +127,7 @@ const applyPrices = ({
       const event = eventsByTarget.get(history.targetId)
       const inspected = yield* Schema.decodeEffect(MovementCorrectionFacts)(history.inspectedFacts)
       const identity = identitiesByTarget.get(history.targetId)
-      const problem: MovementPriceApplicationProblem | null =
+      let problem: MovementCorrectionApplicationProblem | null =
         current === null
           ? "target_unavailable"
           : event === undefined
@@ -140,11 +146,33 @@ const applyPrices = ({
                   ? "quantity_changed"
                   : event.assetId !== inspected.economicAssetId
                     ? "asset_changed"
-                    : history.input.input.currency !== reportingCurrency
+                    : history.input._tag === "price" &&
+                        history.input.input.currency !== reportingCurrency
                       ? "reporting_currency_mismatch"
                       : null
       let resolvedPrice: CalculationRunCorrectionInput["resolvedPrice"] = null
-      if (problem === null && event !== undefined) {
+      if (problem === null && event !== undefined && history.input._tag === "classification") {
+        const validation = yield* validateMovementClassification({
+          input: history.input.input,
+          facts: inspected,
+        }).pipe(Effect.result)
+        if (validation._tag === "Failure") problem = "structure_changed"
+        else {
+          const input = history.input.input
+          const effective =
+            event._tag === "acquisition" && input._tag === "inbound"
+              ? { ...event, cause: input.cause }
+              : event._tag === "disposition" && input._tag === "outbound"
+                ? { ...event, cause: input.cause }
+                : undefined
+          if (effective === undefined) problem = "structure_changed"
+          else {
+            effectiveEvents.set(event.id, effective)
+            classificationEvidence.set(event.id, { _tag: "user_assertion", overrideId: history.id })
+          }
+        }
+      }
+      if (problem === null && event !== undefined && history.input._tag === "price") {
         // The inspected positive quantity was just checked against the actual current event.
         // No historical revision is represented as a current one.
         const resolved = yield* resolveMovementPrice({
@@ -169,7 +197,7 @@ const applyPrices = ({
         const custodyUnitId = custodyUnitIdBySource.get(current.sourceId)
         if (custodyUnitId === undefined)
           return yield* new PersistenceError({
-            operation: "movementPrice.blockerCustodyUnit",
+            operation: "movementCorrection.blockerCustodyUnit",
             cause: `Source is not assigned to a custody unit: ${current.sourceId}`,
           })
         inputBlockers.push({
@@ -195,28 +223,37 @@ const applyPrices = ({
       Effect.gen(function* () {
         const event = eventsByTarget.get(capture.history.targetId)
         const fact = event === undefined ? undefined : userFacts.get(event.id)
-        return fact === undefined
-          ? capture
-          : {
-              ...capture,
-              effective: {
-                ...capture.system,
-                valuationFacts: [
-                  ...capture.system.valuationFacts,
-                  yield* Schema.encodeEffect(UserValuationFact)(fact),
-                ],
-              },
-            }
+        const effectiveEvent = event === undefined ? undefined : effectiveEvents.get(event.id)
+        const evidence = event === undefined ? undefined : classificationEvidence.get(event.id)
+        if (fact === undefined && effectiveEvent === undefined) return capture
+        return {
+          ...capture,
+          effective: {
+            event:
+              effectiveEvent === undefined
+                ? capture.system.event
+                : yield* Schema.encodeEffect(AccountingEvent)(effectiveEvent),
+            valuationFacts:
+              fact === undefined
+                ? capture.system.valuationFacts
+                : [
+                    ...capture.system.valuationFacts,
+                    yield* Schema.encodeEffect(UserValuationFact)(fact),
+                  ],
+            ...(evidence === undefined ? {} : { classificationEvidence: evidence }),
+          },
+        }
       })
     )
     return {
       correctionInputs,
+      effectiveEvents,
       inputBlockers,
       valuationFacts: [...valuationFacts, ...userFacts.values()],
     }
   })
 
-/** Load owned history once, apply eligible prices, and retain exact system and consumed inputs. */
+/** Load owned history once, apply eligible corrections, and retain exact system and consumed inputs. */
 export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(function* () {
   const db = yield* drizzle
   const load = ({
@@ -336,7 +373,7 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
           effective: system,
         })
       }
-      return yield* applyPrices({
+      return yield* applyCorrections({
         captured,
         eventsByTarget,
         custodyUnitIdBySource,

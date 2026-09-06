@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it } from "@effect/vitest"
-import { JurisdictionCode, TaxYear, type MovementPriceInput } from "@my/core/accounting"
+import {
+  JurisdictionCode,
+  TaxYear,
+  type MovementClassificationInput,
+  type MovementPriceInput,
+} from "@my/core/accounting"
 import { AuthUserId } from "@my/core/authentication"
 import { CurrencyCode } from "@my/core/currency"
 import { PrincipalId } from "@my/core/ownership"
@@ -79,12 +84,14 @@ const seed = ({
   sourceId = SOURCE_ID,
   assets = true,
   systemPurchaseValue = null,
+  transactionType = "buy_fiat",
 }: {
   readonly quantity?: string
   readonly principalId?: PrincipalId
   readonly userId?: AuthUserId
   readonly sourceId?: string
   readonly assets?: boolean
+  readonly transactionType?: string | null
   readonly systemPurchaseValue?: string | null
 } = {}) =>
   Effect.gen(function* () {
@@ -101,7 +108,7 @@ const seed = ({
           sourceId,
           externalId: "synthetic-purchase",
           timestamp,
-          transactionType: "buy_fiat",
+          transactionType,
           providerFiatAmount: systemPurchaseValue,
           providerFiatCurrency: systemPurchaseValue === null ? null : "EUR",
         },
@@ -296,6 +303,47 @@ const seedExistingIdentity = (kind: "exact" | "provider") =>
     }
   })
 
+const changeClassification = ({
+  operation,
+  targetId,
+  input,
+}: {
+  readonly operation: "create" | "replace" | "withdraw"
+  readonly targetId: string
+  readonly input?: MovementClassificationInput
+}) =>
+  context.runWithLayer({
+    layer: PrincipalTransactionOverrideRepositoryLive,
+    effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repository) =>
+      Effect.gen(function* () {
+        const found = yield* repository.findContext({ principalId: PRINCIPAL_ID, targetId })
+        if (Option.isNone(found) || found.value.current === null)
+          return yield* Effect.die("Missing synthetic classification context")
+        const parameters = {
+          principalId: PRINCIPAL_ID,
+          actorUserId: USER_ID,
+          targetId,
+          expectedSystemRevision: found.value.current.facts.systemRevision,
+          expectedLeafId: found.value.classification.leaf?.id ?? null,
+          reason: "Synthetic user assertion",
+        }
+        const result =
+          operation === "withdraw"
+            ? yield* repository.withdraw({ ...parameters, kind: "classification" })
+            : input === undefined
+              ? yield* Effect.die("Missing synthetic classification")
+              : yield* repository[operation]({
+                  ...parameters,
+                  reportingCurrency: EUR,
+                  input: { _tag: "classification", input },
+                })
+        if (Option.isNone(result))
+          return yield* Effect.die("Synthetic classification was not accepted")
+        return result.value
+      })
+    ),
+  })
+
 const readRun = (index: number) =>
   runPg(
     Effect.gen(function* () {
@@ -319,7 +367,14 @@ const readRun = (index: number) =>
         .from(schema.calculationRunCorrectionInputs)
         .where(eq(schema.calculationRunCorrectionInputs.runId, runId(index)))
         .orderBy(asc(schema.calculationRunCorrectionInputs.overrideId))
-      return { results, blockers, inputs }
+      const income = yield* db
+        .select({
+          value: schema.calculationRunIncomeResults.value,
+          treatmentCodes: schema.calculationRunIncomeResults.treatmentCodes,
+        })
+        .from(schema.calculationRunIncomeResults)
+        .where(eq(schema.calculationRunIncomeResults.runId, runId(index)))
+      return { results, blockers, inputs, income }
     })
   )
 
@@ -537,6 +592,11 @@ describe("effective movement price application", () => {
           targetId: fixture.acquisition.targetId,
           input: { _tag: "total_value", amount: "20", currency: EUR },
         })
+        yield* changeClassification({
+          operation: "create",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "inbound", cause: "purchase" },
+        })
         yield* runPg(
           Effect.gen(function* () {
             const db = yield* drizzle
@@ -586,6 +646,14 @@ describe("effective movement price application", () => {
           resolvedPrice: null,
         })
         expect(capture?.effective).toEqual(capture?.system)
+        expect(ledger.correctionInputs).toHaveLength(2)
+        expect(
+          ledger.correctionInputs.every(
+            (input) =>
+              input.application === "needs_attention" &&
+              input.applicationProblem === capture?.applicationProblem
+          )
+        ).toBe(true)
         if (mismatch === "absent" || mismatch === "withheld") {
           expect(capture?.system.event).toBeNull()
           expect(
@@ -670,26 +738,41 @@ describe("effective movement price application", () => {
         ).toEqual(["market_quote", "observed_consideration", "user_valuation"])
         expect(ledger.events.find((event) => event.id === fixture.acquisition.id)).toMatchObject({
           _tag: "acquisition",
-          cause: "purchase",
+          cause: "gift",
         })
-        expect((yield* recompute(1)).status).toBe("complete")
+        expect((yield* recompute(1)).status).toBe("partial")
         const run = yield* readRun(1)
-        expect(moneyEquals(run.results[0]?.basis, "20")).toBe(true)
+        expect(run.blockers).toContainEqual(
+          expect.objectContaining({ code: "de.gift_acquisition_basis_required" })
+        )
         const price = run.inputs.find(
           ({ captured }) => captured.history.id === accepted.overrideId
         )?.captured
         const classification = run.inputs.find(
           ({ captured }) => captured.history.kind === "classification"
         )?.captured
-        expect(classification?.application).toBe("not_applied")
+        expect(classification?.application).toBe("applied")
+        expect(classification?.effective.classificationEvidence).toEqual({
+          _tag: "user_assertion",
+          overrideId: classification?.history.id,
+        })
+        expect(classification?.system.event).toMatchObject({ cause: "purchase" })
         expect(classification?.effective).toEqual(price?.effective)
         expect(price?.system.valuationFacts.map((fact) => fact._tag).sort()).toEqual([
           "market_quote",
           "observed_consideration",
         ])
         yield* changePrice({ operation: "withdraw", targetId: fixture.acquisition.targetId })
-        expect((yield* recompute(2)).status).toBe("complete")
-        expect(moneyEquals((yield* readRun(2)).results[0]?.basis, "5")).toBe(true)
+        expect((yield* recompute(2)).status).toBe("partial")
+        expect((yield* readRun(2)).blockers).toContainEqual(
+          expect.objectContaining({ code: "de.gift_acquisition_basis_required" })
+        )
+        yield* changeClassification({
+          operation: "withdraw",
+          targetId: fixture.acquisition.targetId,
+        })
+        expect((yield* recompute(3)).status).toBe("complete")
+        expect(moneyEquals((yield* readRun(3)).results[0]?.basis, "5")).toBe(true)
       })
   )
   for (const targetKind of ["exact", "provider"] as const) {
@@ -802,6 +885,205 @@ describe("effective movement price application", () => {
           expect(ledger.inputBlockers).toContainEqual(
             expect.objectContaining({ code: "missing_decimals" })
           )
+      })
+    )
+  }
+
+  it.effect(
+    "changes an unknown priced receipt to purchase and preserves the prior partial run",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* runPg(seed({ transactionType: null, systemPurchaseValue: "20" }))
+        yield* runPg(
+          seed({
+            principalId: OTHER_PRINCIPAL_ID,
+            userId: OTHER_USER_ID,
+            sourceId: OTHER_SOURCE_ID,
+            assets: false,
+            transactionType: null,
+            systemPurchaseValue: "20",
+          })
+        )
+        expect((yield* recompute(1)).status).toBe("partial")
+        const before = yield* readRun(1)
+        const accepted = yield* changeClassification({
+          operation: "create",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "inbound", cause: "purchase" },
+        })
+        expect((yield* recompute(2)).status).toBe("complete")
+        const run = yield* readRun(2)
+        expect(moneyEquals(run.results[0]?.basis, "20")).toBe(true)
+        expect(moneyEquals(run.results[0]?.gain, "10")).toBe(true)
+        expect(run.inputs[0]?.captured).toMatchObject({
+          application: "applied",
+          resolvedPrice: null,
+          system: { event: { cause: "unknown" } },
+          effective: {
+            event: { cause: "purchase" },
+            classificationEvidence: { _tag: "user_assertion", overrideId: accepted.overrideId },
+          },
+          history: { actorUserId: USER_ID, reason: "Synthetic user assertion" },
+        })
+        expect(yield* readRun(1)).toEqual(before)
+        expect((yield* recompute(3, OTHER_PRINCIPAL_ID)).status).toBe("partial")
+        yield* changeClassification({
+          operation: "withdraw",
+          targetId: fixture.acquisition.targetId,
+        })
+        expect((yield* recompute(4)).status).toBe("partial")
+        expect(
+          (yield* readRun(4)).inputs.every(
+            ({ captured }) =>
+              captured.effective.classificationEvidence === undefined &&
+              captured.effective.event?._tag === "acquisition" &&
+              captured.effective.event.cause === "unknown"
+          )
+        ).toBe(true)
+      })
+  )
+
+  it.effect("keeps generic staking blocked until an explicit user passive-staking assertion", () =>
+    Effect.gen(function* () {
+      const fixture = yield* runPg(
+        seed({ transactionType: "staking_reward", systemPurchaseValue: "20" })
+      )
+      expect((yield* recompute(1)).status).toBe("partial")
+      expect((yield* readRun(1)).blockers).toContainEqual(
+        expect.objectContaining({ code: "de.staking_activity_classification_required" })
+      )
+      const accepted = yield* changeClassification({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "inbound", cause: "passive_staking_reward" },
+      })
+      expect((yield* recompute(2)).status).toBe("complete")
+      const run = yield* readRun(2)
+      expect(moneyEquals(run.results[0]?.basis, "20")).toBe(true)
+      expect(run.income).toHaveLength(1)
+      expect(moneyEquals(run.income[0]?.value, "20")).toBe(true)
+      expect(run.income[0]?.treatmentCodes).toContain("de.taxable_income_section22_3_staking")
+      expect(run.inputs[0]?.captured).toMatchObject({
+        system: { event: { cause: "staking_reward" } },
+        effective: {
+          event: { cause: "passive_staking_reward" },
+          classificationEvidence: { _tag: "user_assertion", overrideId: accepted.overrideId },
+        },
+      })
+      const raw = yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          return yield* db
+            .select({
+              kind: schema.transactions.transactionType,
+              providerKind: schema.transactions.providerTransactionType,
+            })
+            .from(schema.transactions)
+            .where(eq(schema.transactions.id, fixture.purchaseId))
+        })
+      )
+      expect(raw).toEqual([{ kind: "staking_reward", providerKind: null }])
+      yield* changeClassification({
+        operation: "replace",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "inbound", cause: "staking_reward" },
+      })
+      expect((yield* recompute(3)).status).toBe("partial")
+      expect((yield* readRun(3)).blockers).toContainEqual(
+        expect.objectContaining({ code: "de.staking_activity_classification_required" })
+      )
+    })
+  )
+
+  it.effect("a priced airdrop keeps its missing-facts blocker", () =>
+    Effect.gen(function* () {
+      const fixture = yield* runPg(seed())
+      yield* changePrice({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "total_value", amount: "20", currency: EUR },
+      })
+      yield* changeClassification({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "inbound", cause: "airdrop" },
+      })
+      expect((yield* recompute(1)).status).toBe("partial")
+      const run = yield* readRun(1)
+      expect(run.blockers).toContainEqual(
+        expect.objectContaining({ code: "de.airdrop_classification_required" })
+      )
+      expect(run.inputs.every(({ captured }) => captured.application === "applied")).toBe(true)
+      expect(run.inputs[0]?.captured.effective).toEqual(run.inputs[1]?.captured.effective)
+    })
+  )
+
+  it.effect("changes only an outbound cause and retains its price and movement structure", () =>
+    Effect.gen(function* () {
+      const fixture = yield* runPg(seed({ systemPurchaseValue: "20" }))
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db
+            .update(schema.transactions)
+            .set({ transactionType: null })
+            .where(eq(schema.transactions.id, fixture.saleId))
+        })
+      )
+      expect((yield* recompute(1)).status).toBe("partial")
+      yield* changeClassification({
+        operation: "create",
+        targetId: fixture.disposition.targetId,
+        input: { _tag: "outbound", cause: "sale" },
+      })
+      expect((yield* recompute(2)).status).toBe("complete")
+      const capture = (yield* readRun(2)).inputs[0]?.captured
+      expect(capture?.system.event).toMatchObject({ _tag: "disposition", cause: "unknown" })
+      expect(capture?.effective.event).toEqual({ ...capture?.system.event, cause: "sale" })
+      expect(capture?.effective.valuationFacts).toEqual(capture?.system.valuationFacts)
+    })
+  )
+
+  for (const forbidden of ["direction", "fee"] as const) {
+    it.effect(`rejects ${forbidden} classification without history or work`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* runPg(seed())
+        if (forbidden === "fee")
+          yield* runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db
+                .update(schema.transactionLegs)
+                .set({ kind: "fee" })
+                .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+            })
+          )
+        const refused = yield* changeClassification({
+          operation: "create",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "outbound", cause: "sale" },
+        }).pipe(Effect.result)
+        expect(refused).toMatchObject({
+          _tag: "Failure",
+          failure: {
+            code:
+              forbidden === "fee"
+                ? "fee_classification_forbidden"
+                : "classification_direction_mismatch",
+          },
+        })
+        const rows = yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return {
+              history: yield* db
+                .select({ id: schema.principalTransactionOverrides.id })
+                .from(schema.principalTransactionOverrides),
+              jobs: yield* db.select({ id: schema.processingJobs.id }).from(schema.processingJobs),
+            }
+          })
+        )
+        expect(rows).toEqual({ history: [], jobs: [] })
       })
     )
   }

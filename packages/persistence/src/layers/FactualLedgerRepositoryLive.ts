@@ -1688,7 +1688,7 @@ const make = Effect.gen(function* () {
       })
       return {
         correctionInputs: movementCorrections.correctionInputs,
-        events,
+        events: events.map((event) => movementCorrections.effectiveEvents.get(event.id) ?? event),
         valuationFacts: movementCorrections.valuationFacts.sort(compareValuationFacts),
         custodyUnitMembership,
         inputBlockers: [...inputBlockers, ...movementCorrections.inputBlockers].sort(
