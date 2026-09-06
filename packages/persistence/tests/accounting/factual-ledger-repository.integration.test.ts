@@ -6,6 +6,7 @@ import { and, eq, sql } from "drizzle-orm"
 import * as BigDecimal from "effect/BigDecimal"
 import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
+import { makeFactualLedgerSnapshotReader } from "../../src/layers/FactualLedgerSnapshotReader.ts"
 import { FactualLedgerRepositoryLive } from "../../src/layers/FactualLedgerRepositoryLive.ts"
 import { drizzle } from "../../src/layers/PgClientLive.ts"
 import { schema } from "../../src/schema/index.ts"
@@ -2255,6 +2256,22 @@ describe("FactualLedgerRepositoryLive", () => {
       )
 
       const result = yield* Effect.promise(loadFactualLedger)
+
+      const shared = yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const reader = yield* makeFactualLedgerSnapshotReader
+            return yield* reader.load({
+              principalId: TEST_PRINCIPAL_ID,
+              reportingCurrency: CurrencyCode.make("EUR"),
+            })
+          })
+        )
+      )
+      expect(shared.ledger).toEqual(result)
+      expect(
+        [...shared.movements.values()].flatMap((value) => value.system.valuationFacts)
+      ).toHaveLength(2)
 
       expect(result.events[0]?.transactionReference).toBe("factual-ledger-valued-purchase")
 

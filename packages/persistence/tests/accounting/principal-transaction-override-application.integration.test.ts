@@ -178,7 +178,11 @@ const changePrice = ({
     layer: PrincipalTransactionOverrideRepositoryLive,
     effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repository) =>
       Effect.gen(function* () {
-        const found = yield* repository.findContext({ principalId: PRINCIPAL_ID, targetId })
+        const found = yield* repository.findContext({
+          principalId: PRINCIPAL_ID,
+          targetId,
+          reportingCurrency: EUR,
+        })
         if (Option.isNone(found) || found.value.current === null)
           return yield* Effect.die("Missing current synthetic movement")
         const parameters = {
@@ -188,6 +192,7 @@ const changePrice = ({
           expectedSystemRevision: found.value.current.facts.systemRevision,
           expectedLeafId: found.value.price.leaf?.id ?? null,
           reason: "Synthetic price evidence",
+          reportingCurrency: EUR,
         }
         const result =
           operation === "withdraw"
@@ -316,7 +321,11 @@ const changeClassification = ({
     layer: PrincipalTransactionOverrideRepositoryLive,
     effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repository) =>
       Effect.gen(function* () {
-        const found = yield* repository.findContext({ principalId: PRINCIPAL_ID, targetId })
+        const found = yield* repository.findContext({
+          principalId: PRINCIPAL_ID,
+          targetId,
+          reportingCurrency: EUR,
+        })
         if (Option.isNone(found) || found.value.current === null)
           return yield* Effect.die("Missing synthetic classification context")
         const parameters = {
@@ -326,6 +335,7 @@ const changeClassification = ({
           expectedSystemRevision: found.value.current.facts.systemRevision,
           expectedLeafId: found.value.classification.leaf?.id ?? null,
           reason: "Synthetic user assertion",
+          reportingCurrency: EUR,
         }
         const result =
           operation === "withdraw"
@@ -821,6 +831,7 @@ describe("effective movement price application", () => {
           effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
             Effect.gen(function* () {
               const found = yield* repo.findContext({
+                reportingCurrency: EUR,
                 principalId: PRINCIPAL_ID,
                 targetId: fixture.acquisition.targetId,
               })
@@ -873,6 +884,20 @@ describe("effective movement price application", () => {
         const classification = run.inputs.find(
           ({ captured }) => captured.history.kind === "classification"
         )?.captured
+        const inspectedEvidence = {
+          reportingCurrency: "EUR",
+          facts: [
+            {
+              _tag: "observed_consideration",
+              eventId: fixture.acquisition.id,
+              amount: { amount: "5", currency: "EUR" },
+              evidenceReference: `transaction:${fixture.purchaseId}`,
+            },
+          ],
+        }
+        expect(price?.history.inspectedValuationEvidence).toEqual(inspectedEvidence)
+        expect(classification?.history.inspectedValuationEvidence).toEqual(inspectedEvidence)
+        expect(price?.history.inspectedSystem.recordedFiatAmount).toBeNull()
         expect(classification?.application).toBe("applied")
         expect(classification?.effective.classificationEvidence).toEqual({
           _tag: "user_assertion",

@@ -32,7 +32,7 @@ const read = (targetId = TARGET_ID, principalId = ownedPrincipal) =>
   context.runWithLayer({
     layer: PrincipalTransactionOverrideRepositoryLive,
     effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
-      repo.findContext({ principalId, targetId })
+      repo.findContext({ principalId, targetId, reportingCurrency: CurrencyCode.make("EUR") })
     ),
   })
 
@@ -100,6 +100,7 @@ const seed = Effect.gen(function* () {
     inspectedLegKind: "acquisition",
     inspectedFiatAmount: null,
     inspectedFiatCurrency: null,
+    inspectedValuationEvidence: { reportingCurrency: CurrencyCode.make("EUR"), facts: [] },
     inspectedTransactionType: null,
     inspectedProviderTransactionType: "synthetic-credit",
     priceInput: {
@@ -246,6 +247,193 @@ await Effect.runPromise(context.recreateTestDatabase())
 beforeEach(() => Effect.runPromise(context.recreateTestDatabase()))
 
 describe("movement correction history reader", () => {
+  it.effect(
+    "changes inspection for selected quote source but ignores quotes outside the consumed day and currency",
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => context.runPg(seed))
+        const unknown = yield* read()
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.insert(schema.assetPrices).values({
+                assetId: TEST_BTC_ASSET_ID,
+                currency: "EUR",
+                price: "2",
+                timestamp: time,
+                source: "synthetic-a",
+              })
+            })
+          )
+        )
+        const known = yield* read()
+        if (Option.isNone(unknown) || Option.isNone(known))
+          return yield* Effect.die("Missing quote inspection")
+        expect(known.value.current?.facts.systemRevision).not.toBe(
+          unknown.value.current?.facts.systemRevision
+        )
+        expect(known.value.current?.valuationEvidence.facts[0]).toMatchObject({
+          _tag: "market_quote",
+          quotedAt: { epochMillis: time.getTime() },
+          source: "synthetic-a",
+        })
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.update(schema.assetPrices).set({ source: "synthetic-b" })
+            })
+          )
+        )
+        const changedSource = yield* read()
+        if (Option.isNone(changedSource))
+          return yield* Effect.die("Missing changed quote inspection")
+        expect(changedSource.value.current?.facts.systemRevision).not.toBe(
+          known.value.current?.facts.systemRevision
+        )
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.insert(schema.assetPrices).values([
+                {
+                  assetId: TEST_BTC_ASSET_ID,
+                  currency: "USD",
+                  price: "99",
+                  timestamp: time,
+                  source: "unused",
+                },
+                {
+                  assetId: TEST_BTC_ASSET_ID,
+                  currency: "EUR",
+                  price: "99",
+                  timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2026-01-02T00:00:00Z")),
+                  source: "unused",
+                },
+              ])
+            })
+          )
+        )
+        const irrelevant = yield* read()
+        expect(
+          Option.isSome(irrelevant) ? irrelevant.value.current?.facts.systemRevision : null
+        ).toBe(changedSource.value.current?.facts.systemRevision)
+      })
+  )
+
+  it.effect(
+    "retains exact evidence while replay IDs and unconsumed consideration leave inspection stable",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => context.runPg(seed))
+        const unknown = yield* read()
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db
+                .update(schema.transactions)
+                .set({ providerFiatAmount: "20", providerFiatCurrency: "EUR" })
+                .where(eq(schema.transactions.id, fixture.transactionId))
+            })
+          )
+        )
+        const known = yield* read()
+        if (Option.isNone(known) || Option.isNone(unknown))
+          return yield* Effect.die("Missing synthetic context")
+        expect(known.value.current?.facts.systemRevision).not.toBe(
+          unknown.value.current?.facts.systemRevision
+        )
+        expect(known.value.current?.valuationEvidence).toEqual({
+          reportingCurrency: "EUR",
+          facts: [
+            {
+              _tag: "observed_consideration",
+              eventId: fixture.legId,
+              amount: { amount: "20", currency: "EUR" },
+              evidenceReference: `transaction:${fixture.transactionId}`,
+            },
+          ],
+        })
+        const usd = yield* context.runWithLayer({
+          layer: PrincipalTransactionOverrideRepositoryLive,
+          effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
+            repo.findContext({
+              principalId: ownedPrincipal,
+              targetId: TARGET_ID,
+              reportingCurrency: CurrencyCode.make("USD"),
+            })
+          ),
+        })
+        expect(Option.isSome(usd) ? usd.value.current?.valuationEvidence : null).toEqual({
+          reportingCurrency: "USD",
+          facts: [],
+        })
+        const replayId = yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db
+                .delete(schema.transactionLegs)
+                .where(eq(schema.transactionLegs.id, fixture.legId))
+              const [replayed] = yield* db
+                .insert(schema.transactionLegs)
+                .values(fixture.legValues)
+                .returning({ id: schema.transactionLegs.id })
+              if (replayed === undefined) return yield* Effect.die("Missing replayed leg")
+              return replayed.id
+            })
+          )
+        )
+        const replayed = yield* read()
+        if (Option.isNone(replayed)) return yield* Effect.die("Missing replayed context")
+        expect(replayId).not.toBe(fixture.legId)
+        expect(replayed.value.current?.facts.systemRevision).toBe(
+          known.value.current?.facts.systemRevision
+        )
+        expect(replayed.value.current?.valuationEvidence.facts[0]?.eventId).toBe(replayId)
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.insert(schema.movementCorrectionTargets).values({
+                id: OTHER_ID,
+                sourceId: SOURCE_ID,
+                principalId: TEST_PRINCIPAL_ID,
+                sourceRecordKey: "synthetic-record",
+                componentKey: "second",
+              })
+              yield* db.insert(schema.transactionLegs).values({
+                ...fixture.legValues,
+                externalId: "synthetic-second",
+                movementCorrectionTargetId: OTHER_ID,
+              })
+            })
+          )
+        )
+        const multiple = yield* read()
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db
+                .update(schema.transactions)
+                .set({ providerFiatAmount: "99" })
+                .where(eq(schema.transactions.id, fixture.transactionId))
+            })
+          )
+        )
+        const changedUnused = yield* read()
+        if (Option.isNone(multiple) || Option.isNone(changedUnused))
+          return yield* Effect.die("Missing multiple-event context")
+        expect(multiple.value.current?.valuationEvidence.facts).toEqual([])
+        expect(changedUnused.value.current?.facts.systemRevision).toBe(
+          multiple.value.current?.facts.systemRevision
+        )
+      })
+  )
+
   it.effect("keeps current unknown system facts separate from retained precise price input", () =>
     Effect.gen(function* () {
       const fixture = yield* Effect.promise(() => context.runPg(seed))

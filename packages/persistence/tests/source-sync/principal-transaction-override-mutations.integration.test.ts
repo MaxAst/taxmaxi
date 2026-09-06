@@ -39,7 +39,7 @@ const read = (targetId = TARGET_ID, principalId = ownedPrincipal) =>
   context.runWithLayer({
     layer: PrincipalTransactionOverrideRepositoryLive,
     effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
-      repo.findContext({ principalId, targetId })
+      repo.findContext({ principalId, targetId, reportingCurrency: CurrencyCode.make("EUR") })
     ),
   })
 
@@ -150,6 +150,78 @@ const counts = () =>
 const initialize = Effect.promise(() => context.runPg(seed))
 
 describe("atomic movement correction mutations", () => {
+  for (const kind of ["price", "classification"] as const) {
+    for (const valuation of ["provider", "market"] as const) {
+      for (const operation of ["create", "replace", "withdraw"] as const) {
+        it.effect(
+          `rejects stale ${valuation} inspection for ${kind} ${operation} without writes`,
+          () =>
+            Effect.gen(function* () {
+              const fixture = yield* initialize
+              const updateValuation = (amount: string) =>
+                Effect.promise(() =>
+                  context.runPg(
+                    Effect.gen(function* () {
+                      const db = yield* drizzle
+                      if (valuation === "provider") {
+                        yield* db
+                          .update(schema.transactions)
+                          .set({ providerFiatAmount: amount, providerFiatCurrency: "EUR" })
+                          .where(eq(schema.transactions.id, fixture.transactionId))
+                      } else {
+                        yield* db.delete(schema.assetPrices)
+                        yield* db.insert(schema.assetPrices).values({
+                          assetId: TEST_BTC_ASSET_ID,
+                          currency: "EUR",
+                          price: amount,
+                          timestamp: time,
+                          source: "synthetic-market",
+                        })
+                      }
+                    })
+                  )
+                )
+              yield* updateValuation("20")
+              const input: MovementCorrectionInput =
+                kind === "price"
+                  ? price
+                  : { _tag: "classification", input: { _tag: "inbound", cause: "purchase" } }
+              if (operation !== "create") {
+                const initial = yield* getContext
+                yield* withRepository((repo) =>
+                  repo.create({ ...parameters(initial, kind), input })
+                )
+              }
+              const inspected = yield* getContext
+              expect(inspected.current?.valuationEvidence.facts).toHaveLength(1)
+              yield* updateValuation("30")
+              const current = yield* getContext
+              expect(current.current?.facts.systemRevision).not.toBe(
+                inspected.current?.facts.systemRevision
+              )
+              const before = yield* counts()
+              const request = { ...parameters(inspected, kind), input }
+              const result = yield* withRepository((repo) =>
+                operation === "withdraw"
+                  ? repo.withdraw({ ...request, kind })
+                  : repo[operation](request)
+              ).pipe(Effect.result)
+              expect(Result.isFailure(result) ? result.failure._tag : null).toBe(
+                "MovementCorrectionConflictError"
+              )
+              expect(yield* counts()).toEqual(before)
+              if (operation !== "create") {
+                expect(current[kind].active?.inspectedValuationEvidence).toEqual(
+                  inspected.current?.valuationEvidence
+                )
+                expect(current[kind].active?.input).toEqual(input)
+              }
+            })
+        )
+      }
+    }
+  }
+
   it.effect(
     "retains exact current facts, actor, zero and independent streams with one pending replay",
     () =>
@@ -264,6 +336,16 @@ describe("atomic movement correction mutations", () => {
       Effect.gen(function* () {
         yield* initialize
         const request = parameters(yield* getContext)
+        const usd = yield* withRepository((repo) =>
+          repo.findContext({
+            principalId: ownedPrincipal,
+            targetId: TARGET_ID,
+            reportingCurrency: CurrencyCode.make("USD"),
+          })
+        )
+        if (Option.isNone(usd) || usd.value.current === null)
+          return yield* Effect.die("Missing USD inspection")
+        const usdRevision = usd.value.current.facts.systemRevision
         const attempts = [
           withRepository((repo) => repo.create({ ...request, expectedSystemRevision: "stale" })),
           withRepository((repo) =>
@@ -271,7 +353,11 @@ describe("atomic movement correction mutations", () => {
           ),
           withRepository((repo) => repo.create({ ...request, reason: " " })),
           withRepository((repo) =>
-            repo.create({ ...request, reportingCurrency: CurrencyCode.make("USD") })
+            repo.create({
+              ...request,
+              expectedSystemRevision: usdRevision,
+              reportingCurrency: CurrencyCode.make("USD"),
+            })
           ),
           withRepository((repo) =>
             repo.create({

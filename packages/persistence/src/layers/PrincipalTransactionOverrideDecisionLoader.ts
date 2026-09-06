@@ -5,6 +5,8 @@
  */
 import {
   AccountingEvent,
+  ObservedConsiderationFact,
+  MarketQuoteFact,
   MovementClassificationInput,
   MovementCorrectionFacts,
   MovementPriceInput,
@@ -14,7 +16,7 @@ import {
   validateMovementClassification,
   type CustodyUnitId,
 } from "@my/core/accounting"
-import type { CurrencyCode } from "@my/core/currency"
+import { CurrencyCode } from "@my/core/currency"
 import type { PrincipalId } from "@my/core/ownership"
 import { and, asc, eq, getTableColumns } from "drizzle-orm"
 import * as BigDecimal from "effect/BigDecimal"
@@ -28,8 +30,17 @@ import type {
   MovementCorrectionLegContext,
   MovementCorrectionApplicationProblem,
   FactualLedgerInputBlocker,
+  MovementFactualProjection,
 } from "../services/FactualLedgerRepository.ts"
 import { drizzle } from "./PgClientLive.ts"
+
+/** Shared JSONB boundary: user corrections cannot become inspected system valuation evidence. */
+export const MovementValuationEvidenceSchema = Schema.Struct({
+  reportingCurrency: CurrencyCode,
+  facts: Schema.Array(
+    Schema.Union([Schema.toEncoded(ObservedConsiderationFact), Schema.toEncoded(MarketQuoteFact)])
+  ),
+})
 
 const captureHistory = (row: typeof schema.principalTransactionOverrides.$inferSelect) =>
   Effect.gen(function* () {
@@ -68,6 +79,9 @@ const captureHistory = (row: typeof schema.principalTransactionOverrides.$inferS
       kind: row.kind,
       operation: row.operation,
       inspectedFacts: yield* Schema.encodeEffect(MovementCorrectionFacts)(inspectedFacts),
+      inspectedValuationEvidence: yield* Schema.decodeEffect(MovementValuationEvidenceSchema)(
+        row.inspectedValuationEvidence
+      ),
       inspectedSystem: {
         occurredAt: row.inspectedOccurredAt.toISOString(),
         legKind: row.inspectedLegKind,
@@ -316,7 +330,8 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
       const superseded = new Set(
         rows.flatMap((row) => (row.supersedesOverrideId === null ? [] : [row.supersedesOverrideId]))
       )
-      const streamKey = (row: (typeof rows)[number]) => `${row.targetId}:${row.kind}`
+      const streamKey = (row: { readonly targetId: string; readonly kind: string }) =>
+        `${row.targetId}:${row.kind}`
       const relevantStreams = new Set(
         rows
           .filter((row) => {
@@ -331,11 +346,16 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
           })
           .map(streamKey)
       )
-      const captured: CalculationRunCorrectionInput[] = []
-      for (const row of rows) {
-        if (!relevantStreams.has(streamKey(row))) continue
-        const current = contextByTarget.get(row.targetId) ?? null
-        const event = current === null ? undefined : eventsByTarget.get(current.targetId)
+      const inputsByTarget = new Map<
+        string,
+        Omit<MovementFactualProjection, "effective" | "corrections">
+      >()
+      for (const targetId of new Set([
+        ...contextByTarget.keys(),
+        ...rows.map((row) => row.targetId),
+      ])) {
+        const current = contextByTarget.get(targetId) ?? null
+        const event = eventsByTarget.get(targetId)
         const system = {
           event: event === undefined ? null : yield* Schema.encodeEffect(AccountingEvent)(event),
           valuationFacts: yield* Effect.forEach(
@@ -343,6 +363,28 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
             (fact) => Schema.encodeEffect(ValuationFact)(fact)
           ),
         }
+        const currentOutcome =
+          event !== undefined
+            ? "included"
+            : current === null
+              ? "absent"
+              : current.custody.length > 0
+                ? current.custody.every((selection) => selection.outcome === "outside_period")
+                  ? "outside_period"
+                  : "withheld"
+                : occurredBefore !== undefined && current.occurredAt >= occurredBefore.toISOString()
+                  ? "outside_period"
+                  : "withheld"
+        inputsByTarget.set(targetId, { targetId, current, currentOutcome, system })
+      }
+      const captured: CalculationRunCorrectionInput[] = []
+      for (const row of rows) {
+        const inputs = inputsByTarget.get(row.targetId)
+        if (inputs === undefined)
+          return yield* new PersistenceError({
+            operation: "movementCorrection.inputs",
+            cause: "Missing recorded target inputs",
+          })
         const streamState = superseded.has(row.id)
           ? "superseded"
           : row.operation === "withdraw"
@@ -350,30 +392,18 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
             : "active"
         captured.push({
           history: yield* captureHistory(row),
-          current,
-          currentOutcome:
-            event !== undefined
-              ? "included"
-              : current === null
-                ? "absent"
-                : current.custody.length > 0
-                  ? current.custody.every((selection) => selection.outcome === "outside_period")
-                    ? "outside_period"
-                    : "withheld"
-                  : occurredBefore !== undefined &&
-                      current.occurredAt >= occurredBefore.toISOString()
-                    ? "outside_period"
-                    : "withheld",
+          current: inputs.current,
+          currentOutcome: inputs.currentOutcome,
           streamState,
           application: streamState === "active" ? "not_applied" : "inactive",
           reportingCurrency,
           applicationProblem: null,
           resolvedPrice: null,
-          system,
-          effective: system,
+          system: inputs.system,
+          effective: inputs.system,
         })
       }
-      return yield* applyCorrections({
+      const applied = yield* applyCorrections({
         captured,
         eventsByTarget,
         custodyUnitIdBySource,
@@ -386,6 +416,42 @@ export const makePrincipalTransactionOverrideDecisionLoader = Effect.gen(functio
           ])
         ),
       })
+      const correctionsByTarget = new Map<string, CalculationRunCorrectionInput[]>()
+      for (const capture of applied.correctionInputs) {
+        const existing = correctionsByTarget.get(capture.history.targetId)
+        if (existing === undefined) correctionsByTarget.set(capture.history.targetId, [capture])
+        else existing.push(capture)
+      }
+      const movements = new Map<string, MovementFactualProjection>()
+      for (const targetId of new Set([...contextByTarget.keys(), ...correctionsByTarget.keys()])) {
+        const corrections = correctionsByTarget.get(targetId) ?? []
+        const captured = corrections[0]
+        if (captured !== undefined) {
+          movements.set(targetId, {
+            targetId,
+            current: captured.current,
+            currentOutcome: captured.currentOutcome,
+            system: captured.system,
+            effective: captured.effective,
+            corrections,
+          })
+          continue
+        }
+        const inputs = inputsByTarget.get(targetId)
+        if (inputs === undefined)
+          return yield* new PersistenceError({
+            operation: "movementCorrection.projection",
+            cause: "Missing recorded target inputs",
+          })
+        movements.set(targetId, { ...inputs, effective: inputs.system, corrections })
+      }
+      return {
+        ...applied,
+        movements,
+        correctionInputs: applied.correctionInputs.filter((capture) =>
+          relevantStreams.has(streamKey(capture.history))
+        ),
+      }
     }).pipe(wrapSqlError("principalTransactionOverrideDecisionLoader.load"))
   return { load }
 })

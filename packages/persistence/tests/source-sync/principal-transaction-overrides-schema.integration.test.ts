@@ -59,6 +59,7 @@ const seed = Effect.gen(function* () {
     inspectedLegKind: "acquisition",
     inspectedFiatAmount: null,
     inspectedFiatCurrency: null,
+    inspectedValuationEvidence: { reportingCurrency: CurrencyCode.make("EUR"), facts: [] },
     inspectedTransactionType: null,
     inspectedProviderTransactionType: "synthetic-credit",
     inspectedDerivationRule: "synthetic-amount",
@@ -123,6 +124,24 @@ describe("movement correction history schema", () => {
         Effect.gen(function* () {
           const fixture = yield* seed
           const db = yield* drizzle
+          for (const facts of [
+            [null],
+            [1],
+            ["invalid"],
+            [{}],
+            [{ _tag: "user_valuation" }],
+            [[{ _tag: "market_quote" }]],
+          ]) {
+            expect(
+              (yield* db
+                .insert(schema.principalTransactionOverrides)
+                .values({
+                  ...fixture,
+                  inspectedValuationEvidence: sql`${{ reportingCurrency: "EUR", facts }}::jsonb`,
+                })
+                .pipe(Effect.result))._tag
+            ).toBe("Failure")
+          }
           for (const payload of [
             { _tag: "unit_price", amount: 1, currency: "EUR" },
             { _tag: "unit_price", amount: "-1", currency: "EUR" },
@@ -288,6 +307,17 @@ describe("movement correction history schema", () => {
             (yield* db
               .update(schema.principalTransactionOverrides)
               .set({ reason: "Rewritten" })
+              .pipe(Effect.result))._tag
+          ).toBe("Failure")
+          expect(
+            (yield* db
+              .update(schema.principalTransactionOverrides)
+              .set({
+                inspectedValuationEvidence: {
+                  reportingCurrency: CurrencyCode.make("USD"),
+                  facts: [],
+                },
+              })
               .pipe(Effect.result))._tag
           ).toBe("Failure")
           expect(

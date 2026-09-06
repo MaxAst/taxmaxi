@@ -18,6 +18,7 @@ import type { PrincipalId } from "@my/core/ownership"
 import * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import type * as Option from "effect/Option"
+import type { MovementValuationEvidence } from "./FactualLedgerRepository.ts"
 import type { PersistenceError } from "../errors/RepositoryError.ts"
 
 /** Recorded system evidence, kept separate from effective correction inputs. */
@@ -42,6 +43,7 @@ export interface PrincipalTransactionOverrideHistoryRecord {
   readonly operation: "create" | "replace" | "withdraw"
   readonly inspectedFacts: MovementCorrectionFacts
   readonly inspectedSystem: MovementSystemEvidence
+  readonly inspectedValuationEvidence: MovementValuationEvidence
   readonly input:
     | { readonly _tag: "price"; readonly input: MovementPriceInput }
     | { readonly _tag: "classification"; readonly input: MovementClassificationInput }
@@ -67,6 +69,7 @@ export interface PrincipalTransactionOverrideContext {
     readonly transactionId: string | null
     readonly facts: MovementCorrectionFacts
     readonly system: MovementSystemEvidence
+    readonly valuationEvidence: MovementValuationEvidence
   } | null
   readonly price: MovementCorrectionStream
   readonly classification: MovementCorrectionStream
@@ -91,6 +94,7 @@ export interface SetMovementCorrectionParams extends MovementCorrectionMutationP
 
 /** Withdrawal changes exactly one independent stream. */
 export interface WithdrawMovementCorrectionParams extends MovementCorrectionMutationParams {
+  readonly reportingCurrency: CurrencyCode
   readonly kind: "price" | "classification"
 }
 
@@ -136,6 +140,7 @@ export interface PrincipalTransactionOverrideRepositoryShape {
   readonly findContext: (params: {
     readonly principalId: PrincipalId
     readonly targetId: string
+    readonly reportingCurrency: CurrencyCode
   }) => Effect.Effect<Option.Option<PrincipalTransactionOverrideContext>, PersistenceError>
   /** Append an initial event or create after the explicitly expected withdrawal leaf. */
   readonly create: (

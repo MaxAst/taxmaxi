@@ -142,6 +142,17 @@ const seedCorrectionMovement = Effect.gen(function* () {
     inspectedLegKind: "acquisition",
     inspectedFiatAmount: null,
     inspectedFiatCurrency: null,
+    inspectedValuationEvidence: {
+      reportingCurrency: EUR,
+      facts: [
+        {
+          _tag: "observed_consideration",
+          eventId: leg.id,
+          amount: { amount: "10", currency: EUR },
+          evidenceReference: `transaction:${transaction.id}`,
+        },
+      ],
+    },
     inspectedTransactionType: "buy_fiat",
     inspectedProviderTransactionType: null,
     inspectedDerivationRule: null,
@@ -445,6 +456,7 @@ describe("CalculationRunServiceLive", () => {
                   ...fixture.draft,
                   sourceId: otherSourceId,
                   targetId: providerLeg.targetId,
+                  inspectedValuationEvidence: { reportingCurrency: EUR, facts: [] },
                   inspectedSourceRecordKey: "synthetic-custody-provider",
                   inspectedOccurredAt: laterProviderTime,
                 })
@@ -498,6 +510,7 @@ describe("CalculationRunServiceLive", () => {
                   yield* db.insert(schema.principalTransactionOverrides).values({
                     ...fixture.draft,
                     targetId: fee.targetId,
+                    inspectedValuationEvidence: { reportingCurrency: EUR, facts: [] },
                     inspectedComponentKey: "fee",
                     inspectedQuantity: "0.1",
                     inspectedDirection: "outbound",
