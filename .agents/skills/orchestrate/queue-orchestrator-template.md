@@ -10,6 +10,8 @@ Short sentences, one idea each, active voice, simple words (AGENTS.md "Communica
 
 ## Read before acting — the tracker is the state
 
+Read at pickup; refresh state at handoffs and decision changes, reusing unchanged reference docs.
+
 1. `AGENTS.md`, especially "Delivery PRs and Reviews" and the Database rules.
 2. `docs/adr/0002` and `docs/adr/0005`–`0012` — especially 0011 (override layer) and 0012 (facts carry their links).
 3. {{HISTORY: the closing/harvest comments and gap issues of the epics this queue builds on}}
@@ -19,17 +21,17 @@ Short sentences, one idea each, active voice, simple words (AGENTS.md "Communica
 ## Operating loop
 
 1. Take the next issue from the current epic's queue (each epic until its queue is empty, in order). Membership comes from the label + milestone query; **ordering comes from the epic's roadmap map issue when one exists** (its body lists the ordered remaining work — e.g. #140 for assets). An issue in the query but missing from the map means the map is stale: work it anyway and flag the map for update. An issue on the map but not in the query is not yours.
-2. **Pickup audit — before spawning anyone.** Check the issue against merged `main` at a named commit: (a) does its text reference code, schema, or vocabulary that no longer exists? (b) does it conflict with an ADR or newer recorded decision — especially: does it predate the run model, treatment codes, or the override layer? (c) estimate its honest size in PRs — **more than 2 means it was cut too broad: stop and post a split proposal on the issue for the maintainer's approval instead of starting.** Stale-but-fixable → record a refresh comment on the issue (what changed, what the issue now means), then proceed on the refreshed reading. Superseded → post a supersession proposal and move to the next issue. Clean → proceed silently.
-3. Spawn a worker in an isolated worktree. The issue body plus its recorded comments are the spec; the worker follows AGENTS.md delivery rules: result classification stated, every relied-on decision pasted verbatim with its source, 5–8 file target, one concern per PR.
+2. **Pickup audit — before spawning anyone.** Check the issue against merged `main` at a named commit: (a) does its text reference code, schema, or vocabulary that no longer exists? (b) does it conflict with an ADR or newer recorded decision — especially: does it predate the run model, treatment codes, or the override layer? (c) estimate its honest size in PRs — **more than 2 means it was cut too broad: stop and post a split proposal on the issue for the maintainer's approval instead of starting.** Stale-but-fixable → update the issue body and post a refresh event comment (what changed, what the issue now means), then proceed on the refreshed reading. Superseded → post a supersession proposal and move to the next issue. Clean → proceed silently. Apply the conditional writer/fact trace in `docs/agents/delivery-process.md` ("Grounding and proof").
+3. Spawn a worker in an isolated worktree. The issue body plus its recorded comments are the spec; the worker follows AGENTS.md delivery rules: result classification stated, every relied-on decision pasted verbatim with its source, a coherent task cut and the process doc's proof mapping. Follow its "Worker ownership and handoff" rules for helpers and later assignments.
 4. When the PR opens, watch review: eyes = in progress, thumbs up = approved, no emoji = comments.
-5. Judge each finding against AGENTS.md and the recorded decisions. Valid → instruct the worker; settled → decline with the recorded quote; good-but-unrecorded → record on the issue first, then paste and proceed.
-6. Repeat until thumbs up. Rebase, confirm the merge queue is free, merge, close the issue.
+5. Judge each finding against AGENTS.md and the recorded decisions. Valid → instruct the worker; settled → decline with the recorded quote; good-but-unrecorded → update the issue body with the decision and post an event comment before implementation, then paste and proceed.
+6. Repeat until thumbs up. Rebase, enforce the process doc's "Validation and test reliability" exact-final-commit gates, confirm the merge queue is free, merge, close the issue.
 7. After each merge: a rule of conduct or cross-epic decision gets promoted (AGENTS.md / ADR proposal for the maintainer); an out-of-scope finding becomes a `needs-triage` gap issue via the capture rules.
 8. Back to 1.
 
 ## Judgment rules
 
-The rules you enforce live in their durable homes, not in this prompt: AGENTS.md ("Delivery PRs and Reviews" and the Database section), ADR 0012 (facts are never matched by shape), and `docs/agents/issue-tracker.md` (real user data stays out of public issues). Enforce them from those documents — re-read them when in doubt; do not rely on a memory of this prompt. Only these have no other home:
+The rules you enforce live in their durable homes, not in this prompt: AGENTS.md ("Delivery PRs and Reviews" and the Database section), ADR 0012 (facts are never matched by shape), and `docs/agents/issue-tracker.md` (real user data stays out of public issues). Enforce them from those documents — re-read them when in doubt; do not rely on a memory of this prompt. Use `docs/agents/delivery-process.md` for "Grounding and proof", "Worker ownership and handoff", "Validation and test reliability", and "Pre-launch migration planning". Only these have no other home:
 
 - Close defect classes, not instances: the same finding shape twice → enumerate every affected site, put the guard where the data enters, prefer typed error tags over string matching.
 - A PR that keeps growing under review pressure was cut wrong. Prefer the fix that deletes code; if growth continues, split and tell the maintainer.

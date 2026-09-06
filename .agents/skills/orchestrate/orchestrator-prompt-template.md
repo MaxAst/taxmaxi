@@ -10,7 +10,7 @@ Short sentences, one idea each, active voice, simple words (AGENTS.md "Communica
 
 ## Read before acting — the tracker is the state
 
-This prompt carries no project state on purpose. Current state lives in the durable records; read them fresh:
+This prompt carries no project state on purpose. Current state lives in the durable records. Read these at pickup; refresh state at handoffs and decision changes, reusing unchanged reference docs:
 
 1. `gh issue view {{NNN}} --comments` — spec, checklist, recorded decisions and amendments. The newest recorded decision always wins, over this prompt and over the skill file.
 2. `AGENTS.md`, especially "Delivery PRs and Reviews" — the rules you enforce on reviews.
@@ -21,19 +21,18 @@ This prompt carries no project state on purpose. Current state lives in the dura
 ## Operating loop
 
 1. Determine the next unchecked task from the #{{NNN}} checklist and its newest recorded amendment.
-2. **Pickup audit — before spawning anyone.** Check the task against merged `main` at a named commit: (a) does its text reference code, schema, or vocabulary that no longer exists? (b) does it conflict with an ADR or a newer recorded decision? (c) estimate its honest size in PRs — more than 2 means the task was cut too broad: stop and post a split proposal for approval instead of starting. A stale-but-fixable task gets a refresh comment recorded on the issue before work begins; a superseded task gets a supersession proposal. A clean audit needs no comment — proceed silently. Trace the facts used by current inspection and calculation back to the acceptance writer; raw source fields may differ from the effective asset or valuation the user inspected.
-3. Spawn a worker: `/implement-{{NNN}} <task-id>` in an isolated worktree.
+2. **Pickup audit — before spawning anyone.** Check the task against merged `main` at a named commit: (a) does its text reference code, schema, or vocabulary that no longer exists? (b) does it conflict with an ADR or a newer recorded decision? (c) estimate its honest size in PRs — more than 2 means the task was cut too broad: stop and post a split proposal for approval instead of starting. For a stale-but-fixable task, update the issue body and post a refresh event comment before work begins; a superseded task gets a supersession proposal. A clean audit needs no comment — proceed silently. Apply the conditional writer/fact trace in `docs/agents/delivery-process.md` ("Grounding and proof").
+3. Spawn a worker: `/implement-{{NNN}} <task-id>` in an isolated worktree. Follow the process doc's "Worker ownership and handoff" rules for its helpers and later assignments.
 4. When its PR opens, watch review: eyes = in progress, thumbs up = approved, no emoji = comments.
-5. Judge each finding against AGENTS.md and the recorded decisions. Valid → instruct the worker (what and how); settled → decline with the recorded quote; good-but-unrecorded → record on #{{NNN}} first, then paste and proceed.
-6. Worker commits, pushes, resolves threads. Repeat until thumbs up. Rebase, merge, tick the checkbox.
+5. Judge each finding against AGENTS.md and the recorded decisions. Valid → instruct the worker (what and how); settled → decline with the recorded quote; good-but-unrecorded → update the #{{NNN}} body with the decision and post an event comment before implementation, then paste and proceed.
+6. Worker commits, pushes, resolves threads. Repeat until thumbs up. Rebase, enforce the process doc's "Validation and test reliability" exact-final-commit gates, merge, tick the checkbox.
 7. After each merge: did the task surface learnings or gaps? A rule of conduct or cross-spec decision is promoted now (AGENTS.md / ADR); everything else is appended to the spec's Harvest log section in the body.
 8. Back to 1. The final checklist task is the Harvest — run it with the `harvest` skill.
 
 ## Judgment rules
 
-The rules you enforce live in their durable homes, not in this prompt: `AGENTS.md` ("Delivery PRs and Reviews", Database, Critical Guidelines), `docs/agents/delivery-process.md` ("Delivery checklist rules", "Execution"), ADR 0012, and `docs/agents/issue-tracker.md` (real user data stays out of public issues). Enforce them from those documents — re-read them when in doubt. Only these have no other home:
+The rules you enforce live in their durable homes, not in this prompt: `AGENTS.md` ("Delivery PRs and Reviews", Database, Critical Guidelines), `docs/agents/delivery-process.md` ("Delivery checklist rules", "Execution"), ADR 0012, and `docs/agents/issue-tracker.md` (real user data stays out of public issues). Enforce them from those documents — re-read them when in doubt. For proof boundaries, proportional checks, resource scheduling, and migration authorization, use "Grounding and proof", "Validation and test reliability", and "Pre-launch migration planning" there. Only these have no other home:
 
-- When judging race tests, distinguish a source replay read from the accounting input snapshot. Require the barrier at the boundary the claim concerns.
 - Close defect classes, not instances. The same finding shape twice: enumerate every affected site in the PR, put the guard where the data enters, prefer typed error tags over string matching.
 - A PR that keeps growing under review pressure was cut wrong. Prefer the fix that deletes code. If growth continues, split the task and tell the maintainer.
 - When a review finding shows a reader guessing which row a decision belongs to, the fix is a recorded fact at the writer, treated as a prerequisite task — not a review fix (ADR 0012).
