@@ -9,6 +9,7 @@ import type {
   CustodyUnitId,
   ValuationFact,
   MovementCorrectionFacts,
+  ResolvedMovementPrice,
 } from "@my/core/accounting"
 import type { PrincipalAssetTechnicalBlocker } from "@my/core/assets"
 import type { CurrencyCode } from "@my/core/currency"
@@ -37,8 +38,22 @@ export interface CustodyUnitMembership {
   readonly custodyUnitId: CustodyUnitId
 }
 
-/** Fact-layer reason a stored movement cannot become an accounting event. */
-export type FactualLedgerInputBlockerCode = PrincipalAssetTechnicalBlocker | "unresolved_identity"
+/** Fact-layer reason a movement or its requested correction cannot supply a complete result. */
+export type FactualLedgerInputBlockerCode =
+  | PrincipalAssetTechnicalBlocker
+  | "unresolved_identity"
+  | "movement_correction_needs_attention"
+  | "movement_price_currency_mismatch"
+
+/** Reason an active movement price could not supply the current calculation input. */
+export type MovementPriceApplicationProblem =
+  | "target_unavailable"
+  | "target_ineligible"
+  | "target_changed"
+  | "quantity_changed"
+  | "asset_changed"
+  | "structure_changed"
+  | "reporting_currency_mismatch"
 
 /** At least one stored target that identifies the blocked fact. */
 export type FactualLedgerInputBlockerTarget =
@@ -168,6 +183,13 @@ export interface CalculationRunCorrectionInput {
   readonly streamState: "active" | "withdrawn" | "superseded"
   readonly application: "inactive" | "not_applied" | "applied" | "needs_attention"
   readonly reportingCurrency: CurrencyCode
+  /** Null when no active price was rejected for this run. */
+  readonly applicationProblem: MovementPriceApplicationProblem | null
+  /** Exact selected total and display-only unit preview, present only for an applied price. */
+  readonly resolvedPrice: Pick<
+    ResolvedMovementPrice,
+    "totalValue" | "unitPrice" | "currency"
+  > | null
   readonly system: MovementCorrectionEngineInputs
   readonly effective: MovementCorrectionEngineInputs
 }
