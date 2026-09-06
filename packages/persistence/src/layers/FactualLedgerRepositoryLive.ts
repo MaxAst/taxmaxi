@@ -1628,10 +1628,6 @@ const make = Effect.gen(function* () {
         custodyUnitId: CustodyUnitId.make(custodyUnitId),
         sourceId: SourceId.make(sourceId),
       }))
-      const inputBlockers = [...inputBlockerByKey.values()].sort((left, right) =>
-        blockerKey(left).localeCompare(blockerKey(right))
-      )
-
       // Keep selections made before cutoff/technical checks even when no event was emitted.
       // All associations use the exact IDs read by the custody writer above.
       const custodyEventById = new Map<string, AccountingEvent>(
@@ -1686,13 +1682,15 @@ const make = Effect.gen(function* () {
         eventsByTarget,
         valuationFacts,
       })
+      for (const blocker of movementCorrections.inputBlockers)
+        inputBlockerByKey.set(blockerKey(blocker), blocker)
       return {
         correctionInputs: movementCorrections.correctionInputs,
         events: events.map((event) => movementCorrections.effectiveEvents.get(event.id) ?? event),
         valuationFacts: movementCorrections.valuationFacts.sort(compareValuationFacts),
         custodyUnitMembership,
-        inputBlockers: [...inputBlockers, ...movementCorrections.inputBlockers].sort(
-          (left, right) => blockerKey(left).localeCompare(blockerKey(right))
+        inputBlockers: [...inputBlockerByKey.values()].sort((left, right) =>
+          blockerKey(left).localeCompare(blockerKey(right))
         ),
         principalAssetOverrideRevision: decisions.revision,
       }

@@ -678,11 +678,133 @@ describe("effective movement price application", () => {
         }
         expect((yield* recompute(1)).status).toBe("partial")
         const run = yield* readRun(1)
-        expect(run.inputs[0]?.captured.applicationProblem).toBe(capture?.applicationProblem)
+        expect(run.inputs).toHaveLength(2)
+        expect(
+          run.inputs.every(
+            ({ captured }) =>
+              captured.application === "needs_attention" &&
+              captured.applicationProblem === capture?.applicationProblem
+          )
+        ).toBe(true)
+        const expectedBlockers = mismatch === "absent" || mismatch === "withheld" ? 0 : 1
+        expect(
+          ledger.inputBlockers.filter(
+            (blocker) => blocker.code === "movement_correction_needs_attention"
+          )
+        ).toHaveLength(expectedBlockers)
+        expect(
+          run.blockers.filter((blocker) => blocker.code === "movement_correction_needs_attention")
+        ).toHaveLength(expectedBlockers)
         expect(ledger.events.some((event) => event.id === fixture.disposition.id)).toBe(true)
       })
     )
   }
+
+  it.effect("keeps shared attention blockers distinct across movements", () =>
+    Effect.gen(function* () {
+      const fixture = yield* runPg(seed({ systemPurchaseValue: "5" }))
+      const acceptedIds: string[] = []
+      for (const movement of [fixture.acquisition, fixture.disposition]) {
+        const price = yield* changePrice({
+          operation: "create",
+          targetId: movement.targetId,
+          input: { _tag: "total_value", amount: "20", currency: EUR },
+        })
+        const classification = yield* changeClassification({
+          operation: "create",
+          targetId: movement.targetId,
+          input:
+            movement.id === fixture.acquisition.id
+              ? { _tag: "inbound", cause: "purchase" }
+              : { _tag: "outbound", cause: "sale" },
+        })
+        acceptedIds.push(price.overrideId, classification.overrideId)
+      }
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db
+            .update(schema.transactionLegs)
+            .set({ amount: "11" })
+            .where(eq(schema.transactionLegs.sourceId, SOURCE_ID))
+        })
+      )
+      expect((yield* recompute(1)).status).toBe("partial")
+      const run = yield* readRun(1)
+      expect(run.inputs.map(({ captured }) => captured.history.id).sort()).toEqual(
+        acceptedIds.sort()
+      )
+      expect(
+        run.inputs.every(
+          ({ captured }) =>
+            captured.application === "needs_attention" &&
+            captured.applicationProblem === "quantity_changed"
+        )
+      ).toBe(true)
+      expect(
+        run.blockers
+          .filter(({ code }) => code === "movement_correction_needs_attention")
+          .map(({ eventId }) => eventId)
+          .sort()
+      ).toEqual([fixture.acquisition.id, fixture.disposition.id].sort())
+    })
+  )
+
+  it.effect("retains currency and structural blockers for different stream problems", () =>
+    Effect.gen(function* () {
+      const fixture = yield* runPg(seed({ systemPurchaseValue: "5" }))
+      const classification = yield* changeClassification({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "inbound", cause: "purchase" },
+      })
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db
+            .update(schema.transactionLegs)
+            .set({ amount: "11" })
+            .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+        })
+      )
+      const price = yield* changePrice({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "total_value", amount: "20", currency: EUR },
+      })
+      expect((yield* recompute(1, PRINCIPAL_ID, USD)).status).toBe("partial")
+      const run = yield* readRun(1)
+      expect(
+        run.inputs.find(({ captured }) => captured.history.id === price.overrideId)?.captured
+      ).toMatchObject({
+        application: "needs_attention",
+        applicationProblem: "reporting_currency_mismatch",
+      })
+      expect(
+        run.inputs.find(({ captured }) => captured.history.id === classification.overrideId)
+          ?.captured
+      ).toMatchObject({ application: "needs_attention", applicationProblem: "quantity_changed" })
+      expect(
+        run.blockers.filter(
+          ({ code }) =>
+            code === "movement_correction_needs_attention" ||
+            code === "movement_price_currency_mismatch"
+        )
+      ).toEqual(
+        expect.arrayContaining([
+          { code: "movement_correction_needs_attention", eventId: fixture.acquisition.id },
+          { code: "movement_price_currency_mismatch", eventId: fixture.acquisition.id },
+        ])
+      )
+      expect(
+        run.blockers.filter(
+          ({ code }) =>
+            code === "movement_correction_needs_attention" ||
+            code === "movement_price_currency_mismatch"
+        )
+      ).toHaveLength(2)
+    })
+  )
 
   it.effect(
     "keeps provider and market evidence and leaves classification independent while user price wins",
