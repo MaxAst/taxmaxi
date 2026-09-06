@@ -1268,6 +1268,67 @@ describe("movement corrections through SDK and HTTP", () => {
       )
     }
 
+    it.effect(`${style} changes a priced unknown receipt to purchase through HTTP`, () =>
+      Effect.gen(function* () {
+        const seeded = yield* fixture
+        const db = yield* drizzle
+        yield* db.delete(schema.transactionLegs).where(eq(schema.transactionLegs.id, seeded.fee.id))
+        yield* db
+          .update(schema.transactions)
+          .set({
+            transactionType: null,
+            providerTransactionType: "synthetic_unknown_receipt",
+            providerFiatAmount: "20",
+            providerFiatCurrency: "EUR",
+          })
+          .where(eq(schema.transactions.id, seeded.buy.id))
+        const api = yield* sdkResource(style)
+        const query = { targetId: seeded.acquisition.targetId, taxYear: 2025 }
+        const initial = yield* api.getCurrent(query)
+        if (initial.context.current === null) return yield* Effect.die("Missing receipt inspection")
+        expect((yield* recompute(60)).status).toBe("partial")
+        const before = yield* readRun(60)
+        expect(before.blockers).toEqual([{ code: "unknown_cause" }])
+        expect(
+          before.results.map((row) => ({ basis: decimal(row.basis), gain: decimal(row.gain) }))
+        ).toEqual([{ basis: "20", gain: "10" }])
+        const accepted = yield* api.create({
+          targetId: query.targetId,
+          override: {
+            expectedLeafId: null,
+            expectedSystemRevision: initial.context.current.facts.systemRevision,
+            reason: "User confirms purchase",
+            input: { _tag: "classification", input: { _tag: "inbound", cause: "purchase" } },
+          },
+        })
+        expect((yield* recompute(61)).status).toBe("complete")
+        const applied = yield* readRun(61)
+        expect(
+          applied.results.map((row) => ({ basis: decimal(row.basis), gain: decimal(row.gain) }))
+        ).toEqual([{ basis: "20", gain: "10" }])
+        expect(applied.inputs[0]?.captured).toMatchObject({
+          application: "applied",
+          history: { id: accepted.overrideId },
+          system: { event: { cause: "unknown" } },
+          effective: {
+            event: { cause: "purchase" },
+            classificationEvidence: { _tag: "user_assertion", overrideId: accepted.overrideId },
+          },
+        })
+        expect((yield* api.getCurrent(query)).inputs.system).toEqual(initial.inputs.system)
+        expect(yield* readRun(60)).toEqual(before)
+        expect(
+          yield* db
+            .select({
+              type: schema.transactions.transactionType,
+              providerType: schema.transactions.providerTransactionType,
+            })
+            .from(schema.transactions)
+            .where(eq(schema.transactions.id, seeded.buy.id))
+        ).toEqual([{ type: null, providerType: "synthetic_unknown_receipt" }])
+      }).pipe(Effect.provide(HttpLive), Effect.scoped)
+    )
+
     it.effect(`${style} applies user passive staking and retains missing gift/airdrop facts`, () =>
       Effect.gen(function* () {
         const seeded = yield* fixture
@@ -1358,6 +1419,37 @@ describe("movement corrections through SDK and HTTP", () => {
       }).pipe(Effect.provide(HttpLive), Effect.scoped)
     )
   }
+
+  it.effect(
+    "rejects direct treatment and ownership-transfer requests without writing history or jobs",
+    () =>
+      Effect.gen(function* () {
+        const seeded = yield* fixture
+        const base = priceRequest(yield* inspect(seeded.acquisition.targetId))
+        const before = yield* counts
+        for (const input of [
+          {
+            _tag: "classification",
+            input: {
+              _tag: "inbound",
+              cause: "purchase",
+              treatmentCode: "de.taxable_income_section22_3_staking",
+            },
+          },
+          { _tag: "classification", input: { _tag: "inbound", cause: "ownership_transfer" } },
+        ]) {
+          // Neither payload belongs to the wire schema, so rejection is HTTP 400.
+          expect(
+            (yield* request({
+              path: `/v1/transaction-overrides/${seeded.acquisition.targetId}/create`,
+              payload: { ...base, input },
+            })).status
+          ).toBe(400)
+          expect(yield* counts).toEqual(before)
+          expect(delivered).toEqual([])
+        }
+      }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
 
   it.effect("accepts exactly one concurrent SDK replacement without extra history or work", () =>
     Effect.gen(function* () {
