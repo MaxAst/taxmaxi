@@ -1,3 +1,4 @@
+import { SourceSyncQueueUnexpectedTestLive } from "./support/SourceSyncQueueUnexpectedTestLive.ts"
 import { HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
 import { NodeHttpServer } from "@effect/platform-node"
 import {
@@ -113,6 +114,7 @@ const PersistenceLayer = Layer.mergeAll(
 
 const HttpLive = HttpRouter.serve(
   TaxMaxiApiLive.pipe(
+    Layer.provide(SourceSyncQueueUnexpectedTestLive),
     Layer.provide(AnonSessionServiceTestLive),
     Layer.provide(SIWXProofVerifierTestLive),
     Layer.provide(X402PaymentValidatorTestLive),

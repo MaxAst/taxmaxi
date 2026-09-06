@@ -1,3 +1,4 @@
+import { SourceSyncQueueUnexpectedTestLive } from "./support/SourceSyncQueueUnexpectedTestLive.ts"
 import { nextTestUuid } from "./support/TestUuid.ts"
 import { Etag, HttpRouter } from "effect/unstable/http"
 import { NodeHttpPlatform, NodeServices } from "@effect/platform-node"
@@ -246,6 +247,7 @@ const makeAuthHandler = () => {
 
   const { handler, dispose } = HttpRouter.toWebHandler(
     TaxMaxiApiLive.pipe(
+      Layer.provide(SourceSyncQueueUnexpectedTestLive),
       Layer.provide(AnonSessionServiceTestLive),
       Layer.provide(SIWXProofVerifierTestLive),
       Layer.provide(X402PaymentValidatorTestLive),

@@ -11,3 +11,5 @@ export * from "./definitions/AssetOverridesApi.ts"
 export * from "./definitions/PortfolioApi.ts"
 export * from "./definitions/SourcesApi.ts"
 export * from "./definitions/TransactionsApi.ts"
+
+export * from "./definitions/TransactionOverridesApi.ts"

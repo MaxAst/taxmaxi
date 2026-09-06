@@ -20,3 +20,5 @@ export * from "./CalculationRunRepository.ts"
 export * from "./CalculationRunService.ts"
 export * from "./HistoricalAssetPriceRepository.ts"
 export * from "./PrincipalAssetOverrideRepository.ts"
+
+export * from "./PrincipalTransactionOverrideRepository.ts"
