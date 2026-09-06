@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "@effect/vitest"
+import { JurisdictionCode, TaxYear } from "@my/core/accounting"
 import { AuthUserId } from "@my/core/authentication"
 import { CurrencyCode } from "@my/core/currency"
 import { PrincipalId } from "@my/core/ownership"
@@ -33,6 +34,19 @@ const read = (targetId = TARGET_ID, principalId = ownedPrincipal) =>
     layer: PrincipalTransactionOverrideRepositoryLive,
     effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
       repo.findContext({ principalId, targetId, reportingCurrency: CurrencyCode.make("EUR") })
+    ),
+  })
+
+const projectionScope = {
+  jurisdiction: JurisdictionCode.make("DE"),
+  taxYear: TaxYear.make(2026),
+  reportingCurrency: CurrencyCode.make("EUR"),
+}
+const discover = (transactionId: string, principalId = ownedPrincipal) =>
+  context.runWithLayer({
+    layer: PrincipalTransactionOverrideRepositoryLive,
+    effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
+      repo.findTransactionTargets({ principalId, transactionId, scope: projectionScope })
     ),
   })
 
@@ -705,6 +719,26 @@ describe("movement correction history reader", () => {
         const sibling = yield* read(OTHER_ID)
         if (Option.isNone(sibling)) return yield* Effect.die("Missing sibling")
         expect(sibling.value.current?.facts.structure).toBe("ownership_change")
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db
+                .update(schema.transactionLegs)
+                .set({ transactionId: null })
+                .where(eq(schema.transactionLegs.id, fixture.legId))
+            })
+          )
+        )
+        const discovered = yield* discover(fixture.transactionId)
+        if (Option.isNone(discovered)) return yield* Effect.die("Missing owned transaction")
+        expect(discovered.value.map((value) => value.context.targetId).sort()).toEqual(
+          [TARGET_ID, OTHER_ID].sort()
+        )
+        expect(
+          discovered.value.find((value) => value.context.targetId === TARGET_ID)?.context.current
+            ?.facts.structure
+        ).toBe("custody")
       })
   )
   for (const kind of ["exact", "provider"] as const) {
@@ -1015,4 +1049,84 @@ describe("movement correction history reader", () => {
         })
     )
   }
+  it.effect(
+    "discovers exact siblings and fee links without history and hides foreign transactions",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => context.runPg(seed))
+        const feeTargetId = "00000000-0000-4000-8000-000000008603"
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.insert(schema.movementCorrectionTargets).values([
+                {
+                  id: OTHER_ID,
+                  principalId: TEST_PRINCIPAL_ID,
+                  sourceId: SOURCE_ID,
+                  sourceRecordKey: "synthetic-record",
+                  componentKey: "sibling",
+                },
+                {
+                  id: feeTargetId,
+                  principalId: TEST_PRINCIPAL_ID,
+                  sourceId: SOURCE_ID,
+                  sourceRecordKey: "synthetic-record",
+                  componentKey: "fee",
+                },
+              ])
+              yield* db.insert(schema.transactionLegs).values([
+                {
+                  ...fixture.legValues,
+                  movementCorrectionTargetId: OTHER_ID,
+                  externalId: "synthetic-sibling",
+                },
+                {
+                  ...fixture.legValues,
+                  movementCorrectionTargetId: feeTargetId,
+                  externalId: "synthetic-fee",
+                  kind: "fee",
+                  transactionId: null,
+                  feeForTransactionId: fixture.transactionId,
+                },
+              ])
+            })
+          )
+        )
+        const found = yield* discover(fixture.transactionId)
+        if (Option.isNone(found)) return yield* Effect.die("Missing transaction")
+        expect(found.value.map((value) => value.context.targetId).sort()).toEqual(
+          [TARGET_ID, OTHER_ID, feeTargetId].sort()
+        )
+        expect(
+          found.value.every(
+            (value) =>
+              value.context.history.length === 0 && value.price.coverageStatus === "not_requested"
+          )
+        ).toBe(true)
+        expect(
+          found.value.find((value) => value.context.targetId === feeTargetId)?.inputs.system.event
+        ).toMatchObject({ _tag: "disposition", cause: "fee" })
+        expect(
+          yield* discover(
+            fixture.transactionId,
+            PrincipalId.make("00000000-0000-4000-8000-000000008699")
+          )
+        ).toEqual(Option.none())
+        expect(yield* discover("00000000-0000-4000-8000-000000008699")).toEqual(Option.none())
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db
+                .delete(schema.transactionLegs)
+                .where(eq(schema.transactionLegs.sourceId, SOURCE_ID))
+            })
+          )
+        )
+        expect(yield* discover(fixture.transactionId)).toEqual(Option.some([]))
+        const retained = yield* read()
+        expect(Option.isSome(retained)).toBe(true)
+      })
+  )
 })

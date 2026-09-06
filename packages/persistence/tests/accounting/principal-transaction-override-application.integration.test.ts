@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "@effect/vitest"
+import { vi } from "vitest"
 import {
   JurisdictionCode,
   TaxYear,
@@ -14,6 +15,8 @@ import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
+import { SourceSyncJobRepository, type SourceSyncExecutionState } from "@my/sync-engine/services"
+import { SourceSyncJobRepositoryLive } from "../../src/layers/SourceSyncJobRepositoryLive.ts"
 import { CalculationRunRepositoryLive } from "../../src/layers/CalculationRunRepositoryLive.ts"
 import { CalculationRunServiceLive } from "../../src/layers/CalculationRunServiceLive.ts"
 import { FactualLedgerRepositoryLive } from "../../src/layers/FactualLedgerRepositoryLive.ts"
@@ -32,6 +35,31 @@ import {
   seedSyncEngineAssets,
   seedSyncEngineRepositoryFixture,
 } from "../support/integration-test-kit.ts"
+
+const snapshotReads = vi.hoisted(() => ({
+  calls: [] as Array<{ currency: string; cutoff: string | null }>,
+}))
+vi.mock("../../src/layers/FactualLedgerSnapshotReader.ts", (importOriginal) =>
+  Promise.all([
+    importOriginal<typeof import("../../src/layers/FactualLedgerSnapshotReader.ts")>(),
+    import("effect/Effect"),
+  ]).then(([original, effect]) => ({
+    ...original,
+    makeFactualLedgerSnapshotReader: effect.map(
+      original.makeFactualLedgerSnapshotReader,
+      (reader) => ({
+        load: (params: Parameters<typeof reader.load>[0]) =>
+          effect.suspend(() => {
+            snapshotReads.calls.push({
+              currency: params.reportingCurrency,
+              cutoff: params.occurredBefore?.toISOString() ?? null,
+            })
+            return reader.load(params)
+          }),
+      })
+    ),
+  }))
+)
 
 const PRINCIPAL_ID = PrincipalId.make("00000000-0000-4000-8000-000000007101")
 const USER_ID = AuthUserId.make("00000000-0000-4000-8000-000000007102")
@@ -353,6 +381,71 @@ const changeClassification = ({
       })
     ),
   })
+
+const projectMovement = ({
+  targetId,
+  taxYear = 2025,
+  reportingCurrency = EUR,
+}: {
+  readonly targetId: string
+  readonly taxYear?: number
+  readonly reportingCurrency?: CurrencyCode
+}) =>
+  context.runWithLayer({
+    layer: PrincipalTransactionOverrideRepositoryLive,
+    effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
+      Effect.gen(function* () {
+        const found = yield* repo.findProjection({
+          principalId: PRINCIPAL_ID,
+          targetId,
+          scope: {
+            jurisdiction: JurisdictionCode.make("DE"),
+            taxYear: TaxYear.make(taxYear),
+            reportingCurrency,
+          },
+        })
+        if (Option.isNone(found)) return yield* Effect.die("Missing owned movement projection")
+        return found.value
+      })
+    ),
+  })
+const completeReplay = (jobId: string) => {
+  const state: SourceSyncExecutionState = {
+    phase: "completed",
+    processedRecords: 1,
+    totalRecords: 1,
+    fetchedRecords: 1,
+    normalizedRecords: 1,
+    failedRecords: 0,
+    cursorPayload: null,
+    highWatermark: null,
+    checkpointExternalId: null,
+    checkpointRawRecordId: null,
+  }
+  return context.runWithLayer({
+    layer: SourceSyncJobRepositoryLive,
+    effect: Effect.flatMap(SourceSyncJobRepository, (repo) =>
+      Effect.gen(function* () {
+        const job = yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return yield* db
+              .select({ status: schema.processingJobs.status })
+              .from(schema.processingJobs)
+              .where(eq(schema.processingJobs.id, jobId))
+          })
+        )
+        if (job[0]?.status === "pending")
+          yield* repo.claimJob({
+            jobId,
+            workerId: "synthetic-projection-worker",
+            startedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-01-01T00:00:00Z")),
+          })
+        return yield* repo.completeJob({ jobId, state })
+      })
+    ),
+  })
+}
 
 const readRun = (index: number) =>
   runPg(
@@ -1309,4 +1402,621 @@ describe("effective movement price application", () => {
       })
     )
   }
+  for (const valuation of ["provider", "market"] as const) {
+    it.effect(
+      `compares ${valuation} inspection in each stream's currency across replay and outside-period views`,
+      () =>
+        Effect.gen(function* () {
+          const fixture = yield* runPg(
+            seed({ systemPurchaseValue: valuation === "provider" ? "20" : null })
+          )
+          if (valuation === "market")
+            yield* runPg(
+              Effect.gen(function* () {
+                const db = yield* drizzle
+                yield* db.insert(schema.assetPrices).values({
+                  assetId: TEST_BTC_ASSET_ID,
+                  currency: "EUR",
+                  price: "2",
+                  timestamp: fixture.timestamp,
+                  source: "synthetic-market",
+                })
+              })
+            )
+          const price = yield* changePrice({
+            operation: "create",
+            targetId: fixture.acquisition.targetId,
+            input: { _tag: "total_value", amount: "20", currency: EUR },
+          })
+          yield* context.runWithLayer({
+            layer: PrincipalTransactionOverrideRepositoryLive,
+            effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
+              Effect.gen(function* () {
+                const inspected = yield* repo.findContext({
+                  principalId: PRINCIPAL_ID,
+                  targetId: fixture.acquisition.targetId,
+                  reportingCurrency: USD,
+                })
+                if (Option.isNone(inspected) || inspected.value.current === null)
+                  return yield* Effect.die("Missing USD inspection")
+                yield* repo.create({
+                  principalId: PRINCIPAL_ID,
+                  actorUserId: USER_ID,
+                  targetId: fixture.acquisition.targetId,
+                  reportingCurrency: USD,
+                  expectedSystemRevision: inspected.value.current.facts.systemRevision,
+                  expectedLeafId: null,
+                  reason: "Synthetic USD cause inspection",
+                  input: { _tag: "classification", input: { _tag: "inbound", cause: "purchase" } },
+                })
+              })
+            ),
+          })
+          for (const reportingCurrency of [EUR, USD]) {
+            const current = yield* projectMovement({
+              targetId: fixture.acquisition.targetId,
+              reportingCurrency,
+            })
+            expect(current.price.stale).toBe(false)
+            expect(current.classification.stale).toBe(false)
+            const future = yield* projectMovement({
+              targetId: fixture.acquisition.targetId,
+              reportingCurrency,
+              taxYear: 2024,
+            })
+            expect(future.price).toMatchObject({ stale: false, coverageStatus: "outside_period" })
+            expect(future.classification.stale).toBe(false)
+            expect(future.inputs.system.event).toBeNull()
+          }
+          yield* runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db
+                .delete(schema.transactionLegs)
+                .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+              yield* db.insert(schema.transactionLegs).values({
+                principalId: PRINCIPAL_ID,
+                sourceId: SOURCE_ID,
+                movementCorrectionTargetId: fixture.acquisition.targetId,
+                externalId: "synthetic-purchase-leg",
+                transactionId: fixture.purchaseId,
+                timestamp: fixture.timestamp,
+                assetId: TEST_BTC_ASSET_ID,
+                amount: "10",
+                kind: "acquisition",
+                provenance: "deterministic",
+                originKind: "none",
+              })
+            })
+          )
+          const replayed = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+          expect(replayed.price.stale).toBe(false)
+          expect(replayed.classification.stale).toBe(false)
+          expect(replayed.context.current?.legId).not.toBe(fixture.acquisition.id)
+          expect(replayed.price.active?.inspectedValuationEvidence.facts[0]?.eventId).toBe(
+            fixture.acquisition.id
+          )
+          expect(replayed.price.active?.id).toBe(price.overrideId)
+          yield* runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              if (valuation === "provider")
+                yield* db
+                  .update(schema.transactions)
+                  .set({ providerFiatAmount: "30" })
+                  .where(eq(schema.transactions.id, fixture.purchaseId))
+              else yield* db.update(schema.assetPrices).set({ price: "3" })
+            })
+          )
+          const changed = yield* projectMovement({
+            targetId: fixture.acquisition.targetId,
+            reportingCurrency: USD,
+          })
+          expect(changed.price.stale).toBe(true)
+          expect(changed.classification.stale).toBe(false)
+          expect(changed.price.active?.id).toBe(price.overrideId)
+        })
+    )
+  }
+
+  it.effect("bounds shared snapshot loads by currency rather than discovered target count", () =>
+    Effect.gen(function* () {
+      const fixture = yield* runPg(seed())
+      yield* changePrice({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "total_value", amount: "20", currency: EUR },
+      })
+      const discover = () =>
+        context.runWithLayer({
+          layer: PrincipalTransactionOverrideRepositoryLive,
+          effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
+            repo.findTransactionTargets({
+              principalId: PRINCIPAL_ID,
+              transactionId: fixture.purchaseId,
+              scope: {
+                jurisdiction: JurisdictionCode.make("DE"),
+                taxYear: TaxYear.make(2025),
+                reportingCurrency: USD,
+              },
+            })
+          ),
+        })
+      snapshotReads.calls = []
+      const one = yield* discover()
+      expect(Option.isSome(one) ? one.value.length : 0).toBe(1)
+      const firstReads = [...snapshotReads.calls]
+      expect(firstReads).toHaveLength(3)
+      expect(
+        firstReads
+          .filter((read) => read.cutoff === null)
+          .map((read) => read.currency)
+          .sort()
+      ).toEqual(["EUR", "USD"])
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const legs = yield* prepareMovementLegFixtures(
+            Array.from({ length: 9 }, (_, index) => ({
+              movementIdentity: {
+                sourceRecordKey: "synthetic-purchase",
+                componentKey: `extra-${index}`,
+              },
+              principalId: PRINCIPAL_ID,
+              sourceId: SOURCE_ID,
+              externalId: `synthetic-extra-${index}`,
+              transactionId: fixture.purchaseId,
+              timestamp: fixture.timestamp,
+              assetId: TEST_BTC_ASSET_ID,
+              amount: "1",
+              kind: "acquisition" as const,
+              provenance: "deterministic" as const,
+              originKind: "none" as const,
+            }))
+          )
+          yield* db.insert(schema.transactionLegs).values(legs)
+        })
+      )
+      snapshotReads.calls = []
+      const ten = yield* discover()
+      expect(Option.isSome(ten) ? ten.value.length : 0).toBe(10)
+      expect(snapshotReads.calls).toEqual(firstReads)
+    })
+  )
+
+  it.effect("separates current streams, replay progress, and exact covering snapshots", () =>
+    Effect.gen(function* () {
+      const fixture = yield* runPg(seed())
+      const fresh = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+      expect(fresh.context.history).toEqual([])
+      expect(fresh.inputs).toMatchObject({
+        currentOutcome: "included",
+        system: { event: { cause: "purchase" } },
+      })
+      expect(fresh.inputs.effective).toEqual(fresh.inputs.system)
+      expect(fresh.price).toMatchObject({
+        coverageStatus: "not_requested",
+        replay: { status: "not_scheduled" },
+        coverage: null,
+      })
+      const price = yield* changePrice({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "total_value", amount: "20", currency: EUR },
+      })
+      const classification = yield* changeClassification({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "inbound", cause: "purchase" },
+      })
+      expect(price.processingJobId).toBe(classification.processingJobId)
+      expect(
+        (yield* projectMovement({ targetId: fixture.acquisition.targetId })).price
+      ).toMatchObject({
+        application: "applied",
+        coverageStatus: "updating",
+        replay: { status: "updating" },
+        coverage: null,
+        resolvedPrice: { totalValue: "20" },
+      })
+      expect((yield* recompute(1)).status).toBe("complete")
+      yield* completeReplay(price.processingJobId)
+      expect(
+        (yield* projectMovement({ targetId: fixture.acquisition.targetId })).price
+      ).toMatchObject({
+        replay: { status: "complete" },
+        coverage: null,
+        coverageStatus: "updating",
+      })
+      yield* recompute(2)
+      const covered = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+      expect(covered.price.coverage).toMatchObject({
+        runId: runId(2),
+        overrideId: price.overrideId,
+        status: "complete",
+        input: { application: "applied", resolvedPrice: { totalValue: "20" } },
+      })
+      expect(covered.classification.coverage).toMatchObject({
+        runId: runId(2),
+        overrideId: classification.overrideId,
+        input: { application: "applied" },
+      })
+      const replacement = yield* changePrice({
+        operation: "replace",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "total_value", amount: "20", currency: EUR },
+      })
+      const newer = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+      expect(newer.price.coverage).toBeNull()
+      expect(newer.classification.coverage?.runId).toBe(runId(2))
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db
+            .update(schema.processingJobs)
+            .set({ status: "processing" })
+            .where(eq(schema.processingJobs.id, replacement.processingJobId))
+        })
+      )
+      const raced = yield* changePrice({
+        operation: "replace",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "total_value", amount: "20", currency: EUR },
+      })
+      expect(raced.processingJobId).toBe(replacement.processingJobId)
+      yield* completeReplay(replacement.processingJobId)
+      const following = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+      expect(following.price.replay.status).toBe("updating")
+      const followUpId = following.price.replay.followUpJobId
+      if (followUpId === null) return yield* Effect.die("Missing durable follow-up")
+      yield* recompute(3)
+      yield* completeReplay(followUpId)
+      expect(
+        (yield* projectMovement({ targetId: fixture.acquisition.targetId })).price.coverage
+      ).toBeNull()
+      yield* recompute(4)
+      expect(
+        (yield* projectMovement({ targetId: fixture.acquisition.targetId })).price.coverage
+      ).toMatchObject({ runId: runId(4), overrideId: raced.overrideId })
+      const withdrawal = yield* changeClassification({
+        operation: "withdraw",
+        targetId: fixture.acquisition.targetId,
+      })
+      yield* completeReplay(withdrawal.processingJobId)
+      yield* recompute(5)
+      const withdrawn = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+      expect(withdrawn.classification).toMatchObject({
+        active: null,
+        application: "inactive",
+        coverageStatus: "covered",
+        coverage: {
+          overrideId: withdrawal.overrideId,
+          runId: runId(5),
+          input: { application: "inactive" },
+        },
+      })
+      expect(withdrawn.price.application).toBe("applied")
+      expect(
+        (yield* projectMovement({ targetId: fixture.acquisition.targetId, taxYear: 2024 })).price
+          .coverageStatus
+      ).toBe("outside_period")
+      const foreignCurrency = yield* projectMovement({
+        targetId: fixture.acquisition.targetId,
+        reportingCurrency: USD,
+      })
+      expect(foreignCurrency.price).toMatchObject({
+        application: "needs_attention",
+        applicationProblem: "reporting_currency_mismatch",
+        coverage: null,
+      })
+      yield* recompute(6, PRINCIPAL_ID, USD)
+      expect(
+        (yield* projectMovement({ targetId: fixture.acquisition.targetId, reportingCurrency: USD }))
+          .price.coverage
+      ).toMatchObject({
+        runId: runId(6),
+        status: "partial",
+        input: { applicationProblem: "reporting_currency_mismatch" },
+      })
+    })
+  )
+
+  for (const earlierKind of ["price", "classification"] as const) {
+    for (const withdrawn of [false, true]) {
+      it.effect(
+        `keeps absent mixed-period ${earlierKind} ${withdrawn ? "withdrawal" : "active"} coverage independent`,
+        () =>
+          Effect.gen(function* () {
+            const fixture = yield* runPg(seed())
+            const laterKind = earlierKind === "price" ? "classification" : "price"
+            const accept = (kind: "price" | "classification") =>
+              kind === "price"
+                ? changePrice({
+                    operation: "create",
+                    targetId: fixture.acquisition.targetId,
+                    input: { _tag: "total_value", amount: "20", currency: EUR },
+                  })
+                : changeClassification({
+                    operation: "create",
+                    targetId: fixture.acquisition.targetId,
+                    input: { _tag: "inbound", cause: "purchase" },
+                  })
+            const withdraw = (kind: "price" | "classification") =>
+              kind === "price"
+                ? changePrice({ operation: "withdraw", targetId: fixture.acquisition.targetId })
+                : changeClassification({
+                    operation: "withdraw",
+                    targetId: fixture.acquisition.targetId,
+                  })
+            const earlier = yield* accept(earlierKind)
+            const earlierLeaf = withdrawn ? yield* withdraw(earlierKind) : earlier
+            yield* runPg(
+              Effect.gen(function* () {
+                const db = yield* drizzle
+                const future = DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z"))
+                yield* db
+                  .update(schema.transactionLegs)
+                  .set({ timestamp: future })
+                  .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+                yield* db
+                  .update(schema.transactions)
+                  .set({ timestamp: future })
+                  .where(eq(schema.transactions.id, fixture.purchaseId))
+              })
+            )
+            const later = yield* accept(laterKind)
+            const laterLeaf = withdrawn ? yield* withdraw(laterKind) : later
+            yield* runPg(
+              Effect.gen(function* () {
+                const db = yield* drizzle
+                yield* db.delete(schema.transactionLegs)
+              })
+            )
+            yield* completeReplay(laterLeaf.processingJobId)
+            expect((yield* recompute(1)).status).toBe("complete")
+            const projected = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+            expect(projected.inputs.currentOutcome).toBe("absent")
+            expect(projected[earlierKind]).toMatchObject({
+              coverageStatus: "covered",
+              coverage: {
+                overrideId: earlierLeaf.overrideId,
+                runId: runId(1),
+                status: "complete",
+                input: { application: withdrawn ? "inactive" : "needs_attention" },
+              },
+            })
+            expect(projected[laterKind]).toMatchObject({
+              coverageStatus: "outside_period",
+              coverage: null,
+              leaf: { id: laterLeaf.overrideId },
+            })
+            expect(
+              (yield* readRun(1)).inputs.every(
+                (input) => input.captured.history.kind === earlierKind
+              )
+            ).toBe(true)
+            if (!withdrawn)
+              expect(projected[earlierKind].applicationProblem).toBe("target_unavailable")
+          })
+      )
+    }
+  }
+
+  it.effect("keeps stale facts and absent attention separate from completed run status", () =>
+    Effect.gen(function* () {
+      const fixture = yield* runPg(seed())
+      const accepted = yield* changePrice({
+        operation: "create",
+        targetId: fixture.acquisition.targetId,
+        input: { _tag: "total_value", amount: "20", currency: EUR },
+      })
+      yield* completeReplay(accepted.processingJobId)
+      yield* recompute(1)
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db
+            .update(schema.transactions)
+            .set({ transactionType: null })
+            .where(eq(schema.transactions.id, fixture.purchaseId))
+        })
+      )
+      const stale = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+      expect(stale.price).toMatchObject({
+        stale: true,
+        application: "applied",
+        coverage: { runId: runId(1) },
+      })
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db
+            .update(schema.transactionLegs)
+            .set({ amount: "11" })
+            .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+        })
+      )
+      expect(
+        (yield* projectMovement({ targetId: fixture.acquisition.targetId })).price
+      ).toMatchObject({ application: "needs_attention", applicationProblem: "quantity_changed" })
+      yield* runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db
+            .delete(schema.transactionLegs)
+            .where(eq(schema.transactionLegs.sourceId, SOURCE_ID))
+        })
+      )
+      expect((yield* recompute(2)).status).toBe("complete")
+      const absent = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+      expect(absent.inputs).toMatchObject({
+        current: null,
+        currentOutcome: "absent",
+        effective: { event: null },
+      })
+      expect(absent.price).toMatchObject({
+        application: "needs_attention",
+        applicationProblem: "target_unavailable",
+        coverageStatus: "covered",
+        coverage: {
+          runId: runId(2),
+          status: "complete",
+          input: { application: "needs_attention", applicationProblem: "target_unavailable" },
+        },
+      })
+    })
+  )
+
+  it.effect(
+    "reports replay failure and recovery without claiming old snapshots cover changed jobs",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* runPg(seed())
+        const accepted = yield* changePrice({
+          operation: "create",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "total_value", amount: "20", currency: EUR },
+        })
+        yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .update(schema.processingJobs)
+              .set({ status: "failed" })
+              .where(eq(schema.processingJobs.id, accepted.processingJobId))
+          })
+        )
+        expect(
+          (yield* projectMovement({ targetId: fixture.acquisition.targetId })).price
+        ).toMatchObject({ replay: { status: "failed" }, coverageStatus: "failed", coverage: null })
+        yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .update(schema.processingJobs)
+              .set({ status: "processing" })
+              .where(eq(schema.processingJobs.id, accepted.processingJobId))
+          })
+        )
+        yield* completeReplay(accepted.processingJobId)
+        yield* recompute(1)
+        expect(
+          (yield* projectMovement({ targetId: fixture.acquisition.targetId })).price.coverageStatus
+        ).toBe("covered")
+        yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .update(schema.processingJobs)
+              .set({ heartbeatAt: fixture.timestamp })
+              .where(eq(schema.processingJobs.id, accepted.processingJobId))
+          })
+        )
+        expect(
+          (yield* projectMovement({ targetId: fixture.acquisition.targetId })).price
+        ).toMatchObject({
+          replay: { status: "complete" },
+          coverageStatus: "updating",
+          coverage: null,
+        })
+      })
+  )
+  it.effect(
+    "retains malformed current evidence and whole-transaction withholding in projection discovery",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* runPg(seed())
+        const accepted = yield* changePrice({
+          operation: "create",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "total_value", amount: "20", currency: EUR },
+        })
+        yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .update(schema.transactionLegs)
+              .set({ amount: "0" })
+              .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+            yield* db.insert(schema.transactionLegs).values(
+              yield* prepareMovementLegFixtures([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "synthetic-purchase",
+                    componentKey: "valid-sibling",
+                  },
+                  principalId: PRINCIPAL_ID,
+                  sourceId: SOURCE_ID,
+                  transactionId: fixture.purchaseId,
+                  externalId: "synthetic-valid-sibling",
+                  timestamp: fixture.timestamp,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "1",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none",
+                },
+              ])
+            )
+          })
+        )
+        const projected = yield* projectMovement({ targetId: fixture.acquisition.targetId })
+        expect(projected.context.current).toBeNull()
+        expect(projected.context.history[0]?.id).toBe(accepted.overrideId)
+        expect(projected.inputs).toMatchObject({
+          currentOutcome: "withheld",
+          current: { legId: fixture.acquisition.id },
+          system: { event: null },
+          effective: { event: null },
+        })
+        expect(moneyEquals(projected.inputs.current?.quantity, "0")).toBe(true)
+        expect(projected.price).toMatchObject({
+          application: "needs_attention",
+          applicationProblem: "target_ineligible",
+        })
+        const strict = yield* context
+          .runWithLayer({
+            layer: PrincipalTransactionOverrideRepositoryLive,
+            effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
+              repo.findContext({
+                reportingCurrency: EUR,
+                principalId: PRINCIPAL_ID,
+                targetId: fixture.acquisition.targetId,
+              })
+            ),
+          })
+          .pipe(Effect.result)
+        expect(strict._tag).toBe("Failure")
+        const discovered = yield* context.runWithLayer({
+          layer: PrincipalTransactionOverrideRepositoryLive,
+          effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
+            repo.findTransactionTargets({
+              principalId: PRINCIPAL_ID,
+              transactionId: fixture.purchaseId,
+              scope: {
+                jurisdiction: JurisdictionCode.make("DE"),
+                taxYear: TaxYear.make(2025),
+                reportingCurrency: EUR,
+              },
+            })
+          ),
+        })
+        if (Option.isNone(discovered)) return yield* Effect.die("Missing owned transaction")
+        expect(discovered.value).toHaveLength(2)
+        expect(
+          discovered.value.every(
+            (movement) =>
+              movement.inputs.currentOutcome === "withheld" &&
+              movement.inputs.current !== null &&
+              movement.inputs.effective.event === null
+          )
+        ).toBe(true)
+        expect(
+          discovered.value.filter((movement) => movement.context.current !== null)
+        ).toHaveLength(1)
+        expect((yield* loadLedger()).events.map((event) => event.id)).toEqual([
+          fixture.disposition.id,
+        ])
+      })
+  )
 })
