@@ -581,4 +581,152 @@ describe("atomic movement correction mutations", () => {
       expect(yield* counts()).toEqual({ history: 1, applications: 1, jobs: 1 })
     })
   )
+  for (const kind of ["price", "classification"] as const) {
+    it.effect(`records effective identity and rejects stale asset CAS for the ${kind} stream`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* initialize
+        const before = yield* getContext
+        const effectiveAssetId = "00000000-0000-4000-8000-000000008691"
+        const nextAssetId = "00000000-0000-4000-8000-000000008692"
+        const assetOverride = yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.insert(schema.assets).values([
+                {
+                  id: effectiveAssetId,
+                  name: "Synthetic effective asset",
+                  symbol: "SYN1",
+                  type: "fungible",
+                },
+                {
+                  id: nextAssetId,
+                  name: "Synthetic changed asset",
+                  symbol: "SYN2",
+                  type: "fungible",
+                },
+              ])
+              const [provider] = yield* db
+                .insert(schema.providerAssets)
+                .values({
+                  provider: "coinbase",
+                  providerAssetId: "synthetic-cas-provider",
+                  currencyCode: "SYN",
+                  name: "Synthetic provider",
+                  exponent: 8,
+                  providerType: "crypto",
+                  rawProviderPayload: {},
+                  evidenceRevision: 1,
+                  discoveredAt: time,
+                  retrievedAt: time,
+                })
+                .returning({ id: schema.providerAssets.id })
+              if (provider === undefined) return yield* Effect.die("Missing provider fixture")
+              yield* db.insert(schema.providerAssetMappings).values({
+                providerAssetRowId: provider.id,
+                mappingKind: "asset",
+                canonicalAssetId: TEST_BTC_ASSET_ID,
+                mappingStatus: "approved",
+              })
+              yield* db
+                .update(schema.transactionLegs)
+                .set({ providerAssetRowId: provider.id })
+                .where(eq(schema.transactionLegs.id, fixture.legId))
+              const [target] = yield* db
+                .insert(schema.principalAssetOverrideTargets)
+                .values({
+                  principalId: TEST_PRINCIPAL_ID,
+                  targetKind: "provider_asset",
+                  providerAssetRowId: provider.id,
+                })
+                .returning({ id: schema.principalAssetOverrideTargets.id })
+              if (target === undefined) return yield* Effect.die("Missing asset target")
+              const draft = {
+                principalId: TEST_PRINCIPAL_ID,
+                targetId: target.id,
+                kind: "identity" as const,
+                operation: "create" as const,
+                inspectedSystemRevision: "synthetic-asset-revision",
+                inspectedSystemIdentity: "resolved" as const,
+                inspectedSystemAssetId: TEST_BTC_ASSET_ID,
+                replacementAssetId: effectiveAssetId,
+                actorUserId: TEST_USER_ID,
+                reason: "Synthetic identity evidence",
+              }
+              const [row] = yield* db
+                .insert(schema.principalAssetOverrides)
+                .values(draft)
+                .returning({ id: schema.principalAssetOverrides.id })
+              if (row === undefined) return yield* Effect.die("Missing asset override")
+              return { draft, id: row.id }
+            })
+          )
+        )
+        const input: MovementCorrectionInput =
+          kind === "price"
+            ? price
+            : { _tag: "classification", input: { _tag: "inbound", cause: "purchase" } }
+        const noWrites = yield* counts()
+        const staleCreate = yield* withRepository((repo) =>
+          repo.create({ ...parameters(before, kind), input })
+        ).pipe(Effect.result)
+        expect(staleCreate).toMatchObject({
+          _tag: "Failure",
+          failure: { conflictKinds: ["system_revision"] },
+        })
+        expect(yield* counts()).toEqual(noWrites)
+        const current = yield* getContext
+        expect(current.current?.facts.economicAssetId).toBe(effectiveAssetId)
+        const accepted = yield* withRepository((repo) =>
+          repo.create({ ...parameters(current, kind), input })
+        )
+        if (Option.isNone(accepted)) return yield* Effect.die("Missing accepted correction")
+        expect(accepted.value.context[kind].active?.inspectedFacts.economicAssetId).toBe(
+          effectiveAssetId
+        )
+        const inspected = accepted.value.context[kind].active?.inspectedFacts
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.insert(schema.principalAssetOverrides).values({
+                ...assetOverride.draft,
+                operation: "replace",
+                supersedesOverrideId: assetOverride.id,
+                replacementAssetId: nextAssetId,
+              })
+            })
+          )
+        )
+        const beforeConflict = yield* counts()
+        const staleReplace = yield* withRepository((repo) =>
+          repo.replace({ ...parameters(accepted.value.context, kind), input })
+        ).pipe(Effect.result)
+        const staleWithdraw = yield* withRepository((repo) =>
+          repo.withdraw({ ...parameters(accepted.value.context, kind), kind })
+        ).pipe(Effect.result)
+        expect(staleReplace).toMatchObject({
+          _tag: "Failure",
+          failure: { conflictKinds: ["system_revision"] },
+        })
+        expect(staleWithdraw).toMatchObject({
+          _tag: "Failure",
+          failure: { conflictKinds: ["system_revision"] },
+        })
+        expect(yield* counts()).toEqual(beforeConflict)
+        const changed = yield* getContext
+        expect(changed.current?.facts.economicAssetId).toBe(nextAssetId)
+        expect(changed[kind].active?.inspectedFacts).toEqual(inspected)
+        yield* withRepository((repo) => repo.replace({ ...parameters(changed, kind), input }))
+        const replaced = yield* getContext
+        expect(replaced[kind].active?.inspectedFacts.economicAssetId).toBe(nextAssetId)
+        yield* withRepository((repo) => repo.withdraw({ ...parameters(replaced, kind), kind }))
+        const withdrawn = yield* getContext
+        expect(withdrawn[kind].leaf?.inspectedFacts.economicAssetId).toBe(nextAssetId)
+        expect(
+          withdrawn.history.find((row) => row.id === accepted.value.overrideId)?.inspectedFacts
+        ).toEqual(inspected)
+      })
+    )
+  }
 })

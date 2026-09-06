@@ -198,6 +198,104 @@ const changePrice = ({
     ),
   })
 
+const seedExistingIdentity = (kind: "exact" | "provider") =>
+  Effect.gen(function* () {
+    const fixture = yield* seed()
+    const db = yield* drizzle
+    const replacementAssetId = CHANGED_ASSET_ID
+    yield* db.insert(schema.assets).values({
+      id: replacementAssetId,
+      name: "Synthetic effective identity",
+      symbol: "SYN",
+      type: "fungible",
+    })
+    let targetId: string
+    let providerAssetRowId: string | null = null
+    let sourceRepresentationUseId: string | null = null
+    if (kind === "provider") {
+      const [provider] = yield* db
+        .insert(schema.providerAssets)
+        .values({
+          provider: "coinbase",
+          providerAssetId: "synthetic-existing-identity",
+          currencyCode: "SYN",
+          name: "Synthetic provider",
+          exponent: 8,
+          providerType: "crypto",
+          rawProviderPayload: {},
+          evidenceRevision: 1,
+          discoveredAt: fixture.timestamp,
+          retrievedAt: fixture.timestamp,
+        })
+        .returning({ id: schema.providerAssets.id })
+      if (provider === undefined) return yield* Effect.die("Missing provider fixture")
+      providerAssetRowId = provider.id
+      yield* db.insert(schema.providerAssetMappings).values({
+        providerAssetRowId,
+        mappingKind: "asset",
+        canonicalAssetId: TEST_BTC_ASSET_ID,
+        mappingStatus: "approved",
+      })
+      const [target] = yield* db
+        .insert(schema.principalAssetOverrideTargets)
+        .values({ principalId: PRINCIPAL_ID, targetKind: "provider_asset", providerAssetRowId })
+        .returning({ id: schema.principalAssetOverrideTargets.id })
+      if (target === undefined) return yield* Effect.die("Missing provider target")
+      targetId = target.id
+    } else {
+      const [representation] = yield* db
+        .select({
+          blockchainId: schema.assetRepresentations.blockchainId,
+          representationType: schema.assetRepresentations.type,
+          contractAddress: schema.assetRepresentations.contractAddress,
+          mintAddress: schema.assetRepresentations.mintAddress,
+        })
+        .from(schema.assetRepresentations)
+        .where(eq(schema.assetRepresentations.id, TEST_BTC_REPRESENTATION_ID))
+      if (representation === undefined) return yield* Effect.die("Missing exact fixture")
+      const [use] = yield* db
+        .insert(schema.sourceRepresentationUses)
+        .values({ sourceId: SOURCE_ID, ...representation })
+        .returning({ id: schema.sourceRepresentationUses.id })
+      const [target] = yield* db
+        .insert(schema.principalAssetOverrideTargets)
+        .values({ principalId: PRINCIPAL_ID, targetKind: "representation", ...representation })
+        .returning({ id: schema.principalAssetOverrideTargets.id })
+      if (use === undefined || target === undefined) return yield* Effect.die("Missing exact links")
+      targetId = target.id
+      sourceRepresentationUseId = use.id
+    }
+    yield* db
+      .update(schema.transactionLegs)
+      .set({ providerAssetRowId, sourceRepresentationUseId })
+      .where(eq(schema.transactionLegs.sourceId, SOURCE_ID))
+    const draft = {
+      principalId: PRINCIPAL_ID,
+      targetId,
+      kind: "identity" as const,
+      operation: "create" as const,
+      inspectedSystemRevision: "synthetic-catalog-A",
+      inspectedSystemIdentity: "resolved" as const,
+      inspectedSystemAssetId: TEST_BTC_ASSET_ID,
+      replacementAssetId,
+      actorUserId: USER_ID,
+      reason: "Synthetic existing identity override",
+    }
+    const [override] = yield* db
+      .insert(schema.principalAssetOverrides)
+      .values(draft)
+      .returning({ id: schema.principalAssetOverrides.id })
+    if (override === undefined) return yield* Effect.die("Missing identity override")
+    return {
+      ...fixture,
+      replacementAssetId,
+      draft,
+      overrideId: override.id,
+      providerAssetRowId,
+      sourceRepresentationUseId,
+    }
+  })
+
 const readRun = (index: number) =>
   runPg(
     Effect.gen(function* () {
@@ -594,4 +692,117 @@ describe("effective movement price application", () => {
         expect(moneyEquals((yield* readRun(2)).results[0]?.basis, "5")).toBe(true)
       })
   )
+  for (const targetKind of ["exact", "provider"] as const) {
+    it.effect(`applies a price accepted after an existing ${targetKind} identity override`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* runPg(seedExistingIdentity(targetKind))
+        const accepted = yield* changePrice({
+          operation: "create",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "total_value", amount: "20", currency: EUR },
+        })
+        expect(accepted.context.price.active?.inspectedFacts.economicAssetId).toBe(
+          fixture.replacementAssetId
+        )
+        expect((yield* recompute(1)).status).toBe("complete")
+        const first = yield* readRun(1)
+        expect(moneyEquals(first.results[0]?.basis, "20")).toBe(true)
+        expect(moneyEquals(first.results[0]?.gain, "10")).toBe(true)
+        expect(first.inputs[0]?.captured).toMatchObject({
+          application: "applied",
+          current: {
+            storedAssetId: TEST_BTC_ASSET_ID,
+            effectiveAssetId: fixture.replacementAssetId,
+          },
+          history: { inspectedFacts: { economicAssetId: fixture.replacementAssetId } },
+          effective: { event: { assetId: fixture.replacementAssetId } },
+        })
+        yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db.insert(schema.principalAssetOverrides).values({
+              ...fixture.draft,
+              operation: "replace",
+              supersedesOverrideId: fixture.overrideId,
+              replacementAssetId: TEST_BTC_ASSET_ID,
+            })
+          })
+        )
+        expect((yield* recompute(2)).status).toBe("partial")
+        expect((yield* readRun(2)).inputs[0]?.captured).toMatchObject({
+          application: "needs_attention",
+          applicationProblem: "asset_changed",
+        })
+        yield* changePrice({
+          operation: "replace",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "total_value", amount: "20", currency: EUR },
+        })
+        expect((yield* recompute(3)).status).toBe("complete")
+        expect(yield* readRun(1)).toEqual(first)
+        const raw = yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return yield* db
+              .select({ assetId: schema.transactionLegs.assetId })
+              .from(schema.transactionLegs)
+              .where(eq(schema.transactionLegs.sourceId, SOURCE_ID))
+          })
+        )
+        expect(raw).toEqual([{ assetId: TEST_BTC_ASSET_ID }, { assetId: TEST_BTC_ASSET_ID }])
+      })
+    )
+  }
+
+  for (const eligibility of ["blocked", "excluded"] as const) {
+    it.effect(`retains identified ${eligibility} context without bypassing eligibility`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* runPg(seedExistingIdentity("provider"))
+        yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            if (fixture.providerAssetRowId === null)
+              return yield* Effect.die("Missing provider link")
+            if (eligibility === "blocked")
+              yield* db
+                .update(schema.providerAssets)
+                .set({ exponent: null })
+                .where(eq(schema.providerAssets.id, fixture.providerAssetRowId))
+            else
+              yield* db.insert(schema.principalAssetOverrides).values({
+                principalId: PRINCIPAL_ID,
+                targetId: fixture.draft.targetId,
+                kind: "inclusion",
+                operation: "create",
+                inspectedSystemRevision: "synthetic-included",
+                inspectedSystemInclusion: "included",
+                replacementInclusion: "excluded",
+                actorUserId: USER_ID,
+                reason: "Synthetic exclusion",
+              })
+          })
+        )
+        const accepted = yield* changePrice({
+          operation: "create",
+          targetId: fixture.acquisition.targetId,
+          input: { _tag: "total_value", amount: "20", currency: EUR },
+        })
+        expect(accepted.context.price.active?.inspectedFacts.economicAssetId).toBe(
+          fixture.replacementAssetId
+        )
+        const ledger = yield* loadLedger()
+        expect(ledger.events).toEqual([])
+        expect(ledger.valuationFacts).toEqual([])
+        expect(ledger.correctionInputs[0]).toMatchObject({
+          application: "needs_attention",
+          applicationProblem: "target_ineligible",
+          system: { event: null },
+        })
+        if (eligibility === "blocked")
+          expect(ledger.inputBlockers).toContainEqual(
+            expect.objectContaining({ code: "missing_decimals" })
+          )
+      })
+    )
+  }
 })

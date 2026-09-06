@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "@effect/vitest"
+import { AuthUserId } from "@my/core/authentication"
 import { CurrencyCode } from "@my/core/currency"
 import { PrincipalId } from "@my/core/ownership"
 import { eq } from "drizzle-orm"
@@ -11,6 +12,7 @@ import { PrincipalTransactionOverrideRepository } from "../../src/services/Princ
 import { schema } from "../../src/schema/index.ts"
 import {
   TEST_BTC_ASSET_ID,
+  TEST_BTC_REPRESENTATION_ID,
   makeIntegrationTestDatabaseContext,
   seedSyncEngineAssets,
   seedSyncEngineRepositoryFixture,
@@ -111,6 +113,134 @@ const seed = Effect.gen(function* () {
   } satisfies typeof schema.principalTransactionOverrides.$inferInsert
   return { ...fixture, legId: leg.id, transactionId: transaction.id, legValues, historyValues }
 })
+
+const EFFECTIVE_ASSET_ID = "00000000-0000-4000-8000-000000008690"
+const seedIdentityContext = ({
+  kind,
+  state,
+  fee = false,
+}: {
+  readonly kind: "exact" | "provider"
+  readonly state: "overridden" | "unresolved" | "excluded" | "blocked"
+  readonly fee?: boolean
+}) =>
+  Effect.gen(function* () {
+    const fixture = yield* seed
+    const db = yield* drizzle
+    yield* db.insert(schema.assets).values({
+      id: EFFECTIVE_ASSET_ID,
+      name: "Synthetic effective asset",
+      symbol: "SYN",
+      type: "fungible",
+    })
+    let targetId: string
+    if (kind === "exact") {
+      const coordinates = {
+        blockchainId: fixture.bitcoinBlockchainId,
+        representationType: "token" as const,
+        contractAddress:
+          state === "unresolved" ? "synthetic-unknown-contract" : "sync-engine-btc-fixture",
+      }
+      const [use] = yield* db
+        .insert(schema.sourceRepresentationUses)
+        .values({ sourceId: SOURCE_ID, ...coordinates })
+        .returning({ id: schema.sourceRepresentationUses.id })
+      const [target] = yield* db
+        .insert(schema.principalAssetOverrideTargets)
+        .values({ principalId: TEST_PRINCIPAL_ID, targetKind: "representation", ...coordinates })
+        .returning({ id: schema.principalAssetOverrideTargets.id })
+      if (use === undefined || target === undefined)
+        return yield* Effect.die("Missing synthetic exact link")
+      targetId = target.id
+      yield* db
+        .update(schema.transactionLegs)
+        .set({ sourceRepresentationUseId: use.id })
+        .where(eq(schema.transactionLegs.id, fixture.legId))
+    } else {
+      const [provider] = yield* db
+        .insert(schema.providerAssets)
+        .values({
+          provider: "coinbase",
+          providerAssetId: "synthetic-context-provider",
+          currencyCode: "SYN",
+          name: "Synthetic provider asset",
+          exponent: state === "blocked" ? null : 8,
+          providerType: "crypto",
+          rawProviderPayload: {},
+          evidenceRevision: 1,
+          discoveredAt: time,
+          retrievedAt: time,
+        })
+        .returning({ id: schema.providerAssets.id })
+      if (provider === undefined) return yield* Effect.die("Missing synthetic provider")
+      if (state !== "unresolved")
+        yield* db.insert(schema.providerAssetMappings).values({
+          providerAssetRowId: provider.id,
+          mappingKind: "asset",
+          canonicalAssetId: TEST_BTC_ASSET_ID,
+          mappingStatus: "approved",
+        })
+      const [target] = yield* db
+        .insert(schema.principalAssetOverrideTargets)
+        .values({
+          principalId: TEST_PRINCIPAL_ID,
+          targetKind: "provider_asset",
+          providerAssetRowId: provider.id,
+        })
+        .returning({ id: schema.principalAssetOverrideTargets.id })
+      if (target === undefined) return yield* Effect.die("Missing synthetic provider target")
+      targetId = target.id
+      yield* db
+        .update(schema.transactionLegs)
+        .set({ providerAssetRowId: provider.id })
+        .where(eq(schema.transactionLegs.id, fixture.legId))
+    }
+    if (state !== "unresolved")
+      yield* db.insert(schema.principalAssetOverrides).values({
+        principalId: TEST_PRINCIPAL_ID,
+        targetId,
+        kind: "identity",
+        operation: "create",
+        inspectedSystemRevision: "synthetic-system-A",
+        inspectedSystemIdentity: "resolved",
+        inspectedSystemAssetId: TEST_BTC_ASSET_ID,
+        replacementAssetId: EFFECTIVE_ASSET_ID,
+        actorUserId: TEST_USER_ID,
+        reason: "Synthetic identity evidence",
+      })
+    if (state === "excluded")
+      yield* db.insert(schema.principalAssetOverrides).values({
+        principalId: TEST_PRINCIPAL_ID,
+        targetId,
+        kind: "inclusion",
+        operation: "create",
+        inspectedSystemRevision: "synthetic-included",
+        inspectedSystemInclusion: "included",
+        replacementInclusion: "excluded",
+        actorUserId: TEST_USER_ID,
+        reason: "Synthetic exclusion",
+      })
+    if (fee) {
+      yield* db
+        .update(schema.transactionLegs)
+        .set({ kind: "fee", feeForTransactionId: fixture.transactionId })
+        .where(eq(schema.transactionLegs.id, fixture.legId))
+      yield* db.insert(schema.inventoryMovements).values({
+        sourceId: SOURCE_ID,
+        principalId: TEST_PRINCIPAL_ID,
+        transactionId: fixture.transactionId,
+        transactionLegId: fixture.legId,
+        assetId: TEST_BTC_ASSET_ID,
+        timestamp: time,
+        direction: "outbound",
+        purpose: "fee",
+        taxTreatment: "non_taxable",
+        reconciliationStatus: "matched",
+        amount: "3",
+      })
+    }
+    return fixture
+  })
 
 await Effect.runPromise(context.recreateTestDatabase())
 beforeEach(() => Effect.runPromise(context.recreateTestDatabase()))
@@ -389,4 +519,168 @@ describe("movement correction history reader", () => {
         expect(sibling.value.current?.facts.structure).toBe("ownership_change")
       })
   )
+  for (const kind of ["exact", "provider"] as const) {
+    for (const state of ["overridden", "unresolved", "excluded", "blocked"] as const) {
+      if (kind === "exact" && state === "blocked") continue
+      it.effect(`reads ${kind} ${state} identity independently of eligibility`, () =>
+        Effect.gen(function* () {
+          const fixture = yield* Effect.promise(() =>
+            context.runPg(seedIdentityContext({ kind, state }))
+          )
+          const found = yield* read()
+          if (Option.isNone(found)) return yield* Effect.die("Missing synthetic context")
+          expect(found.value.current?.facts.economicAssetId).toBe(
+            state === "unresolved" ? null : EFFECTIVE_ASSET_ID
+          )
+          const raw = yield* Effect.promise(() =>
+            context.runPg(
+              Effect.gen(function* () {
+                const db = yield* drizzle
+                return yield* db
+                  .select({ assetId: schema.transactionLegs.assetId })
+                  .from(schema.transactionLegs)
+                  .where(eq(schema.transactionLegs.id, fixture.legId))
+              })
+            )
+          )
+          expect(raw).toEqual([{ assetId: TEST_BTC_ASSET_ID }])
+        })
+      )
+    }
+  }
+
+  it.effect("does not use the raw asset when a required exact link is missing", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => context.runPg(seed))
+      yield* Effect.promise(() =>
+        context.runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .update(schema.transactionLegs)
+              .set({ assetRepresentationId: TEST_BTC_REPRESENTATION_ID })
+              .where(eq(schema.transactionLegs.id, fixture.legId))
+          })
+        )
+      )
+      const found = yield* read()
+      if (Option.isNone(found)) return yield* Effect.die("Missing synthetic context")
+      expect(found.value.current?.facts.economicAssetId).toBeNull()
+    })
+  )
+
+  it.effect(
+    "inspects the fee's effective asset without changing its system custody inventory",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() =>
+          context.runPg(seedIdentityContext({ kind: "provider", state: "overridden", fee: true }))
+        )
+        const found = yield* read()
+        if (Option.isNone(found) || found.value.current === null)
+          return yield* Effect.die("Missing fee context")
+        expect(found.value.current.facts).toMatchObject({
+          economicAssetId: EFFECTIVE_ASSET_ID,
+          direction: "outbound",
+          structure: "fee",
+        })
+        yield* context.runWithLayer({
+          layer: PrincipalTransactionOverrideRepositoryLive,
+          effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repo) =>
+            repo.create({
+              principalId: ownedPrincipal,
+              actorUserId: AuthUserId.make(TEST_USER_ID),
+              targetId: TARGET_ID,
+              expectedSystemRevision: found.value.current?.facts.systemRevision ?? "missing",
+              expectedLeafId: null,
+              reason: "Synthetic fee price",
+              reportingCurrency: CurrencyCode.make("EUR"),
+              input: {
+                _tag: "price",
+                input: { _tag: "total_value", amount: "1", currency: CurrencyCode.make("EUR") },
+              },
+            })
+          ),
+        })
+        const rows = yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({
+                  assetId: schema.inventoryMovements.assetId,
+                  purpose: schema.inventoryMovements.purpose,
+                  legId: schema.inventoryMovements.transactionLegId,
+                })
+                .from(schema.inventoryMovements)
+            })
+          )
+        )
+        expect(rows).toEqual([{ assetId: TEST_BTC_ASSET_ID, purpose: "fee", legId: fixture.legId }])
+      })
+  )
+  for (const kind of ["exact", "provider"] as const) {
+    it.effect(`does not apply another principal's ${kind} identity override`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() =>
+          context.runPg(seedIdentityContext({ kind, state: "overridden" }))
+        )
+        const otherPrincipalId = PrincipalId.make("00000000-0000-4000-8000-000000008695")
+        yield* Effect.promise(() =>
+          context.runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              const other = yield* seedSyncEngineRepositoryFixture({
+                principalId: otherPrincipalId,
+                userId: "00000000-0000-4000-8000-000000008696",
+                sourceId: "00000000-0000-4000-8000-000000008697",
+              })
+              const [ownedLeg] = yield* db
+                .select({ providerAssetRowId: schema.transactionLegs.providerAssetRowId })
+                .from(schema.transactionLegs)
+                .where(eq(schema.transactionLegs.id, fixture.legId))
+              if (ownedLeg === undefined) return yield* Effect.die("Missing synthetic linked leg")
+              let sourceRepresentationUseId: string | null = null
+              if (kind === "exact") {
+                const [use] = yield* db
+                  .insert(schema.sourceRepresentationUses)
+                  .values({
+                    sourceId: other.sourceId,
+                    blockchainId: fixture.bitcoinBlockchainId,
+                    representationType: "token",
+                    contractAddress: "sync-engine-btc-fixture",
+                  })
+                  .returning({ id: schema.sourceRepresentationUses.id })
+                if (use === undefined) return yield* Effect.die("Missing other source-use")
+                sourceRepresentationUseId = use.id
+              }
+              yield* db.insert(schema.movementCorrectionTargets).values({
+                id: OTHER_ID,
+                principalId: otherPrincipalId,
+                sourceId: other.sourceId,
+                sourceRecordKey: "synthetic-record",
+                componentKey: "amount",
+              })
+              yield* db.insert(schema.transactionLegs).values({
+                ...fixture.legValues,
+                principalId: otherPrincipalId,
+                sourceId: other.sourceId,
+                transactionId: null,
+                movementCorrectionTargetId: OTHER_ID,
+                sourceRepresentationUseId,
+                providerAssetRowId: ownedLeg.providerAssetRowId,
+              })
+            })
+          )
+        )
+        const owned = yield* read()
+        const other = yield* read(OTHER_ID, otherPrincipalId)
+        if (Option.isNone(owned) || Option.isNone(other))
+          return yield* Effect.die("Missing owned targets")
+        expect(owned.value.current?.facts.economicAssetId).toBe(EFFECTIVE_ASSET_ID)
+        expect(other.value.current?.facts.economicAssetId).toBe(TEST_BTC_ASSET_ID)
+        expect(yield* read(TARGET_ID, otherPrincipalId)).toEqual(Option.none())
+      })
+    )
+  }
 })
