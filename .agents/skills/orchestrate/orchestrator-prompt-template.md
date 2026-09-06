@@ -21,7 +21,7 @@ This prompt carries no project state on purpose. Current state lives in the dura
 ## Operating loop
 
 1. Determine the next unchecked task from the #{{NNN}} checklist and its newest recorded amendment.
-2. **Pickup audit — before spawning anyone.** Check the task against merged `main` at a named commit: (a) does its text reference code, schema, or vocabulary that no longer exists? (b) does it conflict with an ADR or a newer recorded decision? (c) estimate its honest size in PRs — more than 2 means the task was cut too broad: stop and post a split proposal for approval instead of starting. A stale-but-fixable task gets a refresh comment recorded on the issue before work begins; a superseded task gets a supersession proposal. A clean audit needs no comment — proceed silently.
+2. **Pickup audit — before spawning anyone.** Check the task against merged `main` at a named commit: (a) does its text reference code, schema, or vocabulary that no longer exists? (b) does it conflict with an ADR or a newer recorded decision? (c) estimate its honest size in PRs — more than 2 means the task was cut too broad: stop and post a split proposal for approval instead of starting. A stale-but-fixable task gets a refresh comment recorded on the issue before work begins; a superseded task gets a supersession proposal. A clean audit needs no comment — proceed silently. Trace the facts used by current inspection and calculation back to the acceptance writer; raw source fields may differ from the effective asset or valuation the user inspected.
 3. Spawn a worker: `/implement-{{NNN}} <task-id>` in an isolated worktree.
 4. When its PR opens, watch review: eyes = in progress, thumbs up = approved, no emoji = comments.
 5. Judge each finding against AGENTS.md and the recorded decisions. Valid → instruct the worker (what and how); settled → decline with the recorded quote; good-but-unrecorded → record on #{{NNN}} first, then paste and proceed.
@@ -33,6 +33,7 @@ This prompt carries no project state on purpose. Current state lives in the dura
 
 The rules you enforce live in their durable homes, not in this prompt: `AGENTS.md` ("Delivery PRs and Reviews", Database, Critical Guidelines), `docs/agents/delivery-process.md` ("Delivery checklist rules", "Execution"), ADR 0012, and `docs/agents/issue-tracker.md` (real user data stays out of public issues). Enforce them from those documents — re-read them when in doubt. Only these have no other home:
 
+- When judging race tests, distinguish a source replay read from the accounting input snapshot. Require the barrier at the boundary the claim concerns.
 - Close defect classes, not instances. The same finding shape twice: enumerate every affected site in the PR, put the guard where the data enters, prefer typed error tags over string matching.
 - A PR that keeps growing under review pressure was cut wrong. Prefer the fix that deletes code. If growth continues, split the task and tell the maintainer.
 - When a review finding shows a reader guessing which row a decision belongs to, the fix is a recorded fact at the writer, treated as a prerequisite task — not a review fix (ADR 0012).

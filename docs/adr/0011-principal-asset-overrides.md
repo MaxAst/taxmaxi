@@ -8,7 +8,7 @@ Accepted
 
 TaxMaxi decides asset identity and calculation inclusion globally: one provider observation maps to one economic asset for everyone, and a spam or banned verdict excludes it for everyone (ADR 0002). A taxpayer must still be able to disagree for their own report. They may know that an unresolved token is legitimate, that an "excluded" airdrop belongs in their filing, or that TaxMaxi picked the wrong economic asset. Their choice must not change global data, other principals' results, or raw evidence, and an auditor must be able to see what TaxMaxi concluded and what the user replaced.
 
-Issue #149 built this layer for identity and inclusion. Issues #150 (transaction-time prices), #151 (report disclosure), and #153 (user tasks) build on it. This ADR records the rules those specs rely on so they do not have to quote #149 task notes.
+Issue #149 built this layer for identity and inclusion. Issues #150 (movement prices and factual classifications), #151 (report disclosure), and #153 (user tasks) build on it. This ADR records the rules those specs rely on so they do not have to quote #149 task notes.
 
 ## Decision
 
