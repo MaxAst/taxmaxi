@@ -1078,6 +1078,7 @@ const startClaimRaceRun = ({
 }) =>
   Effect.flatMap(CalculationRunRepository, (repository) =>
     repository.start({
+      correctionInputs: [],
       id: CalculationRunId.make(runId),
       principalId: PrincipalId.make(principalId),
       jurisdiction: JurisdictionCode.make("DE"),
@@ -1112,6 +1113,7 @@ const persistClaimRaceRun = ({
 }) =>
   Effect.flatMap(CalculationRunRepository, (repository) =>
     repository.persist({
+      correctionInputs: [],
       id: CalculationRunId.make(runId),
       principalId: PrincipalId.make(principalId),
       reportingCurrency: CLAIM_REPORTING_CURRENCY,

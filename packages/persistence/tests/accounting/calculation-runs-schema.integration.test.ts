@@ -285,6 +285,7 @@ describe("calculation-runs schema", () => {
       yield* runRepository(
         Effect.flatMap(CalculationRunRepository, (repository) =>
           repository.persist({
+            correctionInputs: [],
             id: CalculationRunId.make(CALCULATION_RUN_ID),
             principalId: PrincipalId.make(WRITER_PRINCIPAL_ID),
             reportingCurrency: CurrencyCode.make("EUR"),

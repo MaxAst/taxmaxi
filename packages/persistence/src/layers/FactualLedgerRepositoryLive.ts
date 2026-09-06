@@ -34,7 +34,9 @@ import {
   type FactualLedgerInputBlocker,
   type FactualLedgerInputBlockerTarget,
   type FactualLedgerRepositoryShape,
+  type MovementCorrectionLegContext,
 } from "../services/FactualLedgerRepository.ts"
+import { makePrincipalTransactionOverrideDecisionLoader } from "./PrincipalTransactionOverrideDecisionLoader.ts"
 import { drizzle } from "./PgClientLive.ts"
 import {
   makePrincipalAssetOverrideDecisionLoader,
@@ -447,6 +449,7 @@ const closeWithheldTransactionPairs = ({
 const make = Effect.gen(function* () {
   const db = yield* drizzle
   const principalAssetOverrideDecisionLoader = yield* makePrincipalAssetOverrideDecisionLoader
+  const movementCorrectionLoader = yield* makePrincipalTransactionOverrideDecisionLoader
   const feeTransactionTable = aliasedTable(schema.transactions, "fee_transaction")
   const providerTransactionTable = aliasedTable(schema.transactions, "provider_transaction")
   const canonicalTransactionTable = aliasedTable(schema.transactions, "canonical_transaction")
@@ -481,6 +484,9 @@ const make = Effect.gen(function* () {
       const rows = yield* db
         .select({
           id: schema.transactionLegs.id,
+          targetId: schema.transactionLegs.movementCorrectionTargetId,
+          fiatAmount: schema.transactionLegs.fiatAmount,
+          fiatCurrency: schema.transactionLegs.fiatCurrency,
           sourceId: schema.transactionLegs.sourceId,
           providerKey: schema.sources.providerKey,
           timestamp: schema.transactionLegs.timestamp,
@@ -763,7 +769,36 @@ const make = Effect.gen(function* () {
         eventRows.push({ event, row })
       }
 
-      return { events, eventRows, eventCountByTransactionId }
+      const legContexts: MovementCorrectionLegContext[] = rows.map((row) => ({
+        targetId: row.targetId,
+        legId: row.id,
+        sourceId: row.sourceId,
+        transactionId: row.transactionId,
+        occurredAt: row.timestamp.toISOString(),
+        quantity: row.amount,
+        storedAssetId: row.assetId,
+        effectiveAssetId: effectiveAssetByLegId.get(row.id) ?? null,
+        direction: row.kind === "acquisition" || row.kind === "income" ? "inbound" : "outbound",
+        structure:
+          row.kind === "fee"
+            ? "fee"
+            : isReconciledEconomicLeg(row)
+              ? "custody"
+              : "ownership_change",
+        legKind: row.kind,
+        transactionType: row.transactionType,
+        providerTransactionType: row.providerTransactionType,
+        recordedFiatAmount: row.fiatAmount,
+        recordedFiatCurrency: row.fiatCurrency,
+        providerFiatAmount: row.providerFiatAmount,
+        providerFiatCurrency: row.providerFiatCurrency,
+        derivationRule: row.derivationRule,
+        feeForSourceRecordKey: row.feeExternalId,
+        originKind: row.originKind,
+        sourceTransferId: row.sourceTransferId,
+        providerTransferId: row.providerTransferId,
+      }))
+      return { events, eventRows, eventCountByTransactionId, legContexts }
     })
 
   type LoadedLegEvents = Effect.Success<ReturnType<typeof loadLegEvents>>
@@ -1573,7 +1608,16 @@ const make = Effect.gen(function* () {
         blockerKey(left).localeCompare(blockerKey(right))
       )
 
+      const correctionInputs = yield* movementCorrectionLoader.load({
+        principalId,
+        reportingCurrency: supportedReportingCurrency,
+        occurredBefore,
+        legContexts: legEvents.legContexts,
+        events,
+        valuationFacts,
+      })
       return {
+        correctionInputs,
         events,
         valuationFacts,
         custodyUnitMembership,

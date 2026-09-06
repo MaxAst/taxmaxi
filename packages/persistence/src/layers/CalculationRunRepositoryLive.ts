@@ -452,6 +452,64 @@ const make = Effect.gen(function* () {
       return false
     })
 
+  const writeCorrectionInputs = ({
+    tx,
+    params,
+    jurisdiction,
+    taxYear,
+  }: {
+    readonly tx: CalculationTransaction
+    readonly params: Pick<
+      StartCalculationRunParams,
+      "id" | "principalId" | "reportingCurrency" | "correctionInputs"
+    >
+    readonly jurisdiction: string
+    readonly taxYear: number
+  }) =>
+    writeBatches(
+      params.correctionInputs.map((captured) => ({
+        runId: params.id,
+        principalId: params.principalId,
+        jurisdiction,
+        taxYear,
+        reportingCurrency: params.reportingCurrency,
+        sourceId: captured.history.sourceId,
+        targetId: captured.history.targetId,
+        overrideId: captured.history.id,
+        kind: captured.history.kind,
+        captured,
+      })),
+      (batch) => tx.insert(schema.calculationRunCorrectionInputs).values(batch)
+    )
+
+  // A started run has already committed its snapshot. Compare exact recorded keys and JSON,
+  // never consult current correction history when the calculation returns later.
+  const verifyCorrectionInputs = ({ tx, params }: WriteContext) =>
+    Effect.gen(function* () {
+      const capturedJson = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))(
+        params.correctionInputs
+      )
+      const [stored] = yield* tx
+        .select({
+          count: sql<number>`count(*)::integer`,
+          matches: sql<number>`count(*) filter (where exists (
+        select 1 from jsonb_array_elements(${capturedJson}::jsonb) as input
+        where input->'history'->>'id' = ${schema.calculationRunCorrectionInputs.overrideId}::text
+          and input = ${schema.calculationRunCorrectionInputs.captured}
+      ))::integer`,
+        })
+        .from(schema.calculationRunCorrectionInputs)
+        .where(eq(schema.calculationRunCorrectionInputs.runId, params.id))
+      if (
+        stored?.count !== params.correctionInputs.length ||
+        stored.matches !== params.correctionInputs.length ||
+        new Set(params.correctionInputs.map((input) => input.history.id)).size !==
+          params.correctionInputs.length
+      ) {
+        return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
+      }
+    })
+
   const writeCustodyMembership = ({
     tx,
     runId,
@@ -683,7 +741,15 @@ const make = Effect.gen(function* () {
   const persistWithTransaction = (context: WriteContext) =>
     Effect.gen(function* () {
       const isNewRun = yield* claimRun(context)
-      if (isNewRun) yield* snapshotCustodyMembership(context)
+      if (isNewRun) {
+        yield* snapshotCustodyMembership(context)
+        yield* writeCorrectionInputs({
+          tx: context.tx,
+          params: context.params,
+          jurisdiction: context.result.jurisdiction,
+          taxYear: context.result.taxYear,
+        })
+      } else yield* verifyCorrectionInputs(context)
       yield* writeAllocations(context)
       yield* writeRealizedResults(context)
       yield* writeIncomeResults(context)
@@ -759,6 +825,12 @@ const make = Effect.gen(function* () {
             return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
           }
 
+          yield* writeCorrectionInputs({
+            tx,
+            params,
+            jurisdiction: params.jurisdiction,
+            taxYear: params.taxYear,
+          })
           yield* writeCustodyMembership({
             tx,
             runId: params.id,

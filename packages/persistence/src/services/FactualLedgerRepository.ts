@@ -4,11 +4,21 @@
  * @module FactualLedgerRepository
  */
 
-import type { AccountingEvent, CustodyUnitId, ValuationFact } from "@my/core/accounting"
+import type {
+  AccountingEvent,
+  CustodyUnitId,
+  ValuationFact,
+  MovementCorrectionFacts,
+} from "@my/core/accounting"
 import type { PrincipalAssetTechnicalBlocker } from "@my/core/assets"
 import type { CurrencyCode } from "@my/core/currency"
 import type { PrincipalId } from "@my/core/ownership"
 import type { SourceId } from "@my/core/source"
+import type * as Schema from "effect/Schema"
+import type {
+  PrincipalTransactionOverrideHistoryRecord,
+  MovementSystemEvidence,
+} from "./PrincipalTransactionOverrideRepository.ts"
 import * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import type { PersistenceError } from "../errors/RepositoryError.ts"
@@ -88,12 +98,69 @@ export type PrincipalAssetOverrideRevisionRecord =
       readonly replacementInclusion: "included" | "excluded" | null
     }
 
+/** Exact immutable history values encoded for a run snapshot, without runtime decimal/date objects. */
+export type CapturedMovementCorrectionHistory = Omit<
+  PrincipalTransactionOverrideHistoryRecord,
+  "inspectedFacts" | "inspectedSystem" | "recordedAt"
+> & {
+  readonly inspectedFacts: Schema.Codec.Encoded<typeof MovementCorrectionFacts>
+  readonly inspectedSystem: Omit<MovementSystemEvidence, "occurredAt"> & {
+    readonly occurredAt: string
+  }
+  readonly recordedAt: string
+}
+
+/** Recorded current movement context, including facts withheld from the engine. */
+export interface MovementCorrectionLegContext {
+  readonly targetId: string
+  readonly legId: string
+  readonly sourceId: string
+  readonly transactionId: string | null
+  readonly occurredAt: string
+  readonly quantity: string
+  readonly storedAssetId: string
+  readonly effectiveAssetId: string | null
+  readonly direction: "inbound" | "outbound"
+  readonly structure: "ownership_change" | "fee" | "custody"
+  readonly legKind: "acquisition" | "income" | "disposal" | "fee"
+  readonly transactionType: string | null
+  readonly providerTransactionType: string | null
+  readonly recordedFiatAmount: string | null
+  readonly recordedFiatCurrency: string | null
+  readonly providerFiatAmount: string | null
+  readonly providerFiatCurrency: string | null
+  readonly derivationRule: string | null
+  readonly feeForSourceRecordKey: string | null
+  readonly originKind: "none" | "canonical_transfer" | "provider_transfer"
+  readonly sourceTransferId: string | null
+  readonly providerTransferId: string | null
+}
+
+/** Exact event and valuation inputs passed to the engine for a target, or honest absence. */
+export interface MovementCorrectionEngineInputs {
+  readonly event: Schema.Codec.Encoded<typeof AccountingEvent> | null
+  readonly valuationFacts: ReadonlyArray<Schema.Codec.Encoded<typeof ValuationFact>>
+}
+
+/** One history record and the context/inputs that this run's factual snapshot actually read. */
+export interface CalculationRunCorrectionInput {
+  readonly history: CapturedMovementCorrectionHistory
+  readonly current: MovementCorrectionLegContext | null
+  readonly currentOutcome: "included" | "withheld" | "absent" | "outside_period"
+  readonly streamState: "active" | "withdrawn" | "superseded"
+  readonly application: "inactive" | "not_applied" | "applied" | "needs_attention"
+  readonly reportingCurrency: CurrencyCode
+  readonly system: MovementCorrectionEngineInputs
+  readonly effective: MovementCorrectionEngineInputs
+}
+
 /** Stored accounting facts ready for the pure tax-accounting engine. */
 export interface FactualLedger {
   readonly events: ReadonlyArray<AccountingEvent>
   readonly inputBlockers: ReadonlyArray<FactualLedgerInputBlocker>
   readonly valuationFacts: ReadonlyArray<ValuationFact>
   readonly custodyUnitMembership: ReadonlyArray<CustodyUnitMembership>
+  readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
   readonly principalAssetOverrideRevision: ReadonlyArray<PrincipalAssetOverrideRevisionRecord>
 }
 
