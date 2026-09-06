@@ -40,6 +40,7 @@ import { databaseErrorMetadata } from "../errors/DatabaseErrorMetadata.ts"
 import { scheduleSourceReplays } from "./SourceReplayScheduling.ts"
 import type { SyncEngineDbTransaction } from "./SyncEngineRepositorySupport.ts"
 import { drizzle } from "./PgClientLive.ts"
+import { makePrincipalAssetOverrideDecisionLoader } from "./PrincipalAssetOverrideDecisionLoader.ts"
 
 const PROVIDER_TRANSACTION = alias(schema.transactions, "movement_correction_provider_transaction")
 const CANONICAL_TRANSACTION = alias(
@@ -55,7 +56,8 @@ const SystemRevisionPayload = Schema.fromJsonString(
     target: MovementCorrectionTargetIdentity,
     quantity: Schema.String,
     structure: Schema.Literals(["ownership_change", "fee", "custody"]),
-    economicAssetId: Schema.String,
+    economicAssetId: Schema.NullOr(Schema.String),
+    storedAssetId: Schema.String,
     system: Schema.Struct({
       occurredAt: Schema.DateFromString,
       legKind: Schema.Literals(["acquisition", "disposal", "income", "fee"]),
@@ -141,9 +143,11 @@ const stream = (
 
 const loadContext = ({
   tx,
+  assetLoader,
   principalId,
   targetId,
 }: {
+  readonly assetLoader: Effect.Success<typeof makePrincipalAssetOverrideDecisionLoader>
   readonly tx: SyncEngineDbTransaction
   readonly principalId: PrincipalTransactionOverrideContext["target"]["principalId"]
   readonly targetId: string
@@ -183,6 +187,10 @@ const loadContext = ({
         transactionId: schema.transactionLegs.transactionId,
         amount: schema.transactionLegs.amount,
         assetId: schema.transactionLegs.assetId,
+        assetRepresentationId: schema.transactionLegs.assetRepresentationId,
+        sourceRepresentationUseId: schema.transactionLegs.sourceRepresentationUseId,
+        providerAssetRowId: schema.transactionLegs.providerAssetRowId,
+        sourceRawRecordId: schema.transactionLegs.sourceRawRecordId,
         kind: schema.transactionLegs.kind,
         occurredAt: schema.transactionLegs.timestamp,
         recordedFiatAmount: schema.transactionLegs.fiatAmount,
@@ -301,6 +309,29 @@ const loadContext = ({
       leg === undefined
         ? null
         : yield* Effect.gen(function* () {
+            const decisions = yield* assetLoader.load({
+              principalId,
+              sourceRepresentationUseIds:
+                leg.sourceRepresentationUseId === null ? [] : [leg.sourceRepresentationUseId],
+              providerAssetRowIds: leg.providerAssetRowId === null ? [] : [leg.providerAssetRowId],
+            })
+            const exact =
+              leg.sourceRepresentationUseId === null
+                ? undefined
+                : decisions.sourceRepresentationUseDecisionById.get(leg.sourceRepresentationUseId)
+            // These are identity facts, not permission to bypass inclusion or technical withholding.
+            // A required but unavailable exact link cannot use either the provider or stored asset.
+            const economicAssetId =
+              leg.sourceRepresentationUseId !== null
+                ? (exact?.identityReplacementAssetId ?? exact?.systemAssetId ?? null)
+                : leg.assetRepresentationId !== null
+                  ? null
+                  : leg.providerAssetRowId !== null
+                    ? (decisions.providerAssetDecisionById.get(leg.providerAssetRowId)
+                        ?.effectiveAssetId ?? null)
+                    : leg.sourceRawRecordId !== null || leg.originKind !== "none"
+                      ? null
+                      : leg.assetId
             const system: MovementSystemEvidence = {
               occurredAt: leg.occurredAt,
               legKind: leg.kind,
@@ -316,7 +347,8 @@ const loadContext = ({
               target,
               quantity: leg.amount,
               structure,
-              economicAssetId: leg.assetId,
+              economicAssetId,
+              storedAssetId: leg.assetId,
               system,
             })
             const systemRevision = createHash("sha256").update(revisionPayload).digest("hex")
@@ -325,7 +357,7 @@ const loadContext = ({
               systemRevision,
               quantity: leg.amount,
               structure,
-              economicAssetId: leg.assetId,
+              economicAssetId,
               direction:
                 leg.kind === "acquisition" || leg.kind === "income" ? "inbound" : "outbound",
             })
@@ -366,9 +398,10 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
   PrincipalTransactionOverrideRepository,
   Effect.gen(function* () {
     const db = yield* drizzle
+    const assetLoader = yield* makePrincipalAssetOverrideDecisionLoader
     const findContext: PrincipalTransactionOverrideRepositoryShape["findContext"] = (params) =>
       db
-        .transaction((tx) => loadContext({ tx, ...params }), {
+        .transaction((tx) => loadContext({ tx, assetLoader, ...params }), {
           isolationLevel: "repeatable read",
           accessMode: "read only",
         })
@@ -409,6 +442,7 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
               }
               const loaded = yield* loadContext({
                 tx,
+                assetLoader,
                 principalId: request.principalId,
                 targetId: request.targetId,
               })
@@ -533,6 +567,7 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
               })
               const updated = yield* loadContext({
                 tx,
+                assetLoader,
                 principalId: request.principalId,
                 targetId: request.targetId,
               })
