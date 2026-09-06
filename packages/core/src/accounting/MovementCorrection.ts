@@ -11,7 +11,7 @@ import { CurrencyCode } from "../currency/CurrencyCode.ts"
 import { PrincipalId } from "../ownership/Principal.ts"
 import { SourceId } from "../source/Source.ts"
 import { AcquisitionCause } from "./AccountingEvent.ts"
-import { AccountingQuantity, format } from "./AccountingQuantity.ts"
+import { AccountingQuantity } from "./AccountingQuantity.ts"
 
 const NonEmptyString = Schema.Trimmed.check(Schema.isNonEmpty())
 const Uuid = Schema.String.check(Schema.isUUID())
@@ -158,8 +158,11 @@ export const movementCorrectionCompatibility = ({
   return { _tag: "applicable", stale: inspected.systemRevision !== current.systemRevision }
 }
 
-const formatDecimal = (value: BigDecimal.BigDecimal): string =>
-  format(AccountingQuantity.make(value))
+const formatDecimal = (value: BigDecimal.BigDecimal): string => {
+  if (value.scale <= 0) return (value.value * 10n ** BigInt(-value.scale)).toString()
+  const digits = value.value.toString().padStart(value.scale + 1, "0")
+  return `${digits.slice(0, -value.scale)}.${digits.slice(-value.scale)}`
+}
 
 // Reduce the fraction before checking whether its decimal expansion terminates.
 const unitPreview = (total: BigDecimal.BigDecimal, quantity: AccountingQuantity) => {
