@@ -14,7 +14,7 @@ import {
   type AccountingEvent,
   type AccountingEventId,
   type AccountingMethodChoice,
-  type AccountingQuantity,
+  AccountingQuantity,
   type AcquisitionEvent,
   type CustodyMovementEvent,
   type DispositionEvent,
@@ -28,6 +28,7 @@ import {
 } from "@my/core/accounting"
 import { divide, MonetaryAmount, round, subtract } from "@my/core/shared/values/MonetaryAmount"
 import type { Timestamp } from "@my/core/shared/values/Timestamp"
+import * as BigDecimal from "effect/BigDecimal"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import * as Result from "effect/Result"
@@ -188,9 +189,39 @@ export interface CalculateInput {
   readonly valuationFacts: ReadonlyArray<ValuationFact>
 }
 
+interface UserBasis {
+  readonly total: MonetaryAmount
+  readonly scale: number
+}
+
 interface EngineLot extends DerivedLot {
   readonly id: string
+  readonly userBasis: UserBasis | null
 }
+
+// User totals are allocated from the remaining balance, never a rounded unit preview.
+// The final portion receives the exact residual; FIFO only calls this with positive quantities.
+const splitUserTotal = ({
+  total,
+  part,
+  whole,
+  scale,
+}: {
+  readonly total: MonetaryAmount
+  readonly part: AccountingQuantity
+  readonly whole: AccountingQuantity
+  readonly scale: number
+}) =>
+  Effect.gen(function* () {
+    const allocated = BigDecimal.equals(part, whole)
+      ? total
+      : yield* prorate({ total, part, whole, scale }).pipe(Effect.orDie)
+    const remaining = MonetaryAmount.fromBigDecimal(
+      BigDecimal.subtract(total.amount, allocated.amount),
+      total.currency
+    )
+    return { allocated, remaining, scale }
+  })
 
 interface EngineState {
   readonly inventories: Map<string, EngineLot[]>
@@ -322,6 +353,13 @@ const selectValuation = ({
   readonly valuationFacts: ReadonlyArray<ValuationFact>
 }): ValuationResolution => {
   const facts = valuationFacts.filter((fact) => fact.eventId === event.id)
+  const userFacts = facts.filter((fact) => fact._tag === "user_valuation")
+  if (userFacts.length > 1) return { _tag: "ambiguous" }
+  const userFact = userFacts[0]
+  if (userFact !== undefined) {
+    return { _tag: "selected", total: userFact.amount, kind: userFact._tag }
+  }
+
   const observed = facts.filter(
     (fact): fact is ObservedConsiderationFact => fact._tag === "observed_consideration"
   )
@@ -387,7 +425,7 @@ const toDerivedLots = (inventories: ReadonlyMap<string, ReadonlyArray<EngineLot>
   [...inventories.values()]
     .flat()
     .filter((lot) => lot.remainingQuantity.value !== 0n)
-    .map(({ id: _id, ...lot }) => lot)
+    .map(({ id: _id, userBasis: _userBasis, ...lot }) => lot)
 
 const appendExplanation = ({
   state,
@@ -467,94 +505,119 @@ const processCustodyMovement = ({
   readonly event: CustodyMovementEvent
   readonly inventoryScope: InventoryScope
   readonly state: EngineState
-}): void => {
-  if (inventoryScope === "whole_taxpayer") {
+}): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    if (inventoryScope === "whole_taxpayer") {
+      appendExplanation({
+        state,
+        eventId: event.id,
+        code: "pooled_custody_movement",
+        valuationKind: null,
+      })
+      return
+    }
+
+    const sourceUnitId = makeCustodyUnitId(event.fromCustodySourceId)
+    const destinationUnitId = makeCustodyUnitId(event.toCustodySourceId)
+    const sourceKey = inventoryKey({
+      assetId: event.assetId,
+      custodyUnitId: sourceUnitId,
+      inventoryScope,
+    })
+    const destinationKey = inventoryKey({
+      assetId: event.assetId,
+      custodyUnitId: destinationUnitId,
+      inventoryScope,
+    })
+
+    if (state.blockedInventoryKeys.has(sourceKey)) {
+      appendBlocker({
+        state,
+        code: "blocked_inventory_suffix",
+        eventId: event.id,
+        assetId: event.assetId,
+        custodyUnitId: sourceUnitId,
+      })
+      state.blockedInventoryKeys.add(destinationKey)
+      return
+    }
+
+    const sourceLots = state.inventories.get(sourceKey) ?? []
+    const movementMatch = allocateFifoQuantity({
+      lots: sourceLots,
+      quantity: event.quantity,
+    })
+    const allocations = yield* Effect.forEach(movementMatch.allocations, (allocation) =>
+      Effect.gen(function* () {
+        const userSplit =
+          allocation.lot.userBasis === null
+            ? null
+            : yield* splitUserTotal({
+                ...allocation.lot.userBasis,
+                whole: allocation.lot.remainingQuantity,
+                part: allocation.matchedQuantity,
+              })
+        return { ...allocation, userSplit }
+      })
+    )
+    const remainingById = new Map(
+      allocations.map((allocation) => [
+        allocation.lot.id,
+        {
+          ...allocation.lot,
+          remainingQuantity: allocation.remainingQuantity,
+          userBasis:
+            allocation.userSplit === null
+              ? null
+              : { total: allocation.userSplit.remaining, scale: allocation.userSplit.scale },
+        },
+      ])
+    )
+    state.inventories.set(
+      sourceKey,
+      sourceLots.map((lot) => remainingById.get(lot.id) ?? lot)
+    )
+    const destinationLots = allocations.map((allocation, index) => ({
+      ...allocation.lot,
+      id: `${allocation.lot.id}:${event.id}:${index}`,
+      custodyUnitId: destinationUnitId,
+      remainingQuantity: allocation.matchedQuantity,
+      userBasis:
+        allocation.userSplit === null
+          ? null
+          : { total: allocation.userSplit.allocated, scale: allocation.userSplit.scale },
+    }))
+    state.inventories.set(
+      destinationKey,
+      sortLots([...(state.inventories.get(destinationKey) ?? []), ...destinationLots])
+    )
+    const matches = movementMatch.allocations.map((allocation) => ({
+      acquisitionEventId: allocation.lot.acquisitionEventId,
+      quantity: allocation.matchedQuantity,
+    }))
+
+    if (movementMatch.shortage !== null) {
+      appendBlocker({
+        state,
+        code: "movement_shortage",
+        eventId: event.id,
+        assetId: event.assetId,
+        custodyUnitId: sourceUnitId,
+        missingQuantity: movementMatch.shortage,
+        matches,
+      })
+      state.blockedInventoryKeys.add(sourceKey)
+      state.blockedInventoryKeys.add(destinationKey)
+    }
+
     appendExplanation({
       state,
       eventId: event.id,
-      code: "pooled_custody_movement",
+      code: "fifo_basis_carried",
       valuationKind: null,
-    })
-    return
-  }
-
-  const sourceUnitId = makeCustodyUnitId(event.fromCustodySourceId)
-  const destinationUnitId = makeCustodyUnitId(event.toCustodySourceId)
-  const sourceKey = inventoryKey({
-    assetId: event.assetId,
-    custodyUnitId: sourceUnitId,
-    inventoryScope,
-  })
-  const destinationKey = inventoryKey({
-    assetId: event.assetId,
-    custodyUnitId: destinationUnitId,
-    inventoryScope,
-  })
-
-  if (state.blockedInventoryKeys.has(sourceKey)) {
-    appendBlocker({
-      state,
-      code: "blocked_inventory_suffix",
-      eventId: event.id,
-      assetId: event.assetId,
-      custodyUnitId: sourceUnitId,
-    })
-    state.blockedInventoryKeys.add(destinationKey)
-    return
-  }
-
-  const sourceLots = state.inventories.get(sourceKey) ?? []
-  const movementMatch = allocateFifoQuantity({
-    lots: sourceLots,
-    quantity: event.quantity,
-  })
-  const remainingById = new Map(
-    movementMatch.allocations.map((allocation) => [allocation.lot.id, allocation.remainingQuantity])
-  )
-  state.inventories.set(
-    sourceKey,
-    sourceLots.map((lot) => ({
-      ...lot,
-      remainingQuantity: remainingById.get(lot.id) ?? lot.remainingQuantity,
-    }))
-  )
-  const destinationLots = movementMatch.allocations.map((allocation, index) => ({
-    ...allocation.lot,
-    id: `${allocation.lot.id}:${event.id}:${index}`,
-    custodyUnitId: destinationUnitId,
-    remainingQuantity: allocation.matchedQuantity,
-  }))
-  state.inventories.set(
-    destinationKey,
-    sortLots([...(state.inventories.get(destinationKey) ?? []), ...destinationLots])
-  )
-  const matches = movementMatch.allocations.map((allocation) => ({
-    acquisitionEventId: allocation.lot.acquisitionEventId,
-    quantity: allocation.matchedQuantity,
-  }))
-
-  if (movementMatch.shortage !== null) {
-    appendBlocker({
-      state,
-      code: "movement_shortage",
-      eventId: event.id,
-      assetId: event.assetId,
-      custodyUnitId: sourceUnitId,
-      missingQuantity: movementMatch.shortage,
       matches,
     })
-    state.blockedInventoryKeys.add(sourceKey)
-    state.blockedInventoryKeys.add(destinationKey)
-  }
-
-  appendExplanation({
-    state,
-    eventId: event.id,
-    code: "fifo_basis_carried",
-    valuationKind: null,
-    matches,
   })
-}
 
 const processAcquisition = ({
   event,
@@ -590,6 +653,10 @@ const processAcquisition = ({
       acquiredAt: event.occurredAt,
       remainingQuantity: event.quantity,
       costBasisPerUnit,
+      userBasis:
+        valuation?.kind === "user_valuation"
+          ? { total: valuation.total, scale: Math.max(18, valuation.total.amount.scale) }
+          : null,
     }
 
     state.inventories.set(
@@ -667,13 +734,6 @@ const processDisposition = ({
     const remainingById = new Map(
       match.allocations.map((allocation) => [allocation.lot.id, allocation.remainingQuantity])
     )
-    state.inventories.set(
-      inventoryKey,
-      lots.map((lot) => ({
-        ...lot,
-        remainingQuantity: remainingById.get(lot.id) ?? lot.remainingQuantity,
-      }))
-    )
     const matches = match.allocations.map((allocation) => ({
       acquisitionEventId: allocation.lot.acquisitionEventId,
       quantity: allocation.matchedQuantity,
@@ -702,15 +762,32 @@ const processDisposition = ({
       state.blockedInventoryKeys.add(inventoryKey)
     }
 
+    const remainingUserBasis = new Map<string, UserBasis>()
+    let userProceeds = valuation?.kind === "user_valuation" ? valuation.total : null
+    let proceedsQuantity = event.quantity
+    const proceedsScale = userProceeds === null ? 18 : Math.max(18, userProceeds.amount.scale)
+
     let currencyMismatchBlocked = false
 
     for (const matchAllocation of match.allocations) {
       const lot = matchAllocation.lot
       const allocationSequence = state.allocations.length
-      const costBasis =
-        lot.costBasisPerUnit === null
+      const userBasisSplit =
+        lot.userBasis === null
           ? null
-          : round(multiplyByQuantity(lot.costBasisPerUnit, matchAllocation.matchedQuantity), 8)
+          : yield* splitUserTotal({
+              ...lot.userBasis,
+              part: matchAllocation.matchedQuantity,
+              whole: lot.remainingQuantity,
+            })
+      if (userBasisSplit !== null && lot.userBasis !== null)
+        remainingUserBasis.set(lot.id, { ...lot.userBasis, total: userBasisSplit.remaining })
+      const costBasis =
+        userBasisSplit !== null
+          ? userBasisSplit.allocated
+          : lot.costBasisPerUnit === null
+            ? null
+            : round(multiplyByQuantity(lot.costBasisPerUnit, matchAllocation.matchedQuantity), 8)
 
       state.allocations.push({
         acquisitionEventId: lot.acquisitionEventId,
@@ -722,19 +799,36 @@ const processDisposition = ({
         quantity: matchAllocation.matchedQuantity,
         costBasis,
       })
-      const proceeds =
-        valuation === null
+      const userProceedsSplit =
+        userProceeds === null
           ? null
-          : Option.getOrNull(
-              yield* Effect.option(
-                prorate({
-                  total: valuation.total,
-                  part: matchAllocation.matchedQuantity,
-                  whole: event.quantity,
-                  scale: 8,
-                })
+          : yield* splitUserTotal({
+              total: userProceeds,
+              part: matchAllocation.matchedQuantity,
+              whole: proceedsQuantity,
+              scale: proceedsScale,
+            })
+      const proceeds =
+        userProceedsSplit !== null
+          ? userProceedsSplit.allocated
+          : valuation === null
+            ? null
+            : Option.getOrNull(
+                yield* Effect.option(
+                  prorate({
+                    total: valuation.total,
+                    part: matchAllocation.matchedQuantity,
+                    whole: event.quantity,
+                    scale: 8,
+                  })
+                )
               )
-            )
+      if (userProceedsSplit !== null) {
+        userProceeds = userProceedsSplit.remaining
+        proceedsQuantity = AccountingQuantity.make(
+          BigDecimal.subtract(proceedsQuantity, matchAllocation.matchedQuantity)
+        )
+      }
 
       if (!producesRealizedResults || costBasis === null || proceeds === null) {
         continue
@@ -786,6 +880,14 @@ const processDisposition = ({
       valuationKind: valuation?.kind ?? null,
       matches,
     })
+    state.inventories.set(
+      inventoryKey,
+      lots.map((lot) => ({
+        ...lot,
+        remainingQuantity: remainingById.get(lot.id) ?? lot.remainingQuantity,
+        userBasis: remainingUserBasis.get(lot.id) ?? lot.userBasis,
+      }))
+    )
   })
 
 /** Calculate a complete deterministic structural result without external services. */
@@ -849,7 +951,7 @@ export const calculate = ({
 
     for (const event of orderedLedger) {
       if (event._tag === "custody_movement") {
-        processCustodyMovement({ event, inventoryScope, state })
+        yield* processCustodyMovement({ event, inventoryScope, state })
         continue
       }
 

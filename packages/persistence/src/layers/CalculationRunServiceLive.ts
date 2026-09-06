@@ -72,10 +72,19 @@ const canonicalEvent = (event: AccountingEvent): ReadonlyArray<string | number |
     : [...common, event.custodySourceId, event.cause]
 }
 
-const canonicalValuationFact = (fact: ValuationFact): ReadonlyArray<string | number | null> =>
-  fact._tag === "observed_consideration"
-    ? [fact._tag, fact.eventId, fact.amount.format(), fact.amount.currency, fact.evidenceReference]
-    : [
+const canonicalValuationFact = (fact: ValuationFact): ReadonlyArray<string | number | null> => {
+  switch (fact._tag) {
+    case "observed_consideration":
+    case "user_valuation":
+      return [
+        fact._tag,
+        fact.eventId,
+        fact.amount.format(),
+        fact.amount.currency,
+        fact.evidenceReference,
+      ]
+    case "market_quote":
+      return [
         fact._tag,
         fact.eventId,
         fact.unitPrice.format(),
@@ -83,6 +92,8 @@ const canonicalValuationFact = (fact: ValuationFact): ReadonlyArray<string | num
         fact.quotedAt.epochMillis,
         fact.source,
       ]
+  }
+}
 
 const canonicalInputBlocker = (
   blocker: FactualLedgerInputBlocker
