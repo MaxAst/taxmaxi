@@ -299,10 +299,25 @@ export class ProvidersResponse extends Schema.Class<ProvidersResponse>("Provider
 }) {}
 
 /**
+ * SubmittedEmail - An email typed into a form, decoded to an `Email`
+ *
+ * Trims surrounding whitespace from the raw string before the `Email` check,
+ * so `Max+Tax@Example.com ` reaches the writer as a clean address. The writer
+ * lowercases it; `Email` itself never accepts whitespace.
+ */
+const SubmittedEmail = Schema.Trim.pipe(
+  Schema.decodeTo(Email),
+  Schema.annotate({
+    description: "A valid email address; surrounding whitespace is removed",
+    examples: [Email.make("test@example.com")],
+  })
+)
+
+/**
  * RegisterRequest - Request body for local user registration
  */
 export class RegisterRequest extends Schema.Class<RegisterRequest>("RegisterRequest")({
-  email: Email,
+  email: SubmittedEmail,
   password: Schema.String.check(Schema.isMinLength(8)).annotate({
     description: "User's password (min 8 characters)",
     examples: ["kNmGP3sW_ygVLdcNVbxU"],
@@ -349,7 +364,7 @@ export class VerifyEmailResponse extends Schema.Class<VerifyEmailResponse>("Veri
 export class LocalLoginCredentials extends Schema.Class<LocalLoginCredentials>(
   "LocalLoginCredentials"
 )({
-  email: Email,
+  email: SubmittedEmail,
   password: Schema.String.annotate({
     description: "User's password",
   }),

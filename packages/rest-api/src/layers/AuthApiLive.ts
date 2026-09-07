@@ -759,7 +759,7 @@ export const AuthApiLive = HttpApiBuilder.group(TaxMaxiApi, "auth", (handlers) =
                 })
               }
               if (isUserAlreadyExistsError(error)) {
-                return new UserExistsError({ email })
+                return new UserExistsError({ email: error.email })
               }
               return internalAuthError("Registration failed")
             })

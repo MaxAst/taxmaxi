@@ -9,6 +9,8 @@
  * - Routes authentication requests to appropriate provider by type
  * - Auto-provisions users for external provider authentication
  * - Links identities to existing users by email (configurable)
+ * - Stores account emails, local provider IDs, and verification requests
+ *   trimmed and lowercased, and looks local logins up the same way
  * - Creates and manages sessions via SessionRepository
  * - Configurable session duration per provider
  *
@@ -27,11 +29,15 @@ import {
   AuthUserId,
   EmailVerificationCode,
   EmailVerificationRequestId,
+  LocalAuthRequest,
   PasswordHasher,
+  sanitizeEmail,
   inferDisplayNameFromEmail,
   isEmailVerificationRequestExpired,
+  isLocalAuthRequest,
   type AuthProvider,
   type AuthProviderRegistry,
+  type AuthRequest,
   type AuthServiceShape,
   type EmailVerificationRequest,
   type LocalAuthConfig,
@@ -439,11 +445,12 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const userId = AuthUserId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie))
 
-      // Create the user
+      // Create the user. The account email is the provider-reported email,
+      // trimmed and lowercased; the provider payload stays as reported.
       yield* userRepo
         .create({
           id: userId,
-          email: authResult.email,
+          email: sanitizeEmail(authResult.email),
           displayName: authResult.displayName,
           role: "member",
           primaryProvider: authResult.provider,
@@ -745,7 +752,7 @@ const make = Effect.gen(function* () {
         .create({
           id: requestId,
           userId,
-          email,
+          email: sanitizeEmail(email),
           code: generateEmailVerificationCode(verificationCodeBytes),
           expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
         })
@@ -765,6 +772,18 @@ const make = Effect.gen(function* () {
         code: request.code,
       })
       .pipe(Effect.mapError((cause) => authProcessingError(operation, cause)))
+
+  /**
+   * Rewrite a local login request so the provider looks the identity up by the
+   * sanitized email. Other request kinds pass through unchanged.
+   */
+  const sanitizeLocalAuthRequest = (request: AuthRequest): AuthRequest =>
+    isLocalAuthRequest(request)
+      ? LocalAuthRequest.make({
+          email: sanitizeEmail(request.email),
+          password: request.password,
+        })
+      : request
 
   const consumeEmailVerificationRequestIfPresent = ({
     requestId,
@@ -802,8 +821,9 @@ const make = Effect.gen(function* () {
         // Get the provider
         const provider = yield* getProvider(providerType)
 
-        // Authenticate with the provider
-        const authResult = yield* provider.authenticate(request)
+        // Authenticate with the provider. A local login is looked up by the
+        // sanitized email, so the typed casing never matters.
+        const authResult = yield* provider.authenticate(sanitizeLocalAuthRequest(request))
 
         if (providerType === "local" && !authResult.emailVerified) {
           return yield* new UnverifiedEmailError({ email: authResult.email })
@@ -821,8 +841,12 @@ const make = Effect.gen(function* () {
     /**
      * Register a new user with local credentials
      */
-    register: (email, password, providedDisplayName) =>
+    register: (submittedEmail, password, providedDisplayName) =>
       Effect.gen(function* () {
+        // The account email, the local provider ID, and the conflict check all
+        // use what was typed, trimmed and lowercased.
+        const email = sanitizeEmail(submittedEmail)
+
         // Validate password strength
         const passwordErrors = validatePassword(password, config.localAuth)
         if (!Chunk.isEmpty(passwordErrors)) {
@@ -841,9 +865,10 @@ const make = Effect.gen(function* () {
         // Hash the password
         const hashedPassword = yield* passwordHasher.hash(Redacted.make(password))
 
-        // Create user
+        // Create user. The fallback display name keeps its existing default:
+        // it comes from the email as typed, so the casing stays as submitted.
         const userId = AuthUserId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie))
-        const displayName = providedDisplayName ?? inferDisplayNameFromEmail(email)
+        const displayName = providedDisplayName ?? inferDisplayNameFromEmail(submittedEmail)
 
         const user = yield* userRepo
           .create({
