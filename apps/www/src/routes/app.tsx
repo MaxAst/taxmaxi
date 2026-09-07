@@ -11,6 +11,9 @@ import { AppHeader } from "#/components/app-header"
 import { AccountMenu } from "#/components/account-menu"
 import { AppWorkspace } from "#/components/app-workspace"
 import { Dashboard } from "#/components/dashboard"
+// PROTOTYPE (#108 T04): dev-only `?variant=` / `?state=` preview params.
+// Remove with first-sync-body-PROTOTYPE.tsx.
+import { firstSyncPrototypeSearchSchema } from "#/components/first-sync-body-PROTOTYPE"
 import { useAppLogout } from "#/hooks/use-app-logout"
 import type { Account, SourceSyncSeed } from "#/lib/dashboard-types"
 import { m } from "#/paraglide/messages"
@@ -19,6 +22,8 @@ import { clearAuthSessionCookie, getAuthStatus } from "#/server-functions/auth"
 import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 
 export const Route = createFileRoute("/app")({
+  // PROTOTYPE (#108 T04): both params are optional and ignored outside dev builds.
+  validateSearch: firstSyncPrototypeSearchSchema,
   beforeLoad: async () => {
     const { isAuthenticated } = await getAuthStatus()
 
@@ -58,6 +63,8 @@ function RouteComponent() {
 
   const navigate = Route.useNavigate()
   const onLogout = useAppLogout()
+  // PROTOTYPE (#108 T04): forwarded to the dashboard; no effect outside dev builds.
+  const firstSyncPrototype = Route.useSearch()
 
   const {
     data: { sources },
@@ -143,6 +150,7 @@ function RouteComponent() {
       <Dashboard
         accounts={sourceAccounts}
         createWalletSource={createWalletSource}
+        firstSyncPrototype={firstSyncPrototype}
         getSourceSyncJob={getSourceSyncJob}
         onSourceSyncCompleted={onSourceSyncCompleted}
         onUnauthorized={onUnauthorized}

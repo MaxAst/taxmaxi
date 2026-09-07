@@ -12,6 +12,15 @@ import {
 
 import { appSurfaceClassName } from "#/components/app-workspace"
 import { CalculationStatus } from "#/components/calculation-status"
+// PROTOTYPE (#108 T04): dev-only preview of the never-synced body. Remove with
+// first-sync-body-PROTOTYPE.tsx.
+import {
+  FIRST_SYNC_PROTOTYPE_ENABLED,
+  FIRST_SYNC_PROTOTYPE_FALLBACK_SOURCE,
+  FirstSyncBodyPrototype,
+  getFirstSyncPrototypeMock,
+  type FirstSyncPrototypeSearch,
+} from "#/components/first-sync-body-PROTOTYPE"
 import { AssetsTable } from "#/components/assets-table"
 import { SourceCards } from "#/components/source-cards"
 import { Button } from "#/components/ui/button"
@@ -56,6 +65,7 @@ type DashboardSummary = {
 export function Dashboard({
   accounts = mockAccounts,
   createWalletSource,
+  firstSyncPrototype,
   getSourceSyncJob,
   onSourceSyncCompleted,
   onUnauthorized,
@@ -66,6 +76,8 @@ export function Dashboard({
 }: {
   accounts?: ReadonlyArray<Account>
   createWalletSource?: (walletAddress: string) => Promise<Account>
+  /** PROTOTYPE (#108 T04): `?variant=` and `?state=` from the `/app` search. Dev only. */
+  firstSyncPrototype?: FirstSyncPrototypeSearch
   getSourceSyncJob?: (input: SourceSyncJobInput) => Promise<SourceSyncJob>
   onSourceSyncCompleted?: (sourceId: AccountId) => void | Promise<void>
   onUnauthorized?: () => void | Promise<void>
@@ -311,9 +323,24 @@ export function Dashboard({
     [createWalletSource, onSourceSync]
   )
 
+  // PROTOTYPE (#108 T04): with `?variant=` set in a dev build, the island shows
+  // mock items and the content sheet shows the variant instead of the tabs.
+  // Real data loading above is untouched. Remove with first-sync-body-PROTOTYPE.tsx.
+  const prototypeVariant = FIRST_SYNC_PROTOTYPE_ENABLED ? firstSyncPrototype?.variant : undefined
+  const prototypeState = firstSyncPrototype?.state ?? "ready"
+  const prototypeTarget = accounts[0] ?? FIRST_SYNC_PROTOTYPE_FALLBACK_SOURCE
+  const prototypeMock =
+    prototypeVariant === undefined
+      ? undefined
+      : getFirstSyncPrototypeMock(prototypeState, prototypeTarget)
+
   return (
     <div className="text-marketing-foreground flex min-h-screen flex-col pt-28 pb-8 sm:pt-32">
-      <SourceSyncIsland items={activeSyncs} onDismiss={onDismissSync} onRetry={onRetrySync} />
+      <SourceSyncIsland
+        items={prototypeMock?.islandItems ?? activeSyncs}
+        onDismiss={prototypeMock ? undefined : onDismissSync}
+        onRetry={prototypeMock ? undefined : onRetrySync}
+      />
       <SourceCards
         contentClassName={appSurfaceClassName}
         onAddWallet={createWalletSource === undefined ? undefined : handleAddWallet}
@@ -321,72 +348,83 @@ export function Dashboard({
         onSelectedSourceIdChange={(sourceId) => onAccountScopeChange(sourceId ?? ALL_ACCOUNTS)}
         onSourceSync={onSourceSync}
         selectedSourceId={accountScope === ALL_ACCOUNTS ? undefined : accountScope}
-        syncingSourceIds={syncingSourceIds}
+        syncingSourceIds={prototypeMock?.syncingSourceIds ?? syncingSourceIds}
         sources={accounts}
       >
-        <div aria-busy={isSwitchingPortfolio} className="flex min-w-0 flex-col gap-8 py-6 sm:py-8">
-          <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
-            <div className="min-w-0 space-y-3">
-              <PortfolioOverview key={selectedSourceId ?? ALL_ACCOUNTS} summary={summary} />
-              <CalculationStatus
-                portfolio={portfolioQuery.data}
-                requestFailed={portfolioQuery.isError}
-                refreshing={portfolioQuery.isFetching}
-                disabled={authenticationLost}
-                onRefresh={() => void portfolioQuery.refetch()}
-                postSyncNotice={
-                  syncCompletedAt === null ? null : fastRefresh ? "checking" : "unconfirmed"
-                }
+        {prototypeVariant !== undefined ? (
+          <FirstSyncBodyPrototype
+            state={prototypeState}
+            targetSource={prototypeTarget}
+            variant={prototypeVariant}
+          />
+        ) : (
+          <div
+            aria-busy={isSwitchingPortfolio}
+            className="flex min-w-0 flex-col gap-8 py-6 sm:py-8"
+          >
+            <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+              <div className="min-w-0 space-y-3">
+                <PortfolioOverview key={selectedSourceId ?? ALL_ACCOUNTS} summary={summary} />
+                <CalculationStatus
+                  portfolio={portfolioQuery.data}
+                  requestFailed={portfolioQuery.isError}
+                  refreshing={portfolioQuery.isFetching}
+                  disabled={authenticationLost}
+                  onRefresh={() => void portfolioQuery.refetch()}
+                  postSyncNotice={
+                    syncCompletedAt === null ? null : fastRefresh ? "checking" : "unconfirmed"
+                  }
+                />
+              </div>
+              <SelectedSourceMenu
+                account={replayAccount}
+                isSyncing={replayAccount !== undefined && syncingSourceIds.has(replayAccount.id)}
+                onReplay={onSourceReplay}
               />
             </div>
-            <SelectedSourceMenu
-              account={replayAccount}
-              isSyncing={replayAccount !== undefined && syncingSourceIds.has(replayAccount.id)}
-              onReplay={onSourceReplay}
-            />
-          </div>
 
-          <Tabs defaultValue="assets" className="gap-y-8">
-            <TabsList>
-              <TabsTrigger value="assets">{m["app.dashboard.tabs.assets"]()}</TabsTrigger>
-              <TabsTrigger value="transactions">
-                {m["app.dashboard.tabs.transactions"]()}
-              </TabsTrigger>
-              <TabsTrigger value="taxes">{m["app.dashboard.tabs.taxes"]()}</TabsTrigger>
-            </TabsList>
-            <TabsContent value="assets">
-              {portfolioQuery.data?.activeRun === null ? (
-                <p className="rounded-lg border border-border p-6 text-sm text-muted-foreground">
-                  {m["app.calculation.positionsUnavailable"]()}
-                </p>
-              ) : (
-                <AssetsTable
-                  currency={portfolioQuery.data?.currency ?? "EUR"}
-                  error={portfolioQuery.isError && portfolioQuery.data === undefined}
-                  holdings={activeHoldings}
-                  loading={portfolioQuery.isPending && portfolioQuery.data === undefined}
+            <Tabs defaultValue="assets" className="gap-y-8">
+              <TabsList>
+                <TabsTrigger value="assets">{m["app.dashboard.tabs.assets"]()}</TabsTrigger>
+                <TabsTrigger value="transactions">
+                  {m["app.dashboard.tabs.transactions"]()}
+                </TabsTrigger>
+                <TabsTrigger value="taxes">{m["app.dashboard.tabs.taxes"]()}</TabsTrigger>
+              </TabsList>
+              <TabsContent value="assets">
+                {portfolioQuery.data?.activeRun === null ? (
+                  <p className="rounded-lg border border-border p-6 text-sm text-muted-foreground">
+                    {m["app.calculation.positionsUnavailable"]()}
+                  </p>
+                ) : (
+                  <AssetsTable
+                    currency={portfolioQuery.data?.currency ?? "EUR"}
+                    error={portfolioQuery.isError && portfolioQuery.data === undefined}
+                    holdings={activeHoldings}
+                    loading={portfolioQuery.isPending && portfolioQuery.data === undefined}
+                  />
+                )}
+              </TabsContent>
+              <TabsContent value="transactions">
+                <TransactionsTable
+                  taxmaxi={taxmaxi}
+                  disabled={authenticationLost}
+                  onUnauthorized={handleUnauthorized}
+                  error={transactionQuery.isError}
+                  hasNextPage={transactionQuery.data?.page.hasMore ?? false}
+                  loading={transactionQuery.isFetching}
+                  onNextPage={goToNextTransactionPage}
+                  onPreviousPage={goToPreviousTransactionPage}
+                  onRetry={() => void transactionQuery.refetch()}
+                  pageIndex={transactionCursors.length - 1}
+                  totalCount={transactionQuery.data?.totalCount ?? 0}
+                  transactions={transactionQuery.data?.transactions ?? []}
                 />
-              )}
-            </TabsContent>
-            <TabsContent value="transactions">
-              <TransactionsTable
-                taxmaxi={taxmaxi}
-                disabled={authenticationLost}
-                onUnauthorized={handleUnauthorized}
-                error={transactionQuery.isError}
-                hasNextPage={transactionQuery.data?.page.hasMore ?? false}
-                loading={transactionQuery.isFetching}
-                onNextPage={goToNextTransactionPage}
-                onPreviousPage={goToPreviousTransactionPage}
-                onRetry={() => void transactionQuery.refetch()}
-                pageIndex={transactionCursors.length - 1}
-                totalCount={transactionQuery.data?.totalCount ?? 0}
-                transactions={transactionQuery.data?.transactions ?? []}
-              />
-            </TabsContent>
-            <TabsContent value="taxes"></TabsContent>
-          </Tabs>
-        </div>
+              </TabsContent>
+              <TabsContent value="taxes"></TabsContent>
+            </Tabs>
+          </div>
+        )}
       </SourceCards>
     </div>
   )
