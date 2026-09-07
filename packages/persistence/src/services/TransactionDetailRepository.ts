@@ -11,6 +11,7 @@ import type { MovementCalculationScope } from "./PrincipalTransactionOverrideRep
 
 /** Safe retained provider evidence; payloads and account credentials are never returned. */
 export interface TransactionDetailEvidence {
+  readonly sourceId: string
   readonly id: string
   readonly provider: string
   readonly recordType: string
@@ -23,6 +24,7 @@ export interface TransactionDetailEvidence {
 export interface TransactionDetailEvidenceLink {
   readonly origin: "transaction" | "leg" | "provider_transfer" | "canonical_transfer"
   readonly originId: string
+  readonly sourceId: string
   readonly sourceRawRecordId: string | null
   readonly evidence: TransactionDetailEvidence | null
   readonly status: "available" | "unavailable"
