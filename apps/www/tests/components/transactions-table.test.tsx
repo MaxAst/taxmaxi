@@ -256,7 +256,7 @@ describe("transaction treatment disclosure", () => {
   it("loads only opened rows and renders each result's codes and exact decimal strings", async () => {
     const response = detail()
     const allocation = {
-      sequence: 1,
+      sequence: 0,
       acquisitionEventId: "acquisition",
       dispositionEventId: "disposal",
       assetId: "btc",
@@ -271,13 +271,13 @@ describe("transaction treatment disclosure", () => {
     }
     const allocations = [
       allocation,
-      { ...allocation, sequence: 2, treatmentCodes: ["de.tax_free_holding_period"] },
-      { ...allocation, sequence: 3, treatmentCodes: ["future.example"] },
-      { ...allocation, sequence: 4, treatmentCodes: [] },
+      { ...allocation, sequence: 1, treatmentCodes: ["de.tax_free_holding_period"] },
+      { ...allocation, sequence: 2, treatmentCodes: ["future.example"] },
+      { ...allocation, sequence: 3, treatmentCodes: [] },
     ]
     const incomeResults = [
       {
-        sequence: 1,
+        sequence: 0,
         sourceId: "source",
         eventId: "income",
         assetId: "eth",
@@ -299,7 +299,7 @@ describe("transaction treatment disclosure", () => {
       />
     )
     expect(get).not.toHaveBeenCalled()
-    const firstToggle = screen.getAllByRole("button", { name: "Treatment · 2025" }).at(0)
+    const firstToggle = screen.getAllByRole("button", { name: /Treatment · 2025/ }).at(0)
     if (firstToggle === undefined) throw new Error("Missing disclosure toggle")
     fireEvent.click(firstToggle)
     await screen.findByText("Taxable private disposal")
@@ -353,7 +353,7 @@ describe("transaction treatment disclosure", () => {
         transactions={[{ ...transaction, timestamp: "2025-12-31T23:30:00.000Z" }]}
       />
     )
-    fireEvent.click(screen.getByRole("button", { name: "Treatment · 2026" }))
+    fireEvent.click(screen.getByRole("button", { name: /Treatment · 2026/ }))
     expect(screen.getByText("Loading treatment results…")).toBeTruthy()
     expect(get).toHaveBeenLastCalledWith({
       transactionId: transaction.transactionId,
@@ -381,7 +381,7 @@ describe("transaction treatment disclosure", () => {
         transactions={[{ ...transaction, transactionId: "other" }]}
       />
     )
-    expect(screen.queryByRole("region", { name: "Transaction treatment results" })).toBeNull()
+    expect(screen.queryByRole("region", { name: /Treatment results/ })).toBeNull()
     expect(get).toHaveBeenCalledTimes(2)
   })
 
@@ -392,7 +392,7 @@ describe("transaction treatment disclosure", () => {
       .mockResolvedValueOnce({ ...detail(), calculation: { ...detail().calculation, run: null } })
       .mockResolvedValue(detail())
     render(<TransactionsTable {...defaultProps} />)
-    const toggle = screen.getByRole("button", { name: "Treatment · 2025" })
+    const toggle = screen.getByRole("button", { name: /Treatment · 2025/ })
     fireEvent.click(toggle)
     await screen.findByText("Could not load treatment results. Try again.")
     expect(screen.getByText("Sold Bitcoin")).toBeTruthy()
@@ -419,12 +419,73 @@ describe("treatment lifecycle and monetary status", () => {
         calculation: { ...response.calculation, state: "complete", monetaryStatus },
       })
       render(<TransactionsTable {...defaultProps} />)
-      fireEvent.click(screen.getByRole("button", { name: "Treatment · 2025" }))
+      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
       await screen.findByText(`Monetary results: ${monetaryStatus.replace("_", " ")}.`)
       expect(
         screen.getByText("No disposal allocations or income results were returned.")
       ).toBeTruthy()
       expect(screen.queryByText("Tax-free holding period")).toBeNull()
+    }
+  )
+
+  it("gives same-year rows unique control and result region names", async () => {
+    vi.spyOn(taxmaxi.transactions, "get").mockImplementation(async ({ transactionId }) => ({
+      ...detail(),
+      transactionId,
+    }))
+    render(
+      <TransactionsTable
+        {...defaultProps}
+        transactions={[transaction, { ...transaction, transactionId: "other" }]}
+        totalCount={2}
+      />
+    )
+    const first = screen.getByRole("button", {
+      name: `Treatment · 2025 · Sold Bitcoin · ${transaction.transactionId}`,
+    })
+    const second = screen.getByRole("button", { name: "Treatment · 2025 · Sold Bitcoin · other" })
+    fireEvent.click(first)
+    fireEvent.click(second)
+    expect(
+      screen.getByRole("region", {
+        name: `Treatment results · Sold Bitcoin · ${transaction.transactionId}`,
+      })
+    ).toBeTruthy()
+    expect(
+      screen.getByRole("region", { name: "Treatment results · Sold Bitcoin · other" })
+    ).toBeTruthy()
+  })
+
+  it.each(["success", "failure"] as const)(
+    "keeps focus in the disclosure through retry pending and %s",
+    async (outcome) => {
+      let finish: ((value: TransactionDetail) => void) | undefined
+      let fail: ((error: Error) => void) | undefined
+      vi.spyOn(taxmaxi.transactions, "get")
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve, reject) => {
+              finish = resolve
+              fail = reject
+            })
+        )
+      render(<TransactionsTable {...defaultProps} />)
+      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
+      const retry = await screen.findByRole("button", { name: "Retry results" })
+      retry.focus()
+      fireEvent.click(retry)
+      const region = screen.getByRole("region", { name: /Treatment results/ })
+      expect(document.activeElement).toBe(region)
+      await screen.findByText("Loading treatment results…")
+      expect(document.activeElement).toBe(region)
+      await act(async () => {
+        if (outcome === "success") finish?.(detail())
+        else fail?.(new Error("offline again"))
+      })
+      if (outcome === "success") await screen.findByText("Returned run: run-a · 2025 · DE · EUR")
+      else await screen.findByRole("button", { name: "Retry results" })
+      expect(document.activeElement).toBe(region)
     }
   )
 
@@ -440,14 +501,14 @@ describe("treatment lifecycle and monetary status", () => {
       )
       .mockResolvedValue(detail())
     render(<TransactionsTable {...defaultProps} />)
-    const toggle = screen.getByRole("button", { name: "Treatment · 2025" })
+    const toggle = screen.getByRole("button", { name: /Treatment · 2025/ })
     fireEvent.click(toggle)
     expect(screen.getByText("Loading treatment results…")).toBeTruthy()
     fireEvent.click(toggle)
     await act(async () => {
       finish?.(detail())
     })
-    expect(screen.queryByRole("region", { name: "Transaction treatment results" })).toBeNull()
+    expect(screen.queryByRole("region", { name: /Treatment results/ })).toBeNull()
     fireEvent.click(toggle)
     await screen.findByText("Returned run: run-a · 2025 · DE · EUR")
     expect(get).toHaveBeenCalledTimes(2)

@@ -1,6 +1,6 @@
 {
   "app.treatment.toggle": "Treatment · {year}",
-  "app.treatment.heading": "Transaction treatment results",
+  "app.treatment.heading": "Treatment results · {description} · {transactionId}",
   "app.treatment.requestedYear": "Requested tax year: {year}",
   "app.treatment.loading": "Loading treatment results…",
   "app.treatment.error": "Could not load treatment results. Try again.",
@@ -995,5 +995,6 @@
   "app.treatment.moneyAvailable": "Monetary results: available.",
   "app.treatment.moneyPartial": "Monetary results: partial.",
   "app.treatment.moneyUnavailable": "Monetary results: unavailable.",
-  "app.treatment.moneyNotApplicable": "Monetary results: not applicable."
+  "app.treatment.moneyNotApplicable": "Monetary results: not applicable.",
+  "app.treatment.toggleLabel": "Treatment · {year} · {description} · {transactionId}"
 }

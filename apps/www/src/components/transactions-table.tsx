@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, CircleAlert, Landmark, WalletCards } from "lucide-react"
-import { useEffect, useId, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import {
   isTaxMaxiUnauthorizedError,
@@ -320,6 +320,11 @@ function TransactionTreatmentDisclosure({
       <Button
         aria-controls={contentId}
         aria-expanded={open}
+        aria-label={m["app.treatment.toggleLabel"]({
+          year: taxYear,
+          description: transaction.description ?? typeLabel(transaction.transactionType),
+          transactionId: transaction.transactionId,
+        })}
         className="min-h-11"
         disabled={disabled}
         onClick={() => setOpen((value) => !value)}
@@ -333,6 +338,7 @@ function TransactionTreatmentDisclosure({
           <TransactionTreatmentResults
             key={`${transaction.transactionId}:${taxYear}`}
             transactionId={transaction.transactionId}
+            description={transaction.description ?? typeLabel(transaction.transactionType)}
             taxYear={taxYear}
             taxmaxi={taxmaxi}
             onUnauthorized={onUnauthorized}
@@ -358,11 +364,13 @@ const monetaryStatusLabel = (status: TransactionDetail["calculation"]["monetaryS
 
 function TransactionTreatmentResults({
   transactionId,
+  description,
   taxYear,
   taxmaxi,
   onUnauthorized,
 }: {
   transactionId: string
+  description: string
   taxYear: number
   taxmaxi: TaxMaxi
   onUnauthorized: () => void | Promise<void>
@@ -371,7 +379,8 @@ function TransactionTreatmentResults({
   useEffect(() => {
     if (isTaxMaxiUnauthorizedError(detail.error)) void onUnauthorized()
   }, [detail.error, onUnauthorized])
-  const calculation = detail.data?.calculation
+  const regionRef = useRef<HTMLElement>(null)
+  const calculation = detail.isError ? undefined : detail.data?.calculation
   const run = calculation?.run
   const currency = run?.reportingCurrency
   const money = (value: string | null) =>
@@ -383,7 +392,9 @@ function TransactionTreatmentResults({
 
   return (
     <section
-      aria-label={m["app.treatment.heading"]()}
+      aria-label={m["app.treatment.heading"]({ description, transactionId })}
+      ref={regionRef}
+      tabIndex={-1}
       className="mt-3 space-y-3 rounded-lg bg-muted/30 p-3"
     >
       <p className="font-medium">{m["app.treatment.requestedYear"]({ year: taxYear })}</p>
@@ -394,7 +405,10 @@ function TransactionTreatmentResults({
           <Button
             className="min-h-11"
             disabled={detail.isFetching}
-            onClick={() => void detail.refetch()}
+            onClick={() => {
+              regionRef.current?.focus()
+              void detail.refetch()
+            }}
             size="sm"
             variant="outline"
           >
@@ -423,14 +437,14 @@ function TransactionTreatmentResults({
           {calculation.allocations.length === 0 && calculation.income.length === 0 ? (
             <p>{m["app.treatment.noResults"]()}</p>
           ) : null}
-          {calculation.allocations.map((result) => (
+          {calculation.allocations.map((result, index) => (
             <section
-              aria-label={m["app.treatment.allocation"]({ sequence: result.sequence })}
+              aria-label={m["app.treatment.allocation"]({ sequence: index + 1 })}
               className="space-y-2 border-t pt-3"
               key={result.sequence}
             >
               <h3 className="font-medium">
-                {m["app.treatment.allocation"]({ sequence: result.sequence })}
+                {m["app.treatment.allocation"]({ sequence: index + 1 })}
               </h3>
               <p className="break-all">{m["app.treatment.asset"]({ assetId: result.assetId })}</p>
               <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
@@ -446,15 +460,13 @@ function TransactionTreatmentResults({
               <TreatmentCodes codes={result.treatmentCodes} />
             </section>
           ))}
-          {calculation.income.map((result) => (
+          {calculation.income.map((result, index) => (
             <section
-              aria-label={m["app.treatment.income"]({ sequence: result.sequence })}
+              aria-label={m["app.treatment.income"]({ sequence: index + 1 })}
               className="space-y-2 border-t pt-3"
               key={result.sequence}
             >
-              <h3 className="font-medium">
-                {m["app.treatment.income"]({ sequence: result.sequence })}
-              </h3>
+              <h3 className="font-medium">{m["app.treatment.income"]({ sequence: index + 1 })}</h3>
               <p className="break-all">{m["app.treatment.asset"]({ assetId: result.assetId })}</p>
               <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
                 <dt>{m["app.treatment.quantity"]()}</dt>

@@ -1,6 +1,6 @@
 {
   "app.treatment.toggle": "Behandlung · {year}",
-  "app.treatment.heading": "Behandlungsergebnisse der Transaktion",
+  "app.treatment.heading": "Behandlungsergebnisse · {description} · {transactionId}",
   "app.treatment.requestedYear": "Angefragtes Steuerjahr: {year}",
   "app.treatment.loading": "Behandlungsergebnisse werden geladen…",
   "app.treatment.error": "Die Behandlungsergebnisse konnten nicht geladen werden. Versuche es erneut.",
@@ -995,5 +995,6 @@
   "app.treatment.moneyAvailable": "Geldwerte Ergebnisse: verfügbar.",
   "app.treatment.moneyPartial": "Geldwerte Ergebnisse: teilweise verfügbar.",
   "app.treatment.moneyUnavailable": "Geldwerte Ergebnisse: nicht verfügbar.",
-  "app.treatment.moneyNotApplicable": "Geldwerte Ergebnisse: nicht anwendbar."
+  "app.treatment.moneyNotApplicable": "Geldwerte Ergebnisse: nicht anwendbar.",
+  "app.treatment.toggleLabel": "Behandlung · {year} · {description} · {transactionId}"
 }

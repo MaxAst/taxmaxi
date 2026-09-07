@@ -160,8 +160,19 @@ export function Dashboard({
     const isFirstResponse = observedRunIds.current.size === 0
     observedRunIds.current.add(runId)
     if (isFirstResponse) return
-    void queryClient.invalidateQueries({ queryKey: queryKeys.sources() })
-    void queryClient.invalidateQueries({ queryKey: queryKeys.transactions() })
+    const refreshDependentReads = async () => {
+      // Invalidation alone reuses initial pending reads. Cancel their delivery
+      // first so a response started before this run cannot replace its results.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: queryKeys.sources() }),
+        queryClient.cancelQueries({ queryKey: queryKeys.transactions() }),
+      ])
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.sources() }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.transactions() }),
+      ])
+    }
+    void refreshDependentReads()
   }, [activeRunId, authenticationLost, hasPortfolio, queryClient])
 
   useEffect(() => {
