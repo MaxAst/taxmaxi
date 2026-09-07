@@ -308,6 +308,7 @@ export function Dashboard({
                       : m["app.calculation.unconfirmed"]()}
                   </p>
                   <Button
+                    className="min-h-11"
                     disabled={portfolioQuery.isFetching || authenticationLost}
                     onClick={() => void portfolioQuery.refetch()}
                     size="sm"
