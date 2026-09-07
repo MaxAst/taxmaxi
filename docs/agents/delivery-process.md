@@ -334,7 +334,11 @@ The mandatory final checklist task of every spec. Steps:
    issue. Check the active runs themselves first: an active run older than
    the last fact replay is stale evidence, and its blockers may point at
    rows that no longer exist. Report counts from fresh runs only, and file
-   the staleness as its own gap.
+   the staleness as its own gap. Record live schema compatibility separately
+   from input freshness. Label an older-schema census as evidence from the
+   live deployment and name any current-code checks that could not run. If
+   a disposable copy is used, report its source and any migrations or
+   recomputes separately; do not present it as unchanged live evidence.
 3. Delete the spec's `implement-NNN` skill (and symlink) and its
    orchestrator prompt.
 4. Update the reusable templates and skills with what the epic taught.
