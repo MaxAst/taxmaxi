@@ -570,6 +570,44 @@ describe("Dashboard calculation refresh", () => {
     expect(portfolioCalls).toBe(calls)
   })
 
+  it.each(["unmount", "authentication loss"] as const)(
+    "stops a suspended dependent refresh after %s",
+    async (stopReason) => {
+      const sourceRead = vi.fn(async () => "source data")
+      const source = new QueryObserver(queryClient, {
+        queryKey: queryKeys.sourceList(),
+        queryFn: sourceRead,
+      })
+      const stopSource = source.subscribe(() => {})
+      let release: (() => void) | undefined
+      const cancellationBarrier = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const cancel = queryClient.cancelQueries.bind(queryClient)
+      vi.spyOn(queryClient, "cancelQueries").mockImplementation(async (filters, options) => {
+        await cancel(filters, options)
+        if (filters?.queryKey?.[1] === "sources") await cancellationBarrier
+      })
+      const view = mount()
+      await tick()
+      currentPortfolio = portfolio(RUN_B, "2.50")
+      await tick(30_000)
+      expect(sourceRead).toHaveBeenCalledTimes(1)
+      if (stopReason === "unmount") view.unmount()
+      else
+        await act(async () => {
+          await syncState.onUnauthorized?.()
+        })
+      await act(async () => {
+        release?.()
+      })
+      await tick()
+      expect(sourceRead).toHaveBeenCalledTimes(1)
+      expect(transactionCalls).toBe(1)
+      stopSource()
+    }
+  )
+
   it("bounds request retries and returns to the slow cadence on failure", async () => {
     mount()
     await tick()

@@ -84,8 +84,17 @@ export function Dashboard({
   const [syncCompletedAt, setSyncCompletedAt] = useState<number | null>(null)
   const [fastRefresh, setFastRefresh] = useState(false)
   const observedRunIds = useRef(new Set<string | null>())
+  const dependentReadsAllowed = useRef(false)
+
+  useEffect(() => {
+    dependentReadsAllowed.current = true
+    return () => {
+      dependentReadsAllowed.current = false
+    }
+  }, [])
 
   const handleUnauthorized = useCallback(async () => {
+    dependentReadsAllowed.current = false
     setAuthenticationLost(true)
     await queryClient.cancelQueries({ queryKey: queryKeys.all })
     await onUnauthorized?.()
@@ -167,6 +176,7 @@ export function Dashboard({
         queryClient.cancelQueries({ queryKey: queryKeys.sources() }),
         queryClient.cancelQueries({ queryKey: queryKeys.transactions() }),
       ])
+      if (!dependentReadsAllowed.current) return
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.sources() }),
         queryClient.invalidateQueries({ queryKey: queryKeys.transactions() }),
