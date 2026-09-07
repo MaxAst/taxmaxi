@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   TaxMaxiError,
   isTaxMaxiUnauthorizedError,
@@ -7,7 +7,7 @@ import {
   type TransactionDetail,
 } from "taxmaxi"
 import { X } from "lucide-react"
-import { queries } from "#/integrations/taxmaxi/queries"
+import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "#/components/ui/dialog"
 import { Drawer, DrawerContent, DrawerTitle, DrawerDescription } from "#/components/ui/drawer"
 import { Button } from "#/components/ui/button"
@@ -148,6 +148,24 @@ function InspectorRequest({
       taxYear: selection.taxYear,
     })
   )
+  const queryClient = useQueryClient()
+  const observedRunId = useRef<string | null | undefined>(undefined)
+  const runId = detail.data?.calculation.run?.id ?? null
+  useEffect(() => {
+    if (!detail.isSuccess) return
+    const previousRunId = observedRunId.current
+    observedRunId.current = runId
+    if (previousRunId === undefined || previousRunId === runId) return
+    let active = true
+    const refreshList = async () => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.transactionLists() })
+      if (active) await queryClient.invalidateQueries({ queryKey: queryKeys.transactionLists() })
+    }
+    void refreshList()
+    return () => {
+      active = false
+    }
+  }, [detail.isSuccess, queryClient, runId])
   const regionRef = useRef<HTMLElement>(null)
   useEffect(() => {
     if (isTaxMaxiUnauthorizedError(detail.error)) void onUnauthorized()

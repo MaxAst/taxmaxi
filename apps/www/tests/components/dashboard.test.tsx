@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { Dashboard } from "#/components/dashboard"
 import type { SourceSyncIslandItem } from "#/components/source-sync-island"
-import { queryKeys, queries } from "#/integrations/taxmaxi/queries"
+import { queryKeys, queries, refreshTransactionQueries } from "#/integrations/taxmaxi/queries"
 import type { Account, SourceSyncSeed } from "#/lib/dashboard-types"
 
 beforeEach(() => {
@@ -431,6 +431,146 @@ describe("Dashboard calculation refresh", () => {
         />
       </QueryClientProvider>
     )
+
+  it("refreshes an older selected year after sync while preserving source and canonical selection", async () => {
+    const row = {
+      ...transaction("00000000-0000-4000-8000-000000000101", "Older-year transaction"),
+      timestamp: "2024-06-01T12:00:00.000Z",
+    }
+    const runA = "00000000-0000-4000-8000-000000000701"
+    const runB = "00000000-0000-4000-8000-000000000702"
+    let completed = false
+    let disappeared = false
+    const requests: URL[] = []
+    const detail = (): TransactionDetail => ({
+      transactionId: row.transactionId,
+      timestamp: row.timestamp,
+      source: row.source,
+      transactionType: row.transactionType,
+      description: row.description,
+      externalId: row.externalId,
+      sourceRawRecordId: null,
+      providerTransactionType: null,
+      classificationHistoryStatus: "unavailable",
+      sourceEvidence: [],
+      movements: [],
+      reconciliations: [],
+      movementOverrides: [],
+      assetOverrides: [],
+      calculation: {
+        run: {
+          id: completed ? runB : runA,
+          taxYear: 2024,
+          jurisdiction: "DE",
+          reportingCurrency: "EUR",
+          status: completed ? "complete" : "pending",
+          engineVersion: "fixture",
+          ruleSetVersion: "fixture",
+          inputLedgerRevision: completed ? "2" : "1",
+          valuationRevision: completed ? "2" : "1",
+          failureCode: null,
+        },
+        state: completed ? "complete" : "partial",
+        monetaryStatus: completed ? "available" : "partial",
+        derivedLots: [],
+        income: [],
+        blockers: [],
+        processedEventIds: [],
+        correctionInputs: [],
+        allocations: [
+          {
+            sequence: 0,
+            acquisitionEventId: "00000000-0000-4000-8000-000000000703",
+            dispositionEventId: "00000000-0000-4000-8000-000000000704",
+            assetId: "00000000-0000-4000-8000-000000000705",
+            custodyUnitId: row.source.sourceId,
+            acquiredAt: "2024-01-01T00:00:00.000Z",
+            disposedAt: row.timestamp,
+            quantity: "2",
+            costBasis: completed ? "30" : "20",
+            proceeds: "30",
+            gainLoss: completed ? "0" : "10",
+            treatmentCodes: [],
+          },
+        ],
+      },
+    })
+    testTaxMaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://dashboard.example.test",
+      fetch: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : String(input))
+        requests.push(url)
+        if (url.pathname.endsWith("/portfolio/assets")) return Response.json(currentPortfolio)
+        if (url.pathname.endsWith("/transactions"))
+          return Response.json({
+            transactions: disappeared ? [] : [{ ...row, realizedGainLoss: completed ? "0" : "10" }],
+            totalCount: disappeared ? 0 : 1,
+            page: { hasMore: false, nextCursor: null },
+          })
+        if (url.pathname.endsWith(row.transactionId))
+          return disappeared
+            ? Response.json({ _tag: "TransactionNotFoundError" }, { status: 404 })
+            : Response.json(detail())
+        throw new Error(`Unexpected fixture URL: ${url}`)
+      },
+    })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Dashboard
+          accounts={[]}
+          onSourceSyncCompleted={() => refreshTransactionQueries(queryClient)}
+        />
+      </QueryClientProvider>
+    )
+    await tick()
+    fireEvent.click(screen.getByRole("button", { name: "Source A" }))
+    await tick()
+    fireEvent.click(screen.getByRole("button", { name: /Open transaction/ }))
+    await tick()
+    expect(screen.getByText(`Returned run: ${runA} · 2024 · DE · EUR`)).toBeTruthy()
+    await act(async () => {
+      await syncState.onCompleted?.(row.source.sourceId)
+    })
+    await tick()
+    completed = true
+    await tick(2_000)
+    expect(screen.getByText(`Returned run: ${runB} · 2024 · DE · EUR`)).toBeTruthy()
+    expect(
+      within(screen.getByRole("region", { name: "Disposal allocation 1" })).getByText("0 EUR")
+    ).toBeTruthy()
+    expect(screen.getAllByText(row.source.sourceId).length).toBeGreaterThan(0)
+    expect(
+      requests
+        .filter((url) => url.pathname.endsWith(row.transactionId))
+        .every((url) => url.searchParams.get("taxYear") === "2024")
+    ).toBe(true)
+    const listRequests = requests.filter((url) => url.pathname.endsWith("/transactions"))
+    expect(listRequests.length).toBeGreaterThanOrEqual(3)
+    expect(new Set(listRequests.map((url) => url.search)).size).toBe(1)
+    const settledReads = requests.filter((url) => url.pathname.endsWith(row.transactionId)).length
+    await tick(4_000)
+    expect(requests.filter((url) => url.pathname.endsWith(row.transactionId))).toHaveLength(
+      settledReads
+    )
+    expect(currentPortfolio.activeRun?.runId).toBe(RUN_A)
+    disappeared = true
+    await act(async () => {
+      await refreshTransactionQueries(queryClient)
+    })
+    await tick()
+    expect(
+      screen.getByText("This transaction is no longer available. Your selection has been kept.")
+    ).toBeTruthy()
+    expect(screen.getByText("Older-year transaction")).toBeTruthy()
+    expect(
+      requests
+        .filter((url) => url.pathname.endsWith(row.transactionId))
+        .every((url) => url.searchParams.get("taxYear") === "2024")
+    ).toBe(true)
+    fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
+    await tick(500)
+    expect(screen.getByText(row.source.sourceId)).toBeTruthy()
+  })
 
   it("follows a surviving transaction across the Berlin year boundary and keeps its last year when removed", async () => {
     const row = {

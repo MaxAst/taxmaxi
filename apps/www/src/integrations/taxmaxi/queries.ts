@@ -1,4 +1,9 @@
-import { infiniteQueryOptions, keepPreviousData, queryOptions } from "@tanstack/react-query"
+import {
+  infiniteQueryOptions,
+  keepPreviousData,
+  queryOptions,
+  type QueryClient,
+} from "@tanstack/react-query"
 import {
   TaxMaxiError,
   isTaxMaxiUnauthorizedError,
@@ -7,6 +12,7 @@ import {
   type PendingAssetListInput,
   type TransactionListInput,
   type TransactionDetailInput,
+  type TransactionDetail,
   type TaxMaxi,
 } from "taxmaxi"
 
@@ -63,9 +69,26 @@ export const queryKeys = {
   transactions: () => [...queryKeys.all, "transactions"] as const,
   transactionDetail: (input: TransactionDetailInput) =>
     [...queryKeys.transactions(), "detail", input.transactionId, input.taxYear] as const,
+  transactionLists: () => [...queryKeys.transactions(), "list"] as const,
   transactionList: (input: TransactionListInput = {}) =>
-    [...queryKeys.transactions(), "list", input] as const,
+    [...queryKeys.transactionLists(), input] as const,
 }
+
+/** Refresh list and selected detail after a writer signal, dropping older in-flight delivery. */
+export const refreshTransactionQueries = async (queryClient: QueryClient): Promise<void> => {
+  await queryClient.cancelQueries({ queryKey: queryKeys.transactions() })
+  await queryClient.invalidateQueries({ queryKey: queryKeys.transactions() })
+}
+
+const hasPendingTransactionWork = (detail: TransactionDetail): boolean =>
+  detail.calculation.run?.status === "pending" ||
+  detail.calculation.run?.status === "running" ||
+  detail.movementOverrides.some((correction) =>
+    [correction.price, correction.classification].some(
+      (stream) => stream.replay.status === "updating" || stream.coverageStatus === "updating"
+    )
+  ) ||
+  detail.assetOverrides.some((item) => item.projection?.recomputation.status === "updating")
 
 export const queries = {
   // Auth and billing fail fast: a 401 should redirect immediately, not retry.
@@ -172,11 +195,27 @@ export const queries = {
       },
       staleTime: 30_000,
       retry: false,
+      refetchOnWindowFocus: "always",
+      refetchOnReconnect: "always",
+      refetchInterval: (query) => {
+        if (
+          isTaxMaxiUnauthorizedError(query.state.error) ||
+          (query.state.error instanceof TaxMaxiError && query.state.error.status === 404) ||
+          !query.state.data ||
+          !hasPendingTransactionWork(query.state.data)
+        )
+          return false
+        return query.state.status === "error" ? 30_000 : 2_000
+      },
     }),
   transactionList: (taxmaxi: TaxMaxi, input: TransactionListInput = {}) =>
     queryOptions({
       queryKey: queryKeys.transactionList(input),
-      queryFn: async () => taxmaxi.transactions.list(input),
+      queryFn: async ({ signal }) => {
+        // Consuming the signal cancels stale delivery even without SDK transport support.
+        signal.throwIfAborted()
+        return taxmaxi.transactions.list(input)
+      },
       staleTime: 30 * 1000,
     }),
 }

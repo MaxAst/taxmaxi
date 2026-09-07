@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 
-import { QueryClient } from "@tanstack/react-query"
+import { QueryClient, QueryObserver } from "@tanstack/react-query"
 import { TaxMaxi } from "taxmaxi"
 import { describe, expect, it, vi } from "vitest"
 
-import { queries } from "#/integrations/taxmaxi/queries"
+import { queries, refreshTransactionQueries } from "#/integrations/taxmaxi/queries"
 
 const getRequestUrl = (input: RequestInfo | URL): string => {
   if (typeof input === "string") {
@@ -209,5 +209,52 @@ describe("transaction detail queries", () => {
       [{ transactionId: "b", taxYear: 2025 }],
     ])
     client.clear()
+  })
+})
+
+describe("transaction writer-signal refresh", () => {
+  it("cancels pending list delivery and refetches the identical list scope", async () => {
+    let completeFirst: ((response: Response) => void) | undefined
+    const urls: string[] = []
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://signal.example.test",
+      fetch: async (input) => {
+        urls.push(getRequestUrl(input))
+        if (urls.length === 1)
+          return new Promise((resolve) => {
+            completeFirst = resolve
+          })
+        return Response.json({
+          transactions: [],
+          totalCount: 2,
+          page: { hasMore: false, nextCursor: null },
+        })
+      },
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const options = queries.transactionList(taxmaxi, { cursor: "same-cursor", limit: 7 })
+    const observer = new QueryObserver(client, options)
+    const unsubscribe = observer.subscribe(() => undefined)
+    try {
+      await vi.waitFor(() => expect(urls).toHaveLength(1))
+      await refreshTransactionQueries(client)
+      expect(client.getQueryData(options.queryKey)?.totalCount).toBe(2)
+      completeFirst?.(
+        Response.json({
+          transactions: [],
+          totalCount: 1,
+          page: { hasMore: false, nextCursor: null },
+        })
+      )
+      await Promise.resolve()
+      expect(client.getQueryData(options.queryKey)?.totalCount).toBe(2)
+      expect(urls).toEqual([
+        "https://signal.example.test/v1/transactions?cursor=same-cursor&limit=7",
+        "https://signal.example.test/v1/transactions?cursor=same-cursor&limit=7",
+      ])
+    } finally {
+      unsubscribe()
+      client.clear()
+    }
   })
 })
