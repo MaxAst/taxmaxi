@@ -1090,6 +1090,8 @@
   "app.inspector.field.followUpJobId": "Folgeauftrag-ID",
   "app.inspector.field.coverageStatus": "Abdeckung durch Berechnungslauf",
   "app.inspector.field.overrideId": "Korrektur-ID",
+  "app.inspector.field.enteredTotal": "Eingegebener Gesamtwert",
+  "app.inspector.field.enteredUnit": "Eingegebener Einzelpreis",
   "app.inspector.field.total": "Exakter Gesamtwert",
   "app.inspector.field.unit": "Einzelpreis",
   "app.inspector.field.roundedUnit": "Gerundete Einzelpreisvorschau · nicht der Gesamtwert",

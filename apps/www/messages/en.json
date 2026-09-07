@@ -1090,6 +1090,8 @@
   "app.inspector.field.followUpJobId": "Follow-up job ID",
   "app.inspector.field.coverageStatus": "Run coverage",
   "app.inspector.field.overrideId": "Correction ID",
+  "app.inspector.field.enteredTotal": "Entered total value",
+  "app.inspector.field.enteredUnit": "Entered unit price",
   "app.inspector.field.total": "Exact total value",
   "app.inspector.field.unit": "Unit price",
   "app.inspector.field.roundedUnit": "Rounded unit preview · not the total",

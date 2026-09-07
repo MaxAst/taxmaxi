@@ -269,6 +269,8 @@ const labels = {
   followUpJobId: () => m["app.inspector.field.followUpJobId"](),
   coverageStatus: () => m["app.inspector.field.coverageStatus"](),
   overrideId: () => m["app.inspector.field.overrideId"](),
+  enteredTotal: () => m["app.inspector.field.enteredTotal"](),
+  enteredUnit: () => m["app.inspector.field.enteredUnit"](),
   total: () => m["app.inspector.field.total"](),
   unit: () => m["app.inspector.field.unit"](),
   roundedUnit: () => m["app.inspector.field.roundedUnit"](),
@@ -966,8 +968,8 @@ function UserInput({ input }: { input: History["input"] }) {
     <Fields
       values={
         input.input._tag === "total_value"
-          ? { total: money(input.input.amount, input.input.currency) }
-          : { unit: money(input.input.amount, input.input.currency) }
+          ? { enteredTotal: money(input.input.amount, input.input.currency) }
+          : { enteredUnit: money(input.input.amount, input.input.currency) }
       }
     />
   )
