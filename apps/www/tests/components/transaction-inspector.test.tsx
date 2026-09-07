@@ -868,18 +868,21 @@ describe("selected transaction refresh", () => {
     }
   })
 
-  it.each(["pending", "running"] as const)("polls a recorded %s calculation", async (status) => {
-    const body = settledDetail()
-    if (!body.calculation.run) throw new Error("Fixture run missing")
-    const { taxmaxi, fetch } = sdkClient({
-      ...body,
-      calculation: { ...body.calculation, run: { ...body.calculation.run, status } },
-    })
-    mount(taxmaxi)
-    await advanceRefresh()
-    await advanceRefresh(2_000)
-    expect(fetch).toHaveBeenCalledTimes(2)
-  })
+  it.each(["pending", "running"] as const)(
+    "defensively polls a schema-supported %s run (not an ordinary sync writer fixture)",
+    async (status) => {
+      const body = settledDetail()
+      if (!body.calculation.run) throw new Error("Fixture run missing")
+      const { taxmaxi, fetch } = sdkClient({
+        ...body,
+        calculation: { ...body.calculation, run: { ...body.calculation.run, status } },
+      })
+      mount(taxmaxi)
+      await advanceRefresh()
+      await advanceRefresh(2_000)
+      expect(fetch).toHaveBeenCalledTimes(2)
+    }
+  )
 
   it.each(["movement replay", "movement coverage", "asset replay"] as const)(
     "polls recorded %s independently of calculation completeness",
@@ -1078,48 +1081,53 @@ describe("selected transaction refresh", () => {
     expect(count).toBe(2)
   })
 
-  it("does not invalidate lists after closing while run-change cancellation is pending", async () => {
-    let body = settledDetail()
-    const { taxmaxi, fetch } = sdkClient(body)
-    fetch.mockImplementation(async () => Response.json(body))
-    const view = mount(taxmaxi)
-    const list = vi.spyOn(taxmaxi.transactions, "list").mockResolvedValue({
-      transactions: [],
-      totalCount: 0,
-      page: { hasMore: false, nextCursor: null },
-    })
-    const observer = new QueryObserver(view.client, queries.transactionList(taxmaxi))
-    const unsubscribe = observer.subscribe(() => undefined)
-    let release: (() => void) | undefined
-    const originalCancel = view.client.cancelQueries.bind(view.client)
-    const barrier = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    try {
-      await advanceRefresh()
-      vi.spyOn(view.client, "cancelQueries").mockImplementation(async (filters, options) => {
-        await originalCancel(filters, options)
-        await barrier
+  it.each(["close", "change", "auth"] as const)(
+    "finishes an observed run refresh after %s unless authentication is lost",
+    async (action) => {
+      let body = settledDetail()
+      const { taxmaxi, fetch } = sdkClient(body)
+      fetch.mockImplementation(async () => Response.json(body))
+      const view = mount(taxmaxi)
+      const list = vi.spyOn(taxmaxi.transactions, "list").mockResolvedValue({
+        transactions: [],
+        totalCount: 0,
+        page: { hasMore: false, nextCursor: null },
       })
-      if (!body.calculation.run) throw new Error("Fixture run missing")
-      body = {
-        ...body,
-        calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
-      }
-      act(() => focusManager.setFocused(false))
-      act(() => focusManager.setFocused(true))
-      await advanceRefresh()
-      view.select(null)
-      await act(async () => {
+      const observer = new QueryObserver(view.client, queries.transactionList(taxmaxi))
+      const unsubscribe = observer.subscribe(() => undefined)
+      let release: (() => void) | undefined
+      const originalCancel = view.client.cancelQueries.bind(view.client)
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      try {
+        await advanceRefresh()
+        vi.spyOn(view.client, "cancelQueries").mockImplementation(async (filters, options) => {
+          await originalCancel(filters, options)
+          await barrier
+        })
+        if (!body.calculation.run) throw new Error("Fixture run missing")
+        body = {
+          ...body,
+          calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+        }
+        act(() => focusManager.setFocused(false))
+        act(() => focusManager.setFocused(true))
+        await advanceRefresh()
+        if (action === "close") view.select(null)
+        else if (action === "change") view.select({ ...SELECTION, transactionId: IDS.other })
+        else view.disable()
+        await act(async () => {
+          release?.()
+        })
+        await advanceRefresh()
+        expect(list).toHaveBeenCalledTimes(action === "auth" ? 1 : 2)
+      } finally {
         release?.()
-      })
-      await advanceRefresh()
-      expect(list).toHaveBeenCalledTimes(1)
-    } finally {
-      release?.()
-      unsubscribe()
+        unsubscribe()
+      }
     }
-  })
+  )
 
   it("cancels pending delivery and polling when authentication disables the inspector", async () => {
     let complete: ((response: Response) => void) | undefined

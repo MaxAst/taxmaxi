@@ -39,6 +39,13 @@ export function TransactionInspector({
   fallbackFocusRef?: RefObject<HTMLElement | null>
 }) {
   const [mobile, setMobile] = useState(false)
+  const refreshAllowed = useRef(!disabled)
+  useEffect(() => {
+    refreshAllowed.current = !disabled
+    return () => {
+      refreshAllowed.current = false
+    }
+  }, [disabled])
   useEffect(() => {
     const media = window.matchMedia("(max-width: 767px)")
     const update = () => setMobile(media.matches)
@@ -77,6 +84,7 @@ export function TransactionInspector({
       <InspectorRequest
         key={`${selection.transactionId}:${selection.taxYear}`}
         selection={selection}
+        refreshAllowed={refreshAllowed}
         taxmaxi={taxmaxi}
         onUnauthorized={onUnauthorized}
       />
@@ -135,10 +143,12 @@ export function TransactionInspector({
 
 function InspectorRequest({
   selection,
+  refreshAllowed,
   taxmaxi,
   onUnauthorized,
 }: {
   selection: Selection
+  refreshAllowed: RefObject<boolean>
   taxmaxi: TaxMaxi
   onUnauthorized: () => void | Promise<void>
 }) {
@@ -156,20 +166,20 @@ function InspectorRequest({
     const previousRunId = observedRunId.current
     observedRunId.current = runId
     if (previousRunId === undefined || previousRunId === runId) return
-    let active = true
     const refreshList = async () => {
       await queryClient.cancelQueries({ queryKey: queryKeys.transactionLists() })
-      if (active) await queryClient.invalidateQueries({ queryKey: queryKeys.transactionLists() })
+      if (refreshAllowed.current)
+        await queryClient.invalidateQueries({ queryKey: queryKeys.transactionLists() })
     }
     void refreshList()
-    return () => {
-      active = false
-    }
-  }, [detail.isSuccess, queryClient, runId])
+  }, [detail.isSuccess, queryClient, refreshAllowed, runId])
   const regionRef = useRef<HTMLElement>(null)
   useEffect(() => {
-    if (isTaxMaxiUnauthorizedError(detail.error)) void onUnauthorized()
-  }, [detail.error, onUnauthorized])
+    if (isTaxMaxiUnauthorizedError(detail.error)) {
+      refreshAllowed.current = false
+      void onUnauthorized()
+    }
+  }, [detail.error, onUnauthorized, refreshAllowed])
   const missing = detail.error instanceof TaxMaxiError && detail.error.status === 404
   return (
     <section
