@@ -7,7 +7,7 @@ import {
   QueryClientProvider,
   QueryObserver,
 } from "@tanstack/react-query"
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import type { ReactNode } from "react"
 import { TaxMaxi, type PortfolioAssets, type TransactionListInput } from "taxmaxi"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -487,5 +487,155 @@ describe("Dashboard calculation refresh", () => {
     fireEvent.click(screen.getByRole("button", { name: "Source B" }))
     await tick()
     expect(transactionCalls).toBe(calls)
+  })
+
+  it("shows unavailable positions instead of the API's empty zero summary when no active run exists", async () => {
+    currentPortfolio = {
+      ...portfolio(),
+      activeRun: null,
+      latestRun: null,
+      assets: [],
+      summary: { totalValue: "0", costBasis: "0", profitLoss: "0", profitLossPercentage: null },
+    }
+    mount()
+    await tick()
+    const status = screen.getByRole("region", { name: "Portfolio calculation" })
+    expect(status.textContent).toContain("No calculation available.")
+    expect(
+      screen.getByText(
+        "Positions are unavailable until a calculation is available. This does not confirm a zero balance."
+      )
+    ).toBeTruthy()
+    expect(screen.queryByText("No assets yet.")).toBeNull()
+    expect(screen.queryByText("0,00 EUR")).toBeNull()
+  })
+
+  it.each(["running", "failed"] as const)(
+    "keeps partial active A and its whole-calculation blockers visible with latest B %s",
+    async (latestStatus) => {
+      currentPortfolio = {
+        ...portfolio(),
+        activeRun: {
+          runId: RUN_A,
+          status: "partial",
+          blockerCounts: [
+            { code: "missing_valuation", count: 2 },
+            { code: "future.example", count: 1 },
+          ],
+        },
+        latestRun: {
+          runId: RUN_B,
+          status: latestStatus,
+          failureCode: latestStatus === "failed" ? "engine_unavailable" : null,
+        },
+      }
+      mount()
+      await tick()
+      const status = screen.getByRole("region", { name: "Portfolio calculation" })
+      expect(within(status).getByText("Partial calculation available.")).toBeTruthy()
+      expect(within(status).getByText("3 blockers in the whole calculation")).toBeTruthy()
+      expect(status.textContent).toContain(
+        latestStatus === "failed"
+          ? "The latest calculation failed."
+          : "The latest calculation is running."
+      )
+      expect(screen.getByText("1,25")).toBeTruthy()
+      fireEvent.click(within(status).getByText("Run and blocker details"))
+      expect(within(status).getByText(`Active run: ${RUN_A}`)).toBeTruthy()
+      expect(within(status).getByText(`Latest run: ${RUN_B}`)).toBeTruthy()
+      expect(within(status).getByText("Valuation missing")).toBeTruthy()
+      expect(within(status).getByText("missing_valuation")).toBeTruthy()
+      expect(within(status).getByText("Unknown blocker")).toBeTruthy()
+      expect(within(status).getByText("future.example")).toBeTruthy()
+      expect(within(status).getByText("2")).toBeTruthy()
+      expect(within(status).getByText("1")).toBeTruthy()
+      if (latestStatus === "failed")
+        expect(within(status).getByText("Failure code: engine_unavailable")).toBeTruthy()
+
+      fireEvent.click(screen.getByRole("button", { name: "Source B" }))
+      await tick()
+      expect(within(status).getByText("3 blockers in the whole calculation")).toBeTruthy()
+      expect(
+        within(status).getByText(
+          "Counts cover the whole calculation across all sources. One transaction can have multiple blockers."
+        )
+      ).toBeTruthy()
+      expect(within(status).getByText("Current-year portfolio · Germany (DE) · EUR")).toBeTruthy()
+      expect(status.textContent).not.toContain("2025")
+    }
+  )
+
+  it("identifies complete active A without using terminal non-active B to relabel positions", async () => {
+    currentPortfolio = {
+      ...portfolio(),
+      latestRun: { runId: RUN_B, status: "partial", failureCode: null },
+    }
+    mount()
+    await tick()
+    const status = screen.getByRole("region", { name: "Portfolio calculation" })
+    expect(within(status).getByText("Available calculation complete.")).toBeTruthy()
+    expect(within(status).getByText(`Active run: ${RUN_A}`)).toBeTruthy()
+    expect(within(status).getByText(`Latest run: ${RUN_B}`)).toBeTruthy()
+    expect(screen.getByText("1,25")).toBeTruthy()
+    expect(within(status).queryByText("Partial calculation available.")).toBeNull()
+  })
+
+  it("distinguishes failed requests from failed calculations while retaining cached positions and allowing read refresh", async () => {
+    mount()
+    await tick()
+    respond = async () => Response.json({ message: "Unavailable" }, { status: 503 })
+    await tick(33_000)
+    const status = screen.getByRole("region", { name: "Portfolio calculation" })
+    expect(
+      within(status).getByText(
+        "Could not refresh calculation status. Previously loaded results may be out of date."
+      )
+    ).toBeTruthy()
+    expect(within(status).queryByText(/The latest calculation failed/)).toBeNull()
+    expect(screen.getByText("1,25")).toBeTruthy()
+    const calls = portfolioCalls
+    respond = async () => Response.json(currentPortfolio)
+    fireEvent.click(within(status).getByRole("button", { name: "Refresh results" }))
+    await tick()
+    expect(portfolioCalls).toBe(calls + 1)
+    expect(transactionCalls).toBe(1)
+    expect(within(status).queryByText(/Could not refresh calculation status/)).toBeNull()
+  })
+
+  it("does not claim there is no calculation when the first request fails", async () => {
+    respond = async () => Response.json({ message: "Unavailable" }, { status: 503 })
+    mount()
+    await tick(3_000)
+    const status = screen.getByRole("region", { name: "Portfolio calculation" })
+    expect(status.textContent).toContain("Could not refresh calculation status.")
+    expect(status.textContent).not.toContain("No calculation available.")
+  })
+
+  it("announces changed calculation facts once, not identical polls or manual refresh state", async () => {
+    mount()
+    await tick()
+    const live = screen.getByRole("status", { name: "Calculation updates" })
+    const updates: string[] = []
+    const observer = new MutationObserver(() => updates.push(live.textContent ?? ""))
+    observer.observe(live, { characterData: true, childList: true, subtree: true })
+    await tick(30_000)
+    expect(updates).toEqual([])
+    currentPortfolio = {
+      ...portfolio(),
+      activeRun: {
+        runId: RUN_A,
+        status: "partial",
+        blockerCounts: [{ code: "inventory_shortage", count: 3 }],
+      },
+    }
+    await tick(30_000)
+    expect(updates).toHaveLength(1)
+    expect(updates[0]).toContain("Partial calculation available.")
+    expect(updates[0]).toContain("3 blockers in the whole calculation")
+    await tick(30_000)
+    fireEvent.click(screen.getByRole("button", { name: "Refresh results" }))
+    await tick()
+    expect(updates).toHaveLength(1)
+    observer.disconnect()
   })
 })
