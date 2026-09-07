@@ -324,6 +324,51 @@ describe("Dashboard calculation refresh", () => {
       </QueryClientProvider>
     )
 
+  it("follows a surviving transaction across the Berlin year boundary and keeps its last year when removed", async () => {
+    const row = {
+      ...transaction("00000000-0000-4000-8000-000000000101", "Boundary transaction"),
+      timestamp: "2024-12-31T22:30:00.000Z",
+    }
+    let rows = [row]
+    vi.spyOn(testTaxMaxi.transactions, "list").mockImplementation(async () => ({
+      transactions: rows,
+      totalCount: rows.length,
+      page: { hasMore: false, nextCursor: null },
+    }))
+    const get = vi
+      .spyOn(testTaxMaxi.transactions, "get")
+      .mockImplementation(() => new Promise(() => undefined))
+    mount()
+    await tick()
+    fireEvent.click(screen.getByRole("button", { name: /Open transaction/ }))
+    await tick()
+    expect(get).toHaveBeenLastCalledWith({ transactionId: row.transactionId, taxYear: 2024 })
+    rows = [{ ...row, timestamp: "2024-12-31T23:30:00.000Z" }]
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.transactionList({ cursor: null, limit: 7 }),
+        exact: true,
+      })
+    })
+    await tick()
+    expect(get).toHaveBeenLastCalledWith({ transactionId: row.transactionId, taxYear: 2025 })
+    expect(get).toHaveBeenCalledTimes(2)
+    rows = []
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.transactionList({ cursor: null, limit: 7 }),
+        exact: true,
+      })
+    })
+    await tick()
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(screen.getByText("Boundary transaction")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
+    await tick(500)
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: "Transactions" }))
+  })
+
   it.each(["loaded", "pending", "failed refresh"] as const)(
     "refreshes an open %s treatment detail when the actual active run changes",
     async (scenario) => {

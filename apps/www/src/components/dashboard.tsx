@@ -90,6 +90,7 @@ export function Dashboard({
     description: string
   } | null>(null)
   const transactionOpenerRef = useRef<HTMLElement | null>(null)
+  const transactionListRef = useRef<HTMLDivElement | null>(null)
 
   const selectTransaction = (transaction: TransactionListItem, trigger: HTMLElement) => {
     transactionOpenerRef.current = trigger
@@ -184,6 +185,24 @@ export function Dashboard({
     }),
     enabled: !authenticationLost,
   })
+
+  const survivingRow = transactionQuery.data?.transactions.find(
+    (row) => row.transactionId === selectedTransaction?.transactionId
+  )
+  if (selectedTransaction && survivingRow) {
+    const taxYear = Number(
+      new Intl.DateTimeFormat("en", { timeZone: "Europe/Berlin", year: "numeric" }).format(
+        new Date(survivingRow.timestamp)
+      )
+    )
+    const description = survivingRow.description ?? m["app.treatment.transaction"]()
+    if (
+      taxYear !== selectedTransaction.taxYear ||
+      description !== selectedTransaction.description
+    ) {
+      setSelectedTransaction({ ...selectedTransaction, taxYear, description })
+    }
+  }
 
   const activeRunId = portfolioQuery.data?.activeRun?.runId
   const hasPortfolio = portfolioQuery.data !== undefined
@@ -390,20 +409,27 @@ export function Dashboard({
               )}
             </TabsContent>
             <TabsContent value="transactions">
-              <TransactionsTable
-                disabled={authenticationLost}
-                onSelect={selectTransaction}
-                selectedTransactionId={selectedTransaction?.transactionId ?? null}
-                error={transactionQuery.isError}
-                hasNextPage={transactionQuery.data?.page.hasMore ?? false}
-                loading={transactionQuery.isFetching}
-                onNextPage={goToNextTransactionPage}
-                onPreviousPage={goToPreviousTransactionPage}
-                onRetry={() => void transactionQuery.refetch()}
-                pageIndex={transactionCursors.length - 1}
-                totalCount={transactionQuery.data?.totalCount ?? 0}
-                transactions={transactionQuery.data?.transactions ?? []}
-              />
+              <div
+                ref={transactionListRef}
+                tabIndex={-1}
+                role="region"
+                aria-label={m["app.dashboard.tabs.transactions"]()}
+              >
+                <TransactionsTable
+                  disabled={authenticationLost}
+                  onSelect={selectTransaction}
+                  selectedTransactionId={selectedTransaction?.transactionId ?? null}
+                  error={transactionQuery.isError}
+                  hasNextPage={transactionQuery.data?.page.hasMore ?? false}
+                  loading={transactionQuery.isFetching}
+                  onNextPage={goToNextTransactionPage}
+                  onPreviousPage={goToPreviousTransactionPage}
+                  onRetry={() => void transactionQuery.refetch()}
+                  pageIndex={transactionCursors.length - 1}
+                  totalCount={transactionQuery.data?.totalCount ?? 0}
+                  transactions={transactionQuery.data?.transactions ?? []}
+                />
+              </div>
             </TabsContent>
             <TabsContent value="taxes"></TabsContent>
           </Tabs>
@@ -416,6 +442,7 @@ export function Dashboard({
         onUnauthorized={handleUnauthorized}
         onClose={() => setSelectedTransaction(null)}
         returnFocusRef={transactionOpenerRef}
+        fallbackFocusRef={transactionListRef}
       />
     </div>
   )

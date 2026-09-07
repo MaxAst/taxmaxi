@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { useRef, useState, type ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { TaxMaxi, TaxMaxiError, type TransactionDetail } from "taxmaxi"
+import { setLocale } from "#/paraglide/runtime"
 import { TransactionInspector } from "#/components/transaction-inspector"
 
 const IDS = {
@@ -468,6 +469,59 @@ describe("TransactionInspector", () => {
     }
   )
 
+  it.each(["en", "de"] as const)(
+    "localizes reconciliation reasons in %s and retains unknown codes",
+    async (locale) => {
+      const originalUrl = window.location.href
+      window.history.replaceState(null, "", "/app")
+      await setLocale(locale, { reload: false })
+      try {
+        const detail = richDetail()
+        const { taxmaxi } = sdkClient({
+          ...detail,
+          reconciliations: [
+            {
+              id: "known-reconciliation",
+              providerTransferId: IDS.target,
+              canonicalTransferId: null,
+              canonicalTransactionId: null,
+              status: "auto_applied",
+              matchReason: "deterministic_wallet_receipt_match",
+              deterministic: true,
+            },
+            {
+              id: "unknown-reconciliation",
+              providerTransferId: IDS.target,
+              canonicalTransferId: null,
+              canonicalTransactionId: null,
+              status: "needs_review",
+              matchReason: "future_reason_code",
+              deterministic: false,
+            },
+          ],
+        })
+        mount(taxmaxi)
+        await screen.findByText(
+          locale === "en"
+            ? "Wallet receipt matched unambiguously"
+            : "Wallet-Eingang eindeutig zugeordnet"
+        )
+        expect(
+          screen.getByText(
+            locale === "en"
+              ? "Unrecognized reconciliation reason: future_reason_code"
+              : "Unbekannter Abgleichsgrund: future_reason_code"
+          )
+        ).toBeTruthy()
+        expect(screen.queryByText("deterministic_wallet_receipt_match")).toBeNull()
+      } finally {
+        cleanup()
+        await setLocale("en", { reload: false })
+        window.history.replaceState(null, "", originalUrl)
+      }
+    }
+  )
+
   it("does not fetch without a selection and rejects a late reply after selecting another transaction", async () => {
     const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://inspector.example.test" })
     let finish: ((value: TransactionDetail) => void) | undefined
@@ -556,4 +610,65 @@ describe("TransactionInspector", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     await waitFor(() => expect(document.activeElement).toBe(opener))
   })
+  it.each([false, true])(
+    "restores list focus after the selected row disappears on mobile=%s",
+    async (isMobile) => {
+      mobile = isMobile
+      const { taxmaxi } = sdkClient(richDetail())
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      clients.push(client)
+      function Harness() {
+        const [selection, setSelection] = useState<Selection | null>(null)
+        const [hasRow, setHasRow] = useState(true)
+        const returnFocusRef = useRef<HTMLElement | null>(null)
+        const fallbackFocusRef = useRef<HTMLDivElement | null>(null)
+        return (
+          <>
+            <div
+              ref={fallbackFocusRef}
+              tabIndex={-1}
+              role="region"
+              aria-label="Fixture transactions"
+            >
+              {hasRow ? (
+                <button
+                  onClick={(event) => {
+                    returnFocusRef.current = event.currentTarget
+                    setSelection(SELECTION)
+                  }}
+                >
+                  Open fixture
+                </button>
+              ) : null}
+            </div>
+            <button onClick={() => setHasRow(false)}>Remove row</button>
+            <TransactionInspector
+              selection={selection}
+              taxmaxi={taxmaxi}
+              disabled={false}
+              onUnauthorized={() => undefined}
+              onClose={() => setSelection(null)}
+              returnFocusRef={returnFocusRef}
+              fallbackFocusRef={fallbackFocusRef}
+            />
+          </>
+        )
+      }
+      render(
+        <QueryClientProvider client={client}>
+          <Harness />
+        </QueryClientProvider>
+      )
+      fireEvent.click(screen.getByRole("button", { name: "Open fixture" }))
+      await screen.findByRole("heading", { name: "Recorded transaction" })
+      fireEvent.click(screen.getByText("Remove row"))
+      fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByRole("region", { name: "Fixture transactions" })
+        )
+      )
+    }
+  )
 })

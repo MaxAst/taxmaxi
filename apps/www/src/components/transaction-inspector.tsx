@@ -28,6 +28,7 @@ export function TransactionInspector({
   onUnauthorized,
   onClose,
   returnFocusRef,
+  fallbackFocusRef,
 }: {
   selection: Selection | null
   taxmaxi: TaxMaxi
@@ -35,6 +36,7 @@ export function TransactionInspector({
   onUnauthorized: () => void | Promise<void>
   onClose: () => void
   returnFocusRef: RefObject<HTMLElement | null>
+  fallbackFocusRef?: RefObject<HTMLElement | null>
 }) {
   const [mobile, setMobile] = useState(false)
   useEffect(() => {
@@ -48,7 +50,11 @@ export function TransactionInspector({
   const open = selection !== null && !disabled
   const restoreFocus = (event: Event) => {
     event.preventDefault()
-    if (!open) returnFocusRef.current?.focus()
+    if (!open) {
+      const opener = returnFocusRef.current
+      const target = opener?.isConnected ? opener : fallbackFocusRef?.current
+      target?.focus()
+    }
   }
   const focusClose = (event: Event) => {
     event.preventDefault()
@@ -339,6 +345,51 @@ function Field({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 const yesNo = (value: boolean) => (value ? m["app.inspector.yes"]() : m["app.inspector.no"]())
+const reconciliationReason = (code: string): string => {
+  switch (code) {
+    case "provider_transfer_missing_wallet_address":
+      return m["app.inspector.reconciliation.provider_transfer_missing_wallet_address"]()
+    case "canonical_transfer_claim_conflict":
+      return m["app.inspector.reconciliation.canonical_transfer_claim_conflict"]()
+    case "no_candidate_onchain_receipt":
+      return m["app.inspector.reconciliation.no_candidate_onchain_receipt"]()
+    case "multiple_candidate_onchain_receipts":
+      return m["app.inspector.reconciliation.multiple_candidate_onchain_receipts"]()
+    case "provider_asset_mapping_pending":
+      return m["app.inspector.reconciliation.provider_asset_mapping_pending"]()
+    case "destination_representation_mapping_rejected":
+      return m["app.inspector.reconciliation.destination_representation_mapping_rejected"]()
+    case "representation_economic_asset_conflict":
+      return m["app.inspector.reconciliation.representation_economic_asset_conflict"]()
+    case "provider_asset_representation_conflict":
+      return m["app.inspector.reconciliation.provider_asset_representation_conflict"]()
+    case "destination_source_replay_pending":
+      return m["app.inspector.reconciliation.destination_source_replay_pending"]()
+    case "deterministic_wallet_receipt_match":
+      return m["app.inspector.reconciliation.deterministic_wallet_receipt_match"]()
+    case "asset_representation_review_pending":
+      return m["app.inspector.reconciliation.asset_representation_review_pending"]()
+    case "destination_representation_observation_missing":
+      return m["app.inspector.reconciliation.destination_representation_observation_missing"]()
+    case "canonical_transfer_claim_conflict_pending_rollback":
+      return m["app.inspector.reconciliation.canonical_transfer_claim_conflict_pending_rollback"]()
+    case "source_replay_pending_reconciliation":
+      return m["app.inspector.reconciliation.source_replay_pending_reconciliation"]()
+    case "movement_facts_changed_before_canonicalization":
+      return m["app.inspector.reconciliation.movement_facts_changed_before_canonicalization"]()
+    case "manual_transaction_review_preserved":
+      return m["app.inspector.reconciliation.manual_transaction_review_preserved"]()
+    case "candidate_set_changed_during_reconciliation":
+      return m["app.inspector.reconciliation.candidate_set_changed_during_reconciliation"]()
+    case "canonical_transfer_already_approved":
+      return m["app.inspector.reconciliation.canonical_transfer_already_approved"]()
+    case "canonical_transfer_already_reconciled":
+      return m["app.inspector.reconciliation.canonical_transfer_already_reconciled"]()
+    default:
+      return m["app.inspector.reconciliation.unknown"]({ code })
+  }
+}
+
 const state = (value: string | null) => {
   switch (value) {
     case "pending":
@@ -603,7 +654,7 @@ function InspectorFacts({ detail }: { detail: TransactionDetail }) {
               <Fields
                 values={{
                   status: state(item.status),
-                  reason: item.matchReason,
+                  reason: reconciliationReason(item.matchReason),
                   deterministic: yesNo(item.deterministic),
                 }}
               />
