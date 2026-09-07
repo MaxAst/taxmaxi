@@ -372,13 +372,11 @@ beforeEach(() => {
   mobile = false
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
-    value: vi
-      .fn()
-      .mockImplementation(() => ({
-        matches: mobile,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
+    value: vi.fn().mockImplementation(() => ({
+      matches: mobile,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
   })
 })
 afterEach(() => {
@@ -421,14 +419,12 @@ function section(title: string): HTMLElement {
 }
 
 function sdkClient(body: TransactionDetail) {
-  const fetch = vi
-    .fn<typeof globalThis.fetch>()
-    .mockResolvedValue(
-      new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
-    )
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+  )
   return {
     taxmaxi: TaxMaxi.fromBrowserSession({ baseUrl: "https://inspector.example.test", fetch }),
     fetch,

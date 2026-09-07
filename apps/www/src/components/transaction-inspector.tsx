@@ -62,7 +62,7 @@ export function TransactionInspector({
       className="min-h-11 shrink-0"
       aria-label={m["app.inspector.close"]()}
     >
-      <X aria-hidden="true" />
+      <X aria-hidden="true" data-icon="inline-start" />
       {m["app.inspector.close"]()}
     </Button>
   )
@@ -155,7 +155,7 @@ function InspectorRequest({
         description: selection.description,
         transactionId: selection.transactionId,
       })}
-      className="space-y-5 outline-none"
+      className="flex flex-col gap-5 outline-none"
     >
       <p className="text-sm text-muted-foreground">
         {m["app.treatment.requestedYear"]({ year: selection.taxYear })}
@@ -163,7 +163,7 @@ function InspectorRequest({
       {detail.isPending ? (
         <p role="status">{m["app.treatment.loading"]()}</p>
       ) : detail.isError ? (
-        <div className="space-y-3">
+        <div className="flex flex-col gap-3">
           <p role="status">{missing ? m["app.inspector.missing"]() : m["app.treatment.error"]()}</p>
           <Button
             className="min-h-11"
@@ -196,7 +196,7 @@ const money = (value: string | null, currency?: string) =>
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="space-y-3 border-t pt-4">
+    <section className="flex flex-col gap-3 border-t pt-4">
       <h3 className="font-semibold">{title}</h3>
       {children}
     </section>
@@ -208,7 +208,7 @@ function Audit({ children }: { children: ReactNode }) {
       <summary className="min-h-11 cursor-pointer content-center font-medium">
         {m["app.inspector.audit"]()}
       </summary>
-      <div className="space-y-3 pb-3">{children}</div>
+      <div className="flex flex-col gap-3 pb-3">{children}</div>
     </details>
   )
 }
@@ -520,7 +520,7 @@ function InspectorFacts({ detail }: { detail: TransactionDetail }) {
       </Section>
       <Section title={m["app.inspector.movements"]()}>
         {detail.movements.map((movement) => (
-          <article key={movement.id} className="space-y-3 rounded-lg border p-3">
+          <article key={movement.id} className="flex flex-col gap-3 rounded-lg border p-3">
             <Fields
               values={{
                 kind: state(movement.kind),
@@ -558,7 +558,7 @@ function InspectorFacts({ detail }: { detail: TransactionDetail }) {
         ) : (
           detail.sourceEvidence.map((item, index) => (
             <article
-              className="space-y-2 rounded-lg border p-3"
+              className="flex flex-col gap-2 rounded-lg border p-3"
               key={`${item.origin}:${item.originId}:${index}`}
             >
               <Fields
@@ -597,7 +597,7 @@ function InspectorFacts({ detail }: { detail: TransactionDetail }) {
       {detail.reconciliations.length ? (
         <Section title={m["app.inspector.reconciliations"]()}>
           {detail.reconciliations.map((item) => (
-            <article className="space-y-3" key={item.id}>
+            <article className="flex flex-col gap-3" key={item.id}>
               <Fields
                 values={{
                   status: state(item.status),
@@ -634,7 +634,7 @@ function InspectorFacts({ detail }: { detail: TransactionDetail }) {
           <p>{m["app.inspector.none"]()}</p>
         ) : (
           detail.assetOverrides.map((item) => (
-            <article key={item.movementId} className="space-y-3 rounded-lg border p-3">
+            <article key={item.movementId} className="flex flex-col gap-3 rounded-lg border p-3">
               <Fields values={{ movementId: item.movementId }} />
               {item.projection ? (
                 <AssetDecision projection={item.projection} />
@@ -653,7 +653,7 @@ function InspectorFacts({ detail }: { detail: TransactionDetail }) {
           <p>{m["app.inspector.noCaptured"]()}</p>
         ) : (
           detail.calculation.correctionInputs.map((input) => (
-            <article key={input.history.id} className="space-y-3 rounded-lg border p-3">
+            <article key={input.history.id} className="flex flex-col gap-3 rounded-lg border p-3">
               <Fields
                 values={{
                   runId: detail.calculation.run?.id,
@@ -733,7 +733,7 @@ function Calculation({ calculation }: { calculation: TransactionDetail["calculat
       {calculation.allocations.map((result, index) => (
         <section
           aria-label={m["app.treatment.allocation"]({ sequence: index + 1 })}
-          className="space-y-3 rounded-lg border p-3"
+          className="flex flex-col gap-3 rounded-lg border p-3"
           key={result.sequence}
         >
           <h4 className="font-medium">{m["app.treatment.allocation"]({ sequence: index + 1 })}</h4>
@@ -771,7 +771,7 @@ function Calculation({ calculation }: { calculation: TransactionDetail["calculat
       {calculation.income.map((result, index) => (
         <section
           aria-label={m["app.treatment.income"]({ sequence: index + 1 })}
-          className="space-y-3 rounded-lg border p-3"
+          className="flex flex-col gap-3 rounded-lg border p-3"
           key={result.sequence}
         >
           <h4 className="font-medium">{m["app.treatment.income"]({ sequence: index + 1 })}</h4>
@@ -793,7 +793,7 @@ function Calculation({ calculation }: { calculation: TransactionDetail["calculat
       {calculation.derivedLots.length ? (
         <Section title={m["app.inspector.lots"]()}>
           {calculation.derivedLots.map((lot) => (
-            <article className="space-y-3 rounded-lg border p-3" key={lot.sequence}>
+            <article className="flex flex-col gap-3 rounded-lg border p-3" key={lot.sequence}>
               <Fields
                 values={{
                   assetId: lot.assetId,
@@ -817,7 +817,7 @@ function Calculation({ calculation }: { calculation: TransactionDetail["calculat
       {calculation.blockers.length ? (
         <Section title={m["app.inspector.blockers"]()}>
           {calculation.blockers.map((blocker) => (
-            <article className="space-y-3 rounded-lg border p-3" key={blocker.sequence}>
+            <article className="flex flex-col gap-3 rounded-lg border p-3" key={blocker.sequence}>
               <Fields
                 values={{
                   blocker: blocker.code,
@@ -858,7 +858,7 @@ function TreatmentCodes({ codes }: { codes: ReadonlyArray<string> }) {
   return codes.length === 0 ? (
     <p className="text-muted-foreground">{m["app.treatment.noCodes"]()}</p>
   ) : (
-    <ul className="space-y-1">
+    <ul className="flex flex-col gap-1">
       {codes.map((code, index) => (
         <li key={`${index}:${code}`}>
           <span className="block">{treatmentLabel(code)}</span>
@@ -884,7 +884,7 @@ const monetaryStatusLabel = (status: TransactionDetail["calculation"]["monetaryS
 function EngineInputs({ inputs }: { inputs: Inputs }) {
   const event = inputs.event
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3">
       {event ? (
         <Fields
           values={{
@@ -920,7 +920,7 @@ function Valuations({ facts }: { facts: Inputs["valuationFacts"] }) {
       {m["app.inspector.valuation"]()}: {m["app.inspector.none"]()}
     </p>
   ) : (
-    <ul className="space-y-3">
+    <ul className="flex flex-col gap-3">
       {facts.map((fact, index) => (
         <li key={`${fact.eventId}:${index}`}>
           <Fields
@@ -1007,7 +1007,7 @@ function InspectedFacts({ facts }: { facts: History["inspectedFacts"] }) {
 }
 function HistoryRecord({ record }: { record: History }) {
   return (
-    <article className="space-y-3 border-t pt-3">
+    <article className="flex flex-col gap-3 border-t pt-3">
       <Fields
         values={{
           kind:
@@ -1027,7 +1027,7 @@ function HistoryRecord({ record }: { record: History }) {
         <summary className="min-h-11 cursor-pointer content-center">
           {m["app.inspector.inspected"]()}
         </summary>
-        <div className="space-y-3">
+        <div className="flex flex-col gap-3">
           <InspectedFacts facts={record.inspectedFacts} />
           <SystemEvidence system={record.inspectedSystem} />
           <Fields values={{ currency: record.inspectedValuationEvidence.reportingCurrency }} />
@@ -1056,7 +1056,7 @@ function Stream({ stream, title }: { stream: Correction["price"]; title: string 
       <p className="font-medium">{m["app.inspector.coverage"]()}</p>
       <Fields values={{ coverageStatus: state(stream.coverageStatus) }} />
       {stream.coverage ? (
-        <div className="space-y-3">
+        <div className="flex flex-col gap-3">
           <Fields
             values={{
               runId: stream.coverage.runId,
@@ -1097,7 +1097,7 @@ function Stream({ stream, title }: { stream: Correction["price"]; title: string 
 }
 function LegFacts({ current }: { current: NonNullable<Correction["inputs"]["current"]> }) {
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3">
       <Fields
         values={{
           targetId: current.targetId,
@@ -1154,7 +1154,7 @@ function LegFacts({ current }: { current: NonNullable<Correction["inputs"]["curr
 function CurrentCorrection({ projection }: { projection: Correction }) {
   const current = projection.context.current
   return (
-    <article className="space-y-3 rounded-lg border p-3">
+    <article className="flex flex-col gap-3 rounded-lg border p-3">
       <Fields
         values={{
           targetId: projection.context.targetId,
@@ -1202,7 +1202,7 @@ const identity = (value: AssetProjection["system"]["identity"] | null) =>
   value?._tag === "resolved" ? value.assetId : m["app.inspector.unresolved"]()
 function AssetHistory({ record }: { record: AssetProjection["history"][number] }) {
   return (
-    <article className="space-y-3 border-t pt-3">
+    <article className="flex flex-col gap-3 border-t pt-3">
       <Fields
         values={{
           id: record.id,
