@@ -1,4 +1,4 @@
-/** Principal-owned factual transaction inspection.
+/** Principal-owned transaction inspection with current decisions and stored run results.
  * @module TransactionDetailRepository
  */
 import type { UnsupportedJurisdictionError } from "@my/accounting"
@@ -75,6 +75,18 @@ export interface TransactionDetailCalculation {
   } | null
   /** Completeness of this transaction, independent of run status and current work. */
   readonly state: "complete" | "partial"
+  /** Money availability is independent of processing and run status; custody has no monetary result. */
+  readonly monetaryStatus: "available" | "partial" | "unavailable" | "not_applicable"
+  /** Stored remaining inventory; per-unit basis is never presented as or multiplied into a total. */
+  readonly derivedLots: ReadonlyArray<{
+    readonly sequence: number
+    readonly acquisitionEventId: string
+    readonly assetId: string
+    readonly custodyUnitId: string
+    readonly acquiredAt: Date
+    readonly remainingQuantity: string
+    readonly costBasisPerUnit: string | null
+  }>
   readonly allocations: ReadonlyArray<{
     readonly sequence: number
     readonly acquisitionEventId: string
@@ -112,7 +124,7 @@ export interface TransactionDetailCalculation {
   readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
 }
 
-/** Factual foundation, distinct from selected-run results and current correction projections. */
+/** Owned facts, selected-run results and independent current correction projections. */
 export interface TransactionDetail {
   readonly calculation: TransactionDetailCalculation
   readonly movementOverrides: ReadonlyArray<PrincipalTransactionOverrideProjection>
@@ -159,7 +171,7 @@ export interface TransactionDetailRepositoryService {
   >
 }
 
-/** Factual transaction inspection service. */
+/** Principal-owned transaction inspection service. */
 export class TransactionDetailRepository extends Context.Service<
   TransactionDetailRepository,
   TransactionDetailRepositoryService

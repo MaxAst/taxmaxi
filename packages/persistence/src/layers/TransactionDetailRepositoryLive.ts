@@ -300,6 +300,8 @@ const make = Effect.gen(function* () {
         return {
           run: null,
           state: "partial",
+          monetaryStatus: "unavailable",
+          derivedLots: [],
           allocations: [],
           income: [],
           blockers: [],
@@ -357,6 +359,25 @@ const make = Effect.gen(function* () {
           )
         )
         .orderBy(asc(schema.calculationRunAllocations.sequence))
+      const derivedLots = yield* executor
+        .select({
+          sequence: schema.calculationRunDerivedLots.sequence,
+          acquisitionEventId: schema.calculationRunDerivedLots.acquisitionEventId,
+          assetId: schema.calculationRunDerivedLots.assetId,
+          custodyUnitId: schema.calculationRunDerivedLots.custodyUnitId,
+          acquiredAt: schema.calculationRunDerivedLots.acquiredAt,
+          remainingQuantity: schema.calculationRunDerivedLots.remainingQuantity,
+          costBasisPerUnit: schema.calculationRunDerivedLots.costBasisPerUnit,
+        })
+        .from(schema.calculationRunDerivedLots)
+        .where(
+          and(
+            eq(schema.calculationRunDerivedLots.runId, run.id),
+            eq(schema.calculationRunDerivedLots.principalId, params.principalId),
+            inArray(schema.calculationRunDerivedLots.acquisitionEventId, eventIds)
+          )
+        )
+        .orderBy(asc(schema.calculationRunDerivedLots.sequence))
       const income = yield* executor
         .select({
           sequence: schema.calculationRunIncomeResults.sequence,
@@ -438,6 +459,15 @@ const make = Effect.gen(function* () {
           }
         })
       )
+      const exactLots = yield* Effect.forEach(derivedLots, (row) =>
+        Effect.gen(function* () {
+          return {
+            ...row,
+            remainingQuantity: yield* exactDecimal(row.remainingQuantity),
+            costBasisPerUnit: yield* exactNullable(row.costBasisPerUnit),
+          }
+        })
+      )
       const exactIncome = yield* Effect.forEach(income, (row) =>
         Effect.gen(function* () {
           return {
@@ -464,13 +494,46 @@ const make = Effect.gen(function* () {
             ? []
             : [projection.inputs.current.legId]
       })
+      const custodyIds = new Set(
+        movementOverrides.flatMap(
+          (projection) =>
+            projection.inputs.current?.custody.map((item) => item.reconciliationId) ?? []
+        )
+      )
+      const hasStoredResult = (id: string) =>
+        custodyIds.has(id) ||
+        allocations.some((row) => row.acquisitionEventId === id || row.dispositionEventId === id) ||
+        income.some((row) => row.eventId === id) ||
+        derivedLots.some((row) => row.acquisitionEventId === id)
+      const allMoneyKnown =
+        allocations.every(
+          (row) => row.costBasis !== null && row.proceeds !== null && row.gainLoss !== null
+        ) && derivedLots.every((row) => row.costBasisPerUnit !== null)
       const complete =
         expectedIds.length > 0 &&
-        expectedIds.every((id) => processedIds.includes(id)) &&
-        blockers.length === 0
+        expectedIds.every((id) => processedIds.includes(id) && hasStoredResult(id)) &&
+        blockers.length === 0 &&
+        allMoneyKnown
+      const hasMoney =
+        allocations.some(
+          (row) => row.costBasis !== null || row.proceeds !== null || row.gainLoss !== null
+        ) ||
+        income.length > 0 ||
+        derivedLots.some((row) => row.costBasisPerUnit !== null)
+      const custodyOnly = expectedIds.length > 0 && expectedIds.every((id) => custodyIds.has(id))
+      const monetaryStatus =
+        custodyOnly && complete
+          ? "not_applicable"
+          : !hasMoney
+            ? "unavailable"
+            : complete
+              ? "available"
+              : "partial"
       return {
         run,
         state: complete ? "complete" : "partial",
+        monetaryStatus,
+        derivedLots: exactLots,
         allocations: exactAllocations,
         income: exactIncome,
         blockers: exactBlockers,
