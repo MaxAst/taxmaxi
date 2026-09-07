@@ -134,6 +134,28 @@ const makeRefreshingGoogleProvider = (): AuthProvider => ({
     ),
 })
 
+const MIXED_CASE_PROVIDER_EMAIL = "Person@Gmail.test"
+
+const makeMixedCaseEmailGoogleProvider = (): AuthProvider => ({
+  ...makeGoogleProvider(),
+  handleCallback: () =>
+    Effect.succeed(
+      AuthResult.make({
+        provider: "google",
+        providerId: ProviderId.make("mixed-case-google-user"),
+        email: Email.make(MIXED_CASE_PROVIDER_EMAIL),
+        displayName: "Person",
+        emailVerified: true,
+        providerData: Option.some(
+          ProviderData.make({
+            profile: { email: MIXED_CASE_PROVIDER_EMAIL },
+          })
+        ),
+        oauthCredentials: Option.none(),
+      })
+    ),
+})
+
 const makeLocalProvider = ({
   emailVerified,
 }: {
@@ -645,6 +667,33 @@ describe("AuthServiceLive OAuth orchestration", () => {
     })
   )
 
+  it.effect(
+    "stores the canonical account email for an OAuth-created account and keeps the provider payload as reported",
+    () =>
+      Effect.gen(function* () {
+        const harness = makeHarness([makeMixedCaseEmailGoogleProvider()])
+
+        const started = yield* Effect.promise(() =>
+          harness.runWithAuth((auth) => auth.startOAuthLogin("google"))
+        )
+        const login = yield* Effect.promise(() =>
+          harness.runWithAuth((auth) => auth.completeOAuthLogin("google", "person", started.state))
+        )
+
+        expect(login.user.email).toBe(Email.make("person@gmail.test"))
+
+        const identities = Array.from(harness.state.identities.values())
+        expect(identities).toHaveLength(1)
+        expect(identities[0]?.providerData).toEqual(
+          Option.some(
+            ProviderData.make({
+              profile: { email: MIXED_CASE_PROVIDER_EMAIL },
+            })
+          )
+        )
+      })
+  )
+
   it.effect("refreshes provider metadata when an OAuth identity returns", () =>
     Effect.gen(function* () {
       const harness = makeHarness([makeRefreshingGoogleProvider()])
@@ -705,6 +754,58 @@ describe("AuthServiceLive OAuth orchestration", () => {
       ).length
       expect(linkedIdentityCount).toBe(1)
     })
+  )
+
+  it.effect(
+    "register stores the canonical email, rejects a casing variant, and logs in with any casing",
+    () =>
+      Effect.gen(function* () {
+        const harness = makeHarness([makeLocalProvider({ emailVerified: true })])
+
+        const user = yield* Effect.promise(() =>
+          harness.runWithAuth((auth) =>
+            auth.register(Email.make("Owner@Example.com"), "password123", "Owner")
+          )
+        )
+
+        expect(user.email).toBe(Email.make("owner@example.com"))
+        const localIdentities = Array.from(harness.state.identities.values()).filter(
+          (identity) => identity.provider === "local"
+        )
+        expect(localIdentities.map((identity) => identity.providerId)).toEqual([
+          ProviderId.make("owner@example.com"),
+        ])
+
+        const conflict = yield* Effect.promise(() =>
+          harness.runWithAuthEither((auth) =>
+            auth.register(Email.make("OWNER@example.com"), "password123", "Owner Again")
+          )
+        )
+
+        expect(Result.isFailure(conflict)).toBe(true)
+        if (Result.isFailure(conflict)) {
+          expect(conflict.failure._tag).toBe("UserAlreadyExistsError")
+          if (conflict.failure._tag === "UserAlreadyExistsError") {
+            expect(conflict.failure.email).toBe(Email.make("owner@example.com"))
+          }
+        }
+        expect(harness.state.users.size).toBe(1)
+
+        const login = yield* Effect.promise(() =>
+          harness.runWithAuth((auth) =>
+            auth.login(
+              "local",
+              LocalAuthRequest.make({
+                email: Email.make("OWNER@Example.com"),
+                password: Redacted.make("password123"),
+              })
+            )
+          )
+        )
+
+        expect(login.user.id).toBe(user.id)
+        expect(harness.state.users.size).toBe(1)
+      })
   )
 
   it.effect("register preserves an explicitly provided display name", () =>

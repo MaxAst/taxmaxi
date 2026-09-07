@@ -28,8 +28,9 @@ import {
 } from "@my/sync-engine/services"
 import { AuthServiceLive } from "../../persistence/src/layers/AuthServiceLive.ts"
 import { LocalAuthProviderLive } from "../../persistence/src/layers/LocalAuthProviderLive.ts"
-import { runSqlUnsafe } from "../../persistence/src/layers/PgClientLive.ts"
+import { drizzle, runSqlUnsafe } from "../../persistence/src/layers/PgClientLive.ts"
 import { RepositoriesLive } from "../../persistence/src/layers/RepositoriesLive.ts"
+import { schema } from "../../persistence/src/schema/index.ts"
 import {
   AuthServiceConfig,
   SessionDurationConfig,
@@ -62,6 +63,22 @@ const AnonSessionServiceTestLive = AnonSessionServiceLive.pipe(
 
 const runTestSql = ({ statement }: { readonly statement: string }) =>
   runSqlUnsafe({ statement }).pipe(Effect.provide(TestPgClientLive), Effect.asVoid, Effect.scoped)
+
+const readStoredAccountEmails = () =>
+  Effect.gen(function* () {
+    const db = yield* drizzle
+    const rows = yield* db.select({ email: schema.users.email }).from(schema.users)
+    return rows.map((row) => row.email)
+  }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+
+const readStoredLocalProviderIds = () =>
+  Effect.gen(function* () {
+    const db = yield* drizzle
+    const rows = yield* db
+      .select({ provider: schema.identities.provider, providerId: schema.identities.providerId })
+      .from(schema.identities)
+    return rows.filter((row) => row.provider === "local").map((row) => row.providerId)
+  }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
 
 const clearAuthTables = () =>
   runTestSql({
@@ -780,6 +797,146 @@ describe("AuthApiLive integration", () => {
             },
           ],
         })
+      }).pipe(Effect.scoped)
+  )
+
+  it.effect("stores the canonical account email and accepts any casing of it for login", () =>
+    Effect.gen(function* () {
+      const { handler, sentVerificationCodes } = yield* makeAuthHandlerScoped
+
+      const canonicalEmail = "max+tax@example.com"
+      const password = "password123"
+
+      const registerResponse = yield* postJson({
+        handler,
+        path: "/auth/register",
+        payload: {
+          email: "Max+Tax@Example.com ",
+          password,
+          displayName: "Max",
+        },
+      })
+
+      expect(registerResponse.status).toBe(201)
+      expect(yield* jsonBody(registerResponse)).toMatchObject({
+        email: canonicalEmail,
+        redirectTo: "/verify-email",
+      })
+      expect(sentVerificationCodes[0]?.email).toBe(canonicalEmail)
+
+      const verificationRequestId = yield* Effect.sync(() =>
+        getCookieValue({
+          setCookies: getSetCookies(registerResponse),
+          name: "taxmaxi_verification",
+        })
+      )
+
+      const verifyResponse = yield* postJson({
+        handler,
+        path: "/auth/verify-email",
+        payload: {
+          code: sentVerificationCodes[0]?.code,
+        },
+        cookie: makeCookieHeader({
+          taxmaxi_verification: verificationRequestId,
+        }),
+      })
+
+      expect(verifyResponse.status).toBe(200)
+
+      const verifiedSessionToken = yield* Effect.sync(() =>
+        getCookieValue({
+          setCookies: getSetCookies(verifyResponse),
+          name: "taxmaxi_session",
+        })
+      )
+
+      const meResponse = yield* getRequest({
+        handler,
+        path: "/auth/me",
+        cookie: makeCookieHeader({
+          taxmaxi_session: verifiedSessionToken,
+        }),
+      })
+
+      expect(meResponse.status).toBe(200)
+      expect(yield* jsonBody(meResponse)).toMatchObject({
+        account: {
+          email: canonicalEmail,
+        },
+      })
+      expect(yield* readStoredAccountEmails()).toEqual([canonicalEmail])
+      expect(yield* readStoredLocalProviderIds()).toEqual([canonicalEmail])
+
+      const loginResponse = yield* postJson({
+        handler,
+        path: "/auth/login",
+        payload: {
+          provider: "local",
+          credentials: {
+            email: "MAX+TAX@EXAMPLE.COM",
+            password,
+          },
+        },
+      })
+
+      expect(loginResponse.status).toBe(200)
+      expect(yield* jsonBody(loginResponse)).toMatchObject({
+        user: {
+          email: canonicalEmail,
+        },
+      })
+
+      const loginSessionToken = yield* Effect.sync(() =>
+        getCookieValue({
+          setCookies: getSetCookies(loginResponse),
+          name: "taxmaxi_session",
+        })
+      )
+
+      expect(loginSessionToken.length).toBeGreaterThanOrEqual(32)
+      expect(loginSessionToken).not.toBe(verifiedSessionToken)
+    }).pipe(Effect.scoped)
+  )
+
+  it.effect(
+    "rejects a casing variant of a registered email as a conflict and creates nothing",
+    () =>
+      Effect.gen(function* () {
+        const { handler } = yield* makeAuthHandlerScoped
+
+        const canonicalEmail = "taken@taxmaxi.test"
+        const password = "password123"
+
+        const firstRegisterResponse = yield* postJson({
+          handler,
+          path: "/auth/register",
+          payload: {
+            email: canonicalEmail,
+            password,
+            displayName: "First",
+          },
+        })
+
+        expect(firstRegisterResponse.status).toBe(201)
+
+        const secondRegisterResponse = yield* postJson({
+          handler,
+          path: "/auth/register",
+          payload: {
+            email: "Taken@TaxMaxi.test",
+            password,
+            displayName: "Second",
+          },
+        })
+
+        expect(secondRegisterResponse.status).toBe(409)
+        expect(yield* jsonBody(secondRegisterResponse)).toMatchObject({
+          _tag: "UserExistsError",
+          email: canonicalEmail,
+        })
+        expect(yield* readStoredAccountEmails()).toEqual([canonicalEmail])
+        expect(yield* readStoredLocalProviderIds()).toEqual([canonicalEmail])
       }).pipe(Effect.scoped)
   )
 

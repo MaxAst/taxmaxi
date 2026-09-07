@@ -1,4 +1,4 @@
-import { and, asc, eq, ilike, isNull } from "drizzle-orm"
+import { and, asc, eq, isNull, sql } from "drizzle-orm"
 import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -7,6 +7,7 @@ import {
   AuthUser,
   AuthUserId,
   Email,
+  canonicalizeEmail,
   inferDisplayNameFromEmail,
   type AuthProviderType,
   type UserRole,
@@ -109,12 +110,17 @@ const make = Effect.gen(function* () {
       return Option.some(user)
     }).pipe(wrapSqlError("findById"))
 
+  /**
+   * Account emails are stored in canonical form (#133 D01), so any casing of
+   * the argument finds the same account. The comparison runs on `lower(email)`
+   * and is served by the `users_email_lower_uidx` index.
+   */
   const findByEmail: UserRepositoryService["findByEmail"] = (email) =>
     Effect.gen(function* () {
       const [row] = yield* db
         .select(selectAuthUserFields)
         .from(users)
-        .where(ilike(users.email, email))
+        .where(eq(sql`lower(${users.email})`, canonicalizeEmail(email)))
 
       if (row === undefined) {
         return Option.none<AuthUser>()
