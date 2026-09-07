@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
-import { keepPreviousData, useQuery } from "@tanstack/react-query"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useRouteContext } from "@tanstack/react-router"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import { Ellipsis, RotateCcw } from "lucide-react"
@@ -34,7 +34,7 @@ import {
   type AccountScope,
   type TaxYear,
 } from "#/lib/dashboard-types"
-import { queries } from "#/integrations/taxmaxi/queries"
+import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 import { TRANSACTION_PAGE_SIZE, TransactionsTable } from "./transactions-table"
 import { SourceSyncIsland } from "./source-sync-island"
 
@@ -75,6 +75,36 @@ export function Dashboard({
     select: (context) => context.taxmaxi(),
   })
 
+  const queryClient = useQueryClient()
+  const [authenticationLost, setAuthenticationLost] = useState(false)
+  const [isVisible, setIsVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState !== "hidden"
+  )
+  const [syncCompletedAt, setSyncCompletedAt] = useState<number | null>(null)
+  const [fastRefresh, setFastRefresh] = useState(false)
+  const observedRunIds = useRef(new Set<string | null>())
+
+  const handleUnauthorized = useCallback(async () => {
+    setAuthenticationLost(true)
+    await queryClient.cancelQueries({ queryKey: queryKeys.all })
+    await onUnauthorized?.()
+  }, [onUnauthorized, queryClient])
+
+  useEffect(() => {
+    const onVisibilityChange = () => setIsVisible(document.visibilityState !== "hidden")
+    document.addEventListener("visibilitychange", onVisibilityChange)
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange)
+  }, [])
+
+  useEffect(() => {
+    if (syncCompletedAt === null || authenticationLost) return
+    const timeout = window.setTimeout(
+      () => setFastRefresh(false),
+      Math.max(0, syncCompletedAt + 60_000 - Date.now())
+    )
+    return () => window.clearTimeout(timeout)
+  }, [authenticationLost, syncCompletedAt])
+
   const [accountScope, setAccountScope] = useState<AccountScope>(ALL_ACCOUNTS)
   const [taxYear] = useState<TaxYear>(2025)
   const [transactionCursors, setTransactionCursors] = useState<ReadonlyArray<string | null>>([null])
@@ -100,26 +130,47 @@ export function Dashboard({
   const selectedSourceId = accountScope === ALL_ACCOUNTS ? undefined : accountScope
   const portfolioQuery = useQuery({
     ...queries.portfolioAssets(taxmaxi, selectedSourceId),
-    placeholderData: keepPreviousData,
+    enabled: !authenticationLost,
+    refetchInterval: (query) => {
+      if (!isVisible || authenticationLost || isTaxMaxiUnauthorizedError(query.state.error))
+        return false
+      // After bounded retries, use the ordinary cadence even during a local fast window.
+      if (query.state.status === "error") return 30_000
+      return fastRefresh || query.state.data?.latestRun?.status === "running" ? 2_000 : 30_000
+    },
   })
   const activeHoldings = portfolioQuery.data?.assets ?? []
-  const isSwitchingPortfolio = portfolioQuery.isFetching && portfolioQuery.isPlaceholderData
+  const isSwitchingPortfolio = portfolioQuery.isPending
   const transactionCursor = transactionCursors.at(-1) ?? null
-  const transactionQuery = useQuery(
-    queries.transactionList(taxmaxi, {
+  const transactionQuery = useQuery({
+    ...queries.transactionList(taxmaxi, {
       cursor: transactionCursor,
       limit: TRANSACTION_PAGE_SIZE,
-    })
-  )
+    }),
+    enabled: !authenticationLost,
+  })
+
+  const activeRunId = portfolioQuery.data?.activeRun?.runId
+  const hasPortfolio = portfolioQuery.data !== undefined
+  useEffect(() => {
+    if (!hasPortfolio || authenticationLost) return
+    const runId = activeRunId ?? null
+    if (observedRunIds.current.has(runId)) return
+    const isFirstResponse = observedRunIds.current.size === 0
+    observedRunIds.current.add(runId)
+    if (isFirstResponse) return
+    void queryClient.invalidateQueries({ queryKey: queryKeys.sources() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.transactions() })
+  }, [activeRunId, authenticationLost, hasPortfolio, queryClient])
 
   useEffect(() => {
     if (
       isTaxMaxiUnauthorizedError(portfolioQuery.error) ||
       isTaxMaxiUnauthorizedError(transactionQuery.error)
     ) {
-      void onUnauthorized?.()
+      void handleUnauthorized()
     }
-  }, [onUnauthorized, portfolioQuery.error, transactionQuery.error])
+  }, [handleUnauthorized, portfolioQuery.error, transactionQuery.error])
 
   const goToNextTransactionPage = () => {
     const nextCursor = transactionQuery.data?.page.nextCursor
@@ -134,9 +185,12 @@ export function Dashboard({
   const handleSourceSyncCompleted = useCallback(
     async (sourceId: AccountId) => {
       setTransactionCursors([null])
+      setSyncCompletedAt(Date.now())
+      setFastRefresh(true)
+      void queryClient.invalidateQueries({ queryKey: ["taxmaxi", "portfolio"] })
       await onSourceSyncCompleted?.(sourceId)
     },
-    [onSourceSyncCompleted]
+    [onSourceSyncCompleted, queryClient]
   )
 
   const summary = useMemo<DashboardSummary>(() => {
@@ -201,7 +255,7 @@ export function Dashboard({
     accountsById,
     getSourceSyncJob,
     onCompleted: handleSourceSyncCompleted,
-    onUnauthorized,
+    onUnauthorized: handleUnauthorized,
     startSourceReplay: replaySourceSync,
     startSourceSync,
   })
@@ -244,7 +298,27 @@ export function Dashboard({
       >
         <div aria-busy={isSwitchingPortfolio} className="flex min-w-0 flex-col gap-8 py-6 sm:py-8">
           <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
-            <PortfolioOverview summary={summary} />
+            <div className="min-w-0 space-y-3">
+              <PortfolioOverview key={selectedSourceId ?? ALL_ACCOUNTS} summary={summary} />
+              {syncCompletedAt === null ? null : (
+                <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                  <p role="status">
+                    {fastRefresh
+                      ? m["app.calculation.checking"]()
+                      : m["app.calculation.unconfirmed"]()}
+                  </p>
+                  <Button
+                    className="min-h-11"
+                    disabled={portfolioQuery.isFetching || authenticationLost}
+                    onClick={() => void portfolioQuery.refetch()}
+                    size="sm"
+                    variant="outline"
+                  >
+                    {m["app.calculation.refresh"]()}
+                  </Button>
+                </div>
+              )}
+            </div>
             <SelectedSourceMenu
               account={replayAccount}
               isSyncing={replayAccount !== undefined && syncingSourceIds.has(replayAccount.id)}
