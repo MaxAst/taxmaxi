@@ -183,8 +183,9 @@ export function useSourceSyncs({
   )
 
   // One job read, shared by the poll loop and the reload reconnect. The
-  // response only lands on the item that still carries this job id, so a late
-  // response can never overwrite a newer job or a terminal state.
+  // response only lands on the item that still carries this job id, and a
+  // settled item never changes status, so a late response can never overwrite
+  // a newer job or move a settled item back to running.
   const readSourceSyncJob = useCallback(
     (sync: PolledSourceSync) => {
       if (!getSourceSyncJob) {
@@ -209,11 +210,13 @@ export function useSourceSyncs({
           setActiveSyncs((syncs) => {
             const currentSync = syncs.find((candidate) => candidate.id === sync.id)
 
+            // A settled item keeps its status. A response that confirms that
+            // status may still land, so the one read after a `credit_required`
+            // seed carries the job's `creditOutcome` onto the item.
             if (
               !currentSync ||
               currentSync.jobId !== jobId ||
-              currentSync.status === "completed" ||
-              currentSync.status === "failed"
+              (isSettledSourceSyncStatus(currentSync.status) && job.status !== currentSync.status)
             ) {
               return syncs
             }
@@ -408,6 +411,15 @@ function isReconnectableSeedStatus(status: SourceSyncStatus): boolean {
   return status === "queued" || status === "running" || status === "credit_required"
 }
 
+/**
+ * A settled item never changes status again under its job id. `credit_required`
+ * is settled too: continuing after billing goes through the start call, which
+ * creates a new job and a new item (#108 D06).
+ */
+function isSettledSourceSyncStatus(status: SourceSyncStatus): boolean {
+  return status === "completed" || status === "failed" || status === "credit_required"
+}
+
 function makeSeededSourceSync(
   seed: SourceSyncSeed,
   source: Account
@@ -485,7 +497,7 @@ function failPolledSourceSync({
     syncs.map((sync) =>
       sync.sourceId === sourceId &&
       sync.jobId === expectedJobId &&
-      (sync.status === "queued" || sync.status === "running")
+      !isSettledSourceSyncStatus(sync.status)
         ? { ...sync, message, progress: 100, status: "failed" }
         : sync
     )
