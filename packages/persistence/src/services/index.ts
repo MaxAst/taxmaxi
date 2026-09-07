@@ -22,3 +22,5 @@ export * from "./HistoricalAssetPriceRepository.ts"
 export * from "./PrincipalAssetOverrideRepository.ts"
 
 export * from "./PrincipalTransactionOverrideRepository.ts"
+
+export * from "./TransactionDetailRepository.ts"

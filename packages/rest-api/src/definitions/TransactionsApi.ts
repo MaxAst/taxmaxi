@@ -1,11 +1,16 @@
 /**
- * TransactionsApi - Principal-owned canonical transaction list.
+ * TransactionsApi - Principal-owned canonical transaction list and detail.
  *
  * @module TransactionsApi
  */
 
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import * as Schema from "effect/Schema"
+import { AssetOverrideCurrentResponse } from "./AssetOverridesApi.ts"
+import {
+  TransactionOverrideCurrentResponse,
+  TransactionOverrideScopeQuery,
+} from "./TransactionOverridesApi.ts"
 import { InternalServerError } from "./ApiErrors.ts"
 import { SourceNotFoundError } from "./SourcesApi.ts"
 import { AuthMiddleware } from "./AuthMiddleware.ts"
@@ -77,6 +82,177 @@ export class TransactionListResponse extends Schema.Class<TransactionListRespons
   totalCount: Schema.Finite,
 }) {}
 
+/** Missing, foreign and activity identifiers share the same public failure. */
+export class TransactionNotFoundError extends Schema.TaggedError<TransactionNotFoundError>()(
+  "TransactionNotFoundError",
+  { code: Schema.Literal("transaction_not_found") },
+  { httpApiStatus: 404 }
+) {}
+
+/** Explicit selected year in the supported DE/EUR scope. */
+export const TransactionDetailQuery = TransactionOverrideScopeQuery
+
+const NullableText = Schema.NullOr(Schema.String)
+const IsoDate = Schema.toEncoded(Schema.DateTimeUtcFromString)
+const EvidenceStatus = Schema.Literals(["available", "unavailable"])
+const Evidence = Schema.Struct({
+  sourceId: Schema.String,
+  id: Schema.String,
+  provider: Schema.String,
+  recordType: Schema.String,
+  externalRecordId: Schema.String,
+  occurredAt: IsoDate,
+  importedAt: IsoDate,
+})
+
+/** Owned recorded facts, current decisions and one immutable calculation snapshot. */
+export const TransactionDetailResponse = Schema.Struct({
+  transactionId: Schema.String,
+  timestamp: IsoDate,
+  source: TransactionListSource,
+  sourceRawRecordId: NullableText,
+  transactionType: NullableText,
+  providerTransactionType: NullableText,
+  description: NullableText,
+  externalId: NullableText,
+  classificationHistoryStatus: Schema.Literal("unavailable"),
+  sourceEvidence: Schema.Array(
+    Schema.Struct({
+      origin: Schema.Literals(["transaction", "leg", "provider_transfer", "canonical_transfer"]),
+      originId: Schema.String,
+      sourceId: Schema.String,
+      sourceRawRecordId: NullableText,
+      evidence: Schema.NullOr(Evidence),
+      status: EvidenceStatus,
+    })
+  ),
+  movements: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      transactionId: NullableText,
+      sourceId: Schema.String,
+      timestamp: IsoDate,
+      assetId: Schema.String,
+      amount: Schema.String,
+      kind: Schema.Literals(["acquisition", "disposal", "income", "fee"]),
+      provenance: Schema.Literals(["deterministic", "rule", "ai", "manual"]),
+      derivationRule: NullableText,
+      movementCorrectionTargetId: Schema.String,
+      sourceRawRecordId: NullableText,
+      sourceRepresentationUseId: NullableText,
+      providerAssetRowId: NullableText,
+      assetRepresentationId: NullableText,
+      originKind: Schema.Literals(["provider_transfer", "canonical_transfer", "none"]),
+      providerTransferId: NullableText,
+      sourceTransferId: NullableText,
+      feeForTransactionId: NullableText,
+      evidence: Schema.NullOr(Evidence),
+      evidenceStatus: EvidenceStatus,
+    })
+  ),
+  reconciliations: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      providerTransferId: Schema.String,
+      canonicalTransferId: NullableText,
+      canonicalTransactionId: NullableText,
+      status: Schema.Literals(["pending", "needs_review", "approved", "rejected", "auto_applied"]),
+      matchReason: Schema.String,
+      deterministic: Schema.Boolean,
+    })
+  ),
+  movementOverrides: Schema.Array(TransactionOverrideCurrentResponse),
+  assetOverrides: Schema.Array(
+    Schema.Struct({
+      movementId: Schema.String,
+      projection: Schema.NullOr(AssetOverrideCurrentResponse),
+    })
+  ),
+  calculation: Schema.Struct({
+    run: Schema.NullOr(
+      Schema.Struct({
+        id: Schema.String,
+        jurisdiction: Schema.String,
+        taxYear: Schema.Int,
+        reportingCurrency: Schema.String,
+        status: Schema.Literals(["pending", "running", "complete", "partial", "failed"]),
+        engineVersion: Schema.String,
+        ruleSetVersion: Schema.String,
+        inputLedgerRevision: Schema.String,
+        valuationRevision: Schema.String,
+        failureCode: NullableText,
+      })
+    ),
+    state: Schema.Literals(["complete", "partial"]),
+    monetaryStatus: Schema.Literals(["available", "partial", "unavailable", "not_applicable"]),
+    derivedLots: Schema.Array(
+      Schema.Struct({
+        sequence: Schema.Int,
+        acquisitionEventId: Schema.String,
+        assetId: Schema.String,
+        custodyUnitId: Schema.String,
+        acquiredAt: IsoDate,
+        remainingQuantity: Schema.String,
+        costBasisPerUnit: NullableText,
+      })
+    ),
+    allocations: Schema.Array(
+      Schema.Struct({
+        sequence: Schema.Int,
+        acquisitionEventId: Schema.String,
+        dispositionEventId: Schema.String,
+        assetId: Schema.String,
+        custodyUnitId: Schema.String,
+        acquiredAt: IsoDate,
+        disposedAt: IsoDate,
+        quantity: Schema.String,
+        costBasis: NullableText,
+        proceeds: NullableText,
+        gainLoss: NullableText,
+        treatmentCodes: Schema.Array(Schema.String),
+      })
+    ),
+    income: Schema.Array(
+      Schema.Struct({
+        sequence: Schema.Int,
+        sourceId: Schema.String,
+        eventId: Schema.String,
+        assetId: Schema.String,
+        occurredAt: IsoDate,
+        quantity: Schema.String,
+        value: Schema.String,
+        treatmentCodes: Schema.Array(Schema.String),
+      })
+    ),
+    blockers: Schema.Array(
+      Schema.Struct({
+        sequence: Schema.Int,
+        eventId: Schema.String,
+        code: Schema.String,
+        assetId: NullableText,
+        providerAssetRowId: NullableText,
+        custodyUnitId: Schema.String,
+        missingQuantity: NullableText,
+      })
+    ),
+    processedEventIds: Schema.Array(Schema.String),
+    correctionInputs: TransactionOverrideCurrentResponse.fields.inputs.fields.corrections,
+  }),
+})
+
+const getTransaction = HttpApiEndpoint.get("getTransaction", "/transactions/:transactionId", {
+  params: Schema.Struct({ transactionId: Schema.String.check(Schema.isUUID()) }),
+  query: TransactionDetailQuery,
+  success: TransactionDetailResponse,
+  error: [TransactionNotFoundError, TransactionBadRequestError, InternalServerError],
+}).annotateMerge(
+  OpenApi.annotations({
+    summary: "Get transaction detail",
+    description:
+      "Returns owned recorded evidence, current correction histories and exact stored results for one selected DE/EUR calculation run. Unknown monetary values remain null.",
+  })
+)
+
 const listTransactions = HttpApiEndpoint.get("listTransactions", "/transactions", {
   query: TransactionListQuery,
   success: TransactionListResponse,
@@ -90,7 +266,7 @@ const listTransactions = HttpApiEndpoint.get("listTransactions", "/transactions"
 )
 
 export class TransactionsApi extends HttpApiGroup.make("transactions")
-  .add(listTransactions)
+  .add(listTransactions, getTransaction)
   .middleware(AuthMiddleware)
   .prefix("/v1")
   .annotateMerge(

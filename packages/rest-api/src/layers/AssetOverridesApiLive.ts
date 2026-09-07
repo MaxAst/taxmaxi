@@ -127,7 +127,8 @@ const toRecomputationResponse = (recomputation: PrincipalAssetOverrideRecomputat
             : AssetOverrideCalculationRunResponse.make(recomputation.calculationRun),
       })
 
-const toCurrentResponse = (
+/** Serialize the existing independent asset decision and retained history projection. */
+export const toAssetOverrideResponse = (
   projection: PrincipalAssetOverrideProjection
 ): AssetOverrideCurrentResponse =>
   AssetOverrideCurrentResponse.make({
@@ -160,7 +161,7 @@ const toValidationResponse = (
 
   return AssetOverrideReadyValidationResponse.make({
     asset: toSelectedAsset(validation.asset),
-    projection: toCurrentResponse(validation.projection),
+    projection: toAssetOverrideResponse(validation.projection),
     checkedTechnicalBlockerKinds: validation.checkedTechnicalBlockerKinds,
     technicalBlockers: validation.technicalBlockers,
     warnings: validation.warnings.map((warning) =>
@@ -202,7 +203,7 @@ const toMutationConflictError = (
   new AssetOverrideMutationConflictError({
     code: "override_conflict",
     conflictKinds: [...error.conflictKinds],
-    currentProjection: toCurrentResponse(error.currentProjection),
+    currentProjection: toAssetOverrideResponse(error.currentProjection),
     currentActiveOverrideId: error.currentActiveOverrideId,
     currentSystemRevision: error.currentSystemRevision,
     expectedActiveOverrideId:
@@ -229,7 +230,7 @@ const mapMutationError = (
           error.validation,
           error.currentProjection.recomputation
         ),
-        currentProjection: toCurrentResponse(error.currentProjection),
+        currentProjection: toAssetOverrideResponse(error.currentProjection),
       })
     case "PersistenceError":
       return internalError("Failed to change the principal asset override.")
@@ -291,7 +292,7 @@ export const AssetOverridesApiLive = HttpApiBuilder.group(
         .handle("getAssetOverrideCurrent", ({ query }) =>
           Effect.gen(function* () {
             const projection = yield* findOwnedProjection(query)
-            return toCurrentResponse(projection)
+            return toAssetOverrideResponse(projection)
           })
         )
         .handle("getAssetOverrideHistory", ({ query }) =>
@@ -353,7 +354,7 @@ export const AssetOverridesApiLive = HttpApiBuilder.group(
 
             if (Option.isNone(projection)) return yield* targetNotFound()
 
-            return toCurrentResponse(projection.value)
+            return toAssetOverrideResponse(projection.value)
           })
         )
         .handle("replaceAssetOverride", ({ payload, query }) =>
@@ -376,7 +377,7 @@ export const AssetOverridesApiLive = HttpApiBuilder.group(
 
             if (Option.isNone(projection)) return yield* targetNotFound()
 
-            return toCurrentResponse(projection.value)
+            return toAssetOverrideResponse(projection.value)
           })
         )
         .handle("withdrawAssetOverride", ({ payload, query }) =>
@@ -396,7 +397,7 @@ export const AssetOverridesApiLive = HttpApiBuilder.group(
 
             if (Option.isNone(projection)) return yield* targetNotFound()
 
-            return toCurrentResponse(projection.value)
+            return toAssetOverrideResponse(projection.value)
           })
         )
     })
