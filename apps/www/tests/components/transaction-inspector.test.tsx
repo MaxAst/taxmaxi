@@ -267,7 +267,7 @@ function richDetail(): TransactionDetail {
     sourceId: IDS.source,
     id: IDS.raw,
     provider: "coinbase",
-    recordType: "transaction",
+    recordType: "coinbase_transaction",
     externalRecordId: "purchase-3",
     occurredAt: TIME,
     importedAt: "2025-03-02T00:00:00.000Z",
@@ -514,6 +514,73 @@ describe("TransactionInspector", () => {
           )
         ).toBeTruthy()
         expect(screen.queryByText("deterministic_wallet_receipt_match")).toBeNull()
+      } finally {
+        cleanup()
+        await setLocale("en", { reload: false })
+        window.history.replaceState(null, "", originalUrl)
+      }
+    }
+  )
+
+  it.each(["en", "de"] as const)(
+    "localizes calculation and technical blockers in %s while retaining audit codes",
+    async (locale) => {
+      const originalUrl = window.location.href
+      window.history.replaceState(null, "", "/app")
+      await setLocale(locale, { reload: false })
+      try {
+        const detail = richDetail()
+        const { taxmaxi } = sdkClient({
+          ...detail,
+          assetOverrides: detail.assetOverrides.map((item) => ({
+            ...item,
+            projection: item.projection
+              ? {
+                  ...item.projection,
+                  technicalBlockers: ["missing_decimals"],
+                  checkedTechnicalBlockerKinds: ["missing_decimals"],
+                  effectiveDecision: {
+                    _tag: "blocked",
+                    identity: { _tag: "resolved", assetId: IDS.replacementAsset },
+                    reason: "technical_blocker",
+                    technicalBlockers: ["missing_decimals"],
+                  },
+                }
+              : null,
+          })),
+          calculation: {
+            ...detail.calculation,
+            blockers: ["missing_valuation", "future_blocker"].map((code, sequence) => ({
+              sequence,
+              eventId: IDS.leg,
+              code,
+              assetId: IDS.asset,
+              providerAssetRowId: null,
+              custodyUnitId: IDS.source,
+              missingQuantity: null,
+            })),
+          },
+        })
+        mount(taxmaxi)
+        await screen.findByText(locale === "en" ? "Valuation missing" : "Bewertung fehlt")
+        expect(
+          screen.getByText(locale === "en" ? "Coinbase transaction" : "Coinbase-Transaktion")
+        ).toBeTruthy()
+        expect(
+          screen.getByText(locale === "en" ? "Unknown blocker" : "Unbekannter Blocker")
+        ).toBeTruthy()
+        expect(
+          screen.getAllByText(
+            locale === "en" ? "Asset decimal precision missing" : "Dezimalstellen des Assets fehlen"
+          ).length
+        ).toBeGreaterThan(0)
+        expect(screen.getByText("future_blocker")).toBeTruthy()
+        expect(screen.getByText("missing_valuation")).toBeTruthy()
+        expect(
+          screen.getAllByText(
+            locale === "en" ? "Unrecognized value: provider-buy" : "Unbekannter Wert: provider-buy"
+          ).length
+        ).toBeGreaterThan(0)
       } finally {
         cleanup()
         await setLocale("en", { reload: false })

@@ -1237,5 +1237,13 @@
   "app.inspector.reconciliation.candidate_set_changed_during_reconciliation": "Mögliche Zuordnungen haben sich während des Abgleichs geändert",
   "app.inspector.reconciliation.canonical_transfer_already_approved": "Transfer hat bereits eine bestätigte Verknüpfung",
   "app.inspector.reconciliation.canonical_transfer_already_reconciled": "Transfer wurde bereits abgeglichen",
-  "app.inspector.reconciliation.unknown": "Unbekannter Abgleichsgrund: {code}"
+  "app.inspector.reconciliation.unknown": "Unbekannter Abgleichsgrund: {code}",
+  "app.inspector.unrecognizedValue": "Unbekannter Wert: {code}",
+  "app.inspector.state.native": "Natives Asset",
+  "app.inspector.state.token": "Token",
+  "app.inspector.state.nft": "NFT",
+  "app.inspector.state.coinbase_transaction": "Coinbase-Transaktion",
+  "app.inspector.state.coinbase_account": "Coinbase-Konto",
+  "app.inspector.state.solana_transaction_full": "Vollständige Solana-Transaktion",
+  "app.inspector.state.uncategorized": "Nicht kategorisiert"
 }

@@ -1237,5 +1237,13 @@
   "app.inspector.reconciliation.candidate_set_changed_during_reconciliation": "Possible matches changed during reconciliation",
   "app.inspector.reconciliation.canonical_transfer_already_approved": "Transfer already has an approved link",
   "app.inspector.reconciliation.canonical_transfer_already_reconciled": "Transfer has already been reconciled",
-  "app.inspector.reconciliation.unknown": "Unrecognized reconciliation reason: {code}"
+  "app.inspector.reconciliation.unknown": "Unrecognized reconciliation reason: {code}",
+  "app.inspector.unrecognizedValue": "Unrecognized value: {code}",
+  "app.inspector.state.native": "Native asset",
+  "app.inspector.state.token": "Token",
+  "app.inspector.state.nft": "NFT",
+  "app.inspector.state.coinbase_transaction": "Coinbase transaction",
+  "app.inspector.state.coinbase_account": "Coinbase account",
+  "app.inspector.state.solana_transaction_full": "Full Solana transaction",
+  "app.inspector.state.uncategorized": "Uncategorized"
 }

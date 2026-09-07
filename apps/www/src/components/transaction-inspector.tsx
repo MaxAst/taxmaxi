@@ -345,6 +345,43 @@ function Field({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 const yesNo = (value: boolean) => (value ? m["app.inspector.yes"]() : m["app.inspector.no"]())
+const BLOCKER_LABELS: Readonly<Record<string, () => string>> = {
+  unknown_cause: () => m["app.calculation.blockers.unknownCause"](),
+  missing_valuation: () => m["app.calculation.blockers.missingValuation"](),
+  ambiguous_valuation: () => m["app.calculation.blockers.ambiguousValuation"](),
+  valuation_currency_mismatch: () => m["app.calculation.blockers.valuationCurrencyMismatch"](),
+  inventory_shortage: () => m["app.calculation.blockers.inventoryShortage"](),
+  movement_shortage: () => m["app.calculation.blockers.movementShortage"](),
+  blocked_inventory_suffix: () => m["app.calculation.blockers.blockedInventory"](),
+  malformed_movement: () => m["app.calculation.blockers.malformedMovement"](),
+  missing_decimals: () => m["app.calculation.blockers.missingDecimals"](),
+  unsupported_asset_type: () => m["app.calculation.blockers.unsupportedAssetType"](),
+  unresolved_identity: () => m["app.calculation.blockers.unresolvedIdentity"](),
+  movement_correction_needs_attention: () => m["app.calculation.blockers.movementCorrection"](),
+  movement_price_currency_mismatch: () => m["app.calculation.blockers.movementPriceCurrency"](),
+  "de.staking_activity_classification_required": () => m["app.calculation.blockers.staking"](),
+  "de.mining_activity_classification_required": () => m["app.calculation.blockers.mining"](),
+  "de.airdrop_classification_required": () => m["app.calculation.blockers.airdrop"](),
+  "de.reward_classification_required": () => m["app.calculation.blockers.reward"](),
+  "de.payment_income_classification_required": () => m["app.calculation.blockers.paymentIncome"](),
+  "de.gift_acquisition_basis_required": () => m["app.calculation.blockers.giftBasis"](),
+  "de.gift_disposition_classification_required": () =>
+    m["app.calculation.blockers.giftDisposition"](),
+  "de.fee_allocation_required": () => m["app.calculation.blockers.feeAllocation"](),
+}
+
+function BlockerCode({ code }: { code: string }) {
+  const label =
+    (Object.hasOwn(BLOCKER_LABELS, code) ? BLOCKER_LABELS[code]?.() : undefined) ??
+    m["app.calculation.blockers.unknown"]()
+  return (
+    <>
+      <span className="block">{label}</span>
+      <code className="block break-all text-xs text-muted-foreground">{code}</code>
+    </>
+  )
+}
+
 const reconciliationReason = (code: string): string => {
   switch (code) {
     case "provider_transfer_missing_wallet_address":
@@ -392,6 +429,18 @@ const reconciliationReason = (code: string): string => {
 
 const state = (value: string | null) => {
   switch (value) {
+    case "coinbase_transaction":
+      return m["app.inspector.state.coinbase_transaction"]()
+    case "coinbase_account":
+      return m["app.inspector.state.coinbase_account"]()
+    case "solana_transaction_full":
+      return m["app.inspector.state.solana_transaction_full"]()
+    case "native":
+      return m["app.inspector.state.native"]()
+    case "token":
+      return m["app.inspector.state.token"]()
+    case "nft":
+      return m["app.inspector.state.nft"]()
     case "pending":
       return m["app.inspector.state.pending"]()
     case "running":
@@ -490,6 +539,8 @@ const state = (value: string | null) => {
       return m["app.inspector.state.reward"]()
     case "payment":
       return m["app.inspector.state.payment"]()
+    case "uncategorized":
+      return m["app.inspector.state.uncategorized"]()
     case "unknown":
       return m["app.inspector.state.unknown"]()
     case "custody_movement":
@@ -541,7 +592,7 @@ const state = (value: string | null) => {
     case "unresolved_identity":
       return m["app.inspector.state.unresolved_identity"]()
     default:
-      return value === null ? empty() : <code>{value}</code>
+      return value === null ? empty() : m["app.inspector.unrecognizedValue"]({ code: value })
   }
 }
 
@@ -625,7 +676,7 @@ function InspectorFacts({ detail }: { detail: TransactionDetail }) {
                 <Fields
                   values={{
                     provider: item.evidence.provider,
-                    recordType: item.evidence.recordType,
+                    recordType: state(item.evidence.recordType),
                     externalId: item.evidence.externalRecordId,
                     timestamp: date(item.evidence.occurredAt),
                     importedAt: date(item.evidence.importedAt),
@@ -873,7 +924,7 @@ function Calculation({ calculation }: { calculation: TransactionDetail["calculat
             <article className="flex flex-col gap-3 rounded-lg border p-3" key={blocker.sequence}>
               <Fields
                 values={{
-                  blocker: blocker.code,
+                  blocker: <BlockerCode code={blocker.code} />,
                   missingQuantity: blocker.missingQuantity,
                   assetId: blocker.assetId,
                 }}
@@ -1319,7 +1370,7 @@ function AssetDecision({ projection }: { projection: AssetProjection }) {
             assetId: decision._tag === "included" ? decision.assetId : identity(decision.identity),
             ...(decision._tag === "blocked" ? { reason: state(decision.reason) } : {}),
             technicalBlockers: projection.technicalBlockers.length
-              ? projection.technicalBlockers.join(", ")
+              ? projection.technicalBlockers.map((code) => <BlockerCode key={code} code={code} />)
               : m["app.inspector.none"](),
             identityStale: yesNo(projection.identityOverrideUsesStaleSystemRevision),
             inclusionStale: yesNo(projection.inclusionOverrideUsesStaleSystemRevision),
@@ -1374,13 +1425,15 @@ function AssetDecision({ projection }: { projection: AssetProjection }) {
             identityRevision: projection.system.identityRevision,
             inclusionRevision: projection.system.inclusionRevision,
             checkedTechnicalBlockers: projection.checkedTechnicalBlockerKinds.length
-              ? projection.checkedTechnicalBlockerKinds.join(", ")
+              ? projection.checkedTechnicalBlockerKinds.map((code) => (
+                  <BlockerCode key={code} code={code} />
+                ))
               : m["app.inspector.none"](),
             ...(projection.target._tag === "provider_asset"
               ? { providerAssetRowId: projection.target.providerAssetRowId }
               : {
                   blockchain: projection.target.blockchain,
-                  kind: projection.target.type,
+                  kind: state(projection.target.type),
                   contractAddress: projection.target.contractAddress,
                   mintAddress: projection.target.mintAddress,
                 }),
