@@ -8,6 +8,7 @@ import {
   type SourceSyncJob,
   type SourceSyncJobInput,
   type SourceSyncStart,
+  type TransactionListItem,
 } from "taxmaxi"
 
 import { appSurfaceClassName } from "#/components/app-workspace"
@@ -38,6 +39,7 @@ import {
 } from "#/lib/dashboard-types"
 import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 import { TRANSACTION_PAGE_SIZE, TransactionsTable } from "./transactions-table"
+import { TransactionInspector } from "./transaction-inspector"
 import { SourceSyncIsland } from "./source-sync-island"
 
 type DashboardSummary = {
@@ -82,6 +84,25 @@ export function Dashboard({
 
   const queryClient = useQueryClient()
   const [authenticationLost, setAuthenticationLost] = useState(false)
+  const [selectedTransaction, setSelectedTransaction] = useState<{
+    transactionId: string
+    taxYear: number
+    description: string
+  } | null>(null)
+  const transactionOpenerRef = useRef<HTMLElement | null>(null)
+
+  const selectTransaction = (transaction: TransactionListItem, trigger: HTMLElement) => {
+    transactionOpenerRef.current = trigger
+    setSelectedTransaction({
+      transactionId: transaction.transactionId,
+      taxYear: Number(
+        new Intl.DateTimeFormat("en", { timeZone: "Europe/Berlin", year: "numeric" }).format(
+          new Date(transaction.timestamp)
+        )
+      ),
+      description: transaction.description ?? m["app.treatment.transaction"](),
+    })
+  }
   const [isVisible, setIsVisible] = useState(
     () => typeof document === "undefined" || document.visibilityState !== "hidden"
   )
@@ -370,9 +391,9 @@ export function Dashboard({
             </TabsContent>
             <TabsContent value="transactions">
               <TransactionsTable
-                taxmaxi={taxmaxi}
                 disabled={authenticationLost}
-                onUnauthorized={handleUnauthorized}
+                onSelect={selectTransaction}
+                selectedTransactionId={selectedTransaction?.transactionId ?? null}
                 error={transactionQuery.isError}
                 hasNextPage={transactionQuery.data?.page.hasMore ?? false}
                 loading={transactionQuery.isFetching}
@@ -388,6 +409,14 @@ export function Dashboard({
           </Tabs>
         </div>
       </SourceCards>
+      <TransactionInspector
+        selection={selectedTransaction}
+        taxmaxi={taxmaxi}
+        disabled={authenticationLost}
+        onUnauthorized={handleUnauthorized}
+        onClose={() => setSelectedTransaction(null)}
+        returnFocusRef={transactionOpenerRef}
+      />
     </div>
   )
 }

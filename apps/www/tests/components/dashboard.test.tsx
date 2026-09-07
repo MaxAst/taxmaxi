@@ -21,6 +21,15 @@ import { Dashboard } from "#/components/dashboard"
 import { queryKeys } from "#/integrations/taxmaxi/queries"
 import type { SourceSyncSeed } from "#/lib/dashboard-types"
 
+beforeEach(() => {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi
+      .fn()
+      .mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }),
+  })
+})
+
 const syncState = vi.hoisted(() => ({
   onCompleted: undefined as undefined | ((sourceId: string) => void | Promise<void>),
   onUnauthorized: undefined as undefined | (() => void | Promise<void>),
@@ -381,7 +390,7 @@ describe("Dashboard calculation refresh", () => {
       mount()
       await tick()
       expect(get).not.toHaveBeenCalled()
-      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
+      fireEvent.click(screen.getByRole("button", { name: /Open transaction/ }))
       await tick()
       expect(get).toHaveBeenCalledExactlyOnceWith({
         transactionId: row.transactionId,
@@ -396,7 +405,7 @@ describe("Dashboard calculation refresh", () => {
       if (scenario === "failed refresh") {
         expect(screen.getByText("Could not load treatment results. Try again.")).toBeTruthy()
         expect(screen.queryByText(`Returned run: ${RUN_A} · 2025 · DE · EUR`)).toBeNull()
-        expect(screen.getByText("Treatment transaction")).toBeTruthy()
+        expect(screen.getAllByText("Treatment transaction").length).toBeGreaterThan(0)
         failRefresh = false
         fireEvent.click(screen.getByRole("button", { name: "Retry results" }))
         await tick()
@@ -410,7 +419,7 @@ describe("Dashboard calculation refresh", () => {
       const expectedCalls = scenario === "failed refresh" ? 3 : 2
       await tick(30_000)
       expect(get).toHaveBeenCalledTimes(expectedCalls)
-      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
+      fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
       currentPortfolio = portfolio("run-c", "3.75")
       await tick(30_000)
       expect(get).toHaveBeenCalledTimes(expectedCalls)
