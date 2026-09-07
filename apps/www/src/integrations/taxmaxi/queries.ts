@@ -6,6 +6,7 @@ import {
   type AssetExceptionListInput,
   type PendingAssetListInput,
   type TransactionListInput,
+  type TransactionDetailInput,
   type TaxMaxi,
 } from "taxmaxi"
 
@@ -60,6 +61,8 @@ export const queryKeys = {
   portfolioAssets: (sourceId?: string) =>
     [...queryKeys.all, "portfolio", "assets", sourceId ?? "all"] as const,
   transactions: () => [...queryKeys.all, "transactions"] as const,
+  transactionDetail: (input: TransactionDetailInput) =>
+    [...queryKeys.transactions(), "detail", input.transactionId, input.taxYear] as const,
   transactionList: (input: TransactionListInput = {}) =>
     [...queryKeys.transactions(), "list", input] as const,
 }
@@ -158,6 +161,17 @@ export const queries = {
       retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 30_000),
       refetchOnWindowFocus: "always",
       refetchOnReconnect: "always",
+    }),
+  transactionDetail: (taxmaxi: TaxMaxi, input: TransactionDetailInput) =>
+    queryOptions({
+      queryKey: queryKeys.transactionDetail(input),
+      queryFn: async ({ signal }) => {
+        // The SDK has no transport signal; Query still cancels delivery and retries.
+        signal.throwIfAborted()
+        return taxmaxi.transactions.get(input)
+      },
+      staleTime: 30_000,
+      retry: false,
     }),
   transactionList: (taxmaxi: TaxMaxi, input: TransactionListInput = {}) =>
     queryOptions({

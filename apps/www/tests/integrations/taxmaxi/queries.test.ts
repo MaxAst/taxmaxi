@@ -188,3 +188,26 @@ describe("portfolio queries", () => {
     expect(sourceA.refetchOnReconnect).toBe("always")
   })
 })
+
+describe("transaction detail queries", () => {
+  it("isolates explicit transaction and year keys without placeholder data", async () => {
+    const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://detail.example.test" })
+    const get = vi.spyOn(taxmaxi.transactions, "get").mockRejectedValue(new Error("fixture"))
+    const client = new QueryClient()
+    const first = queries.transactionDetail(taxmaxi, { transactionId: "a", taxYear: 2025 })
+    const nextYear = queries.transactionDetail(taxmaxi, { transactionId: "a", taxYear: 2026 })
+    const nextRow = queries.transactionDetail(taxmaxi, { transactionId: "b", taxYear: 2025 })
+    expect(first.queryKey).not.toEqual(nextYear.queryKey)
+    expect(first.queryKey).not.toEqual(nextRow.queryKey)
+    expect(first.placeholderData).toBeUndefined()
+    await client.fetchQuery(first).catch(() => undefined)
+    await client.fetchQuery(nextYear).catch(() => undefined)
+    await client.fetchQuery(nextRow).catch(() => undefined)
+    expect(get.mock.calls).toEqual([
+      [{ transactionId: "a", taxYear: 2025 }],
+      [{ transactionId: "a", taxYear: 2026 }],
+      [{ transactionId: "b", taxYear: 2025 }],
+    ])
+    client.clear()
+  })
+})

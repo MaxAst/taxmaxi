@@ -9,7 +9,12 @@ import {
 } from "@tanstack/react-query"
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import type { ReactNode } from "react"
-import { TaxMaxi, type PortfolioAssets, type TransactionListInput } from "taxmaxi"
+import {
+  TaxMaxi,
+  type PortfolioAssets,
+  type TransactionDetail,
+  type TransactionListInput,
+} from "taxmaxi"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { Dashboard } from "#/components/dashboard"
@@ -264,6 +269,162 @@ describe("Dashboard calculation refresh", () => {
       </QueryClientProvider>
     )
 
+  it.each(["loaded", "pending", "failed refresh"] as const)(
+    "refreshes an open %s treatment detail when the actual active run changes",
+    async (scenario) => {
+      const row = transaction("00000000-0000-4000-8000-000000000101", "Treatment transaction")
+      vi.spyOn(testTaxMaxi.transactions, "list").mockResolvedValue({
+        transactions: [row],
+        totalCount: 1,
+        page: { hasMore: false, nextCursor: null },
+      })
+      const response = (): TransactionDetail => ({
+        transactionId: row.transactionId,
+        timestamp: row.timestamp,
+        source: row.source,
+        transactionType: row.transactionType,
+        description: row.description,
+        externalId: row.externalId,
+        sourceRawRecordId: null,
+        providerTransactionType: null,
+        classificationHistoryStatus: "unavailable",
+        sourceEvidence: [],
+        movements: [],
+        reconciliations: [],
+        movementOverrides: [],
+        assetOverrides: [],
+        calculation: {
+          run: {
+            id: currentPortfolio.activeRun?.runId ?? "unavailable",
+            taxYear: 2025,
+            jurisdiction: "DE",
+            reportingCurrency: "EUR",
+            status: "complete",
+            engineVersion: "test",
+            ruleSetVersion: "test",
+            inputLedgerRevision: "1",
+            valuationRevision: "1",
+            failureCode: null,
+          },
+          state: "complete",
+          monetaryStatus: "not_applicable",
+          derivedLots: [],
+          allocations: [],
+          income: [],
+          blockers: [],
+          processedEventIds: [],
+          correctionInputs: [],
+        },
+      })
+      const oldResponse = response()
+      let finishInitial: ((value: TransactionDetail) => void) | undefined
+      let failRefresh = scenario === "failed refresh"
+      const get = vi
+        .spyOn(testTaxMaxi.transactions, "get")
+        .mockImplementationOnce(() =>
+          scenario === "pending"
+            ? new Promise((resolve) => {
+                finishInitial = resolve
+              })
+            : Promise.resolve(oldResponse)
+        )
+        .mockImplementation(async () => {
+          if (failRefresh) throw new Error("fixture read failure")
+          return response()
+        })
+      mount()
+      await tick()
+      expect(get).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
+      await tick()
+      expect(get).toHaveBeenCalledExactlyOnceWith({
+        transactionId: row.transactionId,
+        taxYear: 2025,
+      })
+      if (scenario === "pending")
+        expect(screen.getByText("Loading treatment results…")).toBeTruthy()
+      else expect(screen.getByText(`Returned run: ${RUN_A} · 2025 · DE · EUR`)).toBeTruthy()
+      currentPortfolio = portfolio("run-b", "2.50")
+      await tick(30_000)
+      expect(get).toHaveBeenCalledTimes(2)
+      if (scenario === "failed refresh") {
+        expect(screen.getByText("Could not load treatment results. Try again.")).toBeTruthy()
+        expect(screen.queryByText(`Returned run: ${RUN_A} · 2025 · DE · EUR`)).toBeNull()
+        expect(screen.getByText("Treatment transaction")).toBeTruthy()
+        failRefresh = false
+        fireEvent.click(screen.getByRole("button", { name: "Retry results" }))
+        await tick()
+      }
+      await act(async () => {
+        finishInitial?.(oldResponse)
+      })
+      await tick()
+      expect(screen.getByText("Returned run: run-b · 2025 · DE · EUR")).toBeTruthy()
+      expect(screen.queryByText(`Returned run: ${RUN_A} · 2025 · DE · EUR`)).toBeNull()
+      const expectedCalls = scenario === "failed refresh" ? 3 : 2
+      await tick(30_000)
+      expect(get).toHaveBeenCalledTimes(expectedCalls)
+      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
+      currentPortfolio = portfolio("run-c", "3.75")
+      await tick(30_000)
+      expect(get).toHaveBeenCalledTimes(expectedCalls)
+    }
+  )
+
+  it.each(["list", "overview"] as const)(
+    "restarts pending source %s and transaction list reads on a changed run",
+    async (scope) => {
+      let finishSource: ((value: string) => void) | undefined
+      let finishList: ((value: TransactionListResponse) => void) | undefined
+      const oldPage: TransactionListResponse = {
+        transactions: [transaction("old", "Old result")],
+        totalCount: 1,
+        page: { hasMore: false, nextCursor: null },
+      }
+      const newPage: TransactionListResponse = {
+        ...oldPage,
+        transactions: [transaction("new", "New result")],
+      }
+      const sourceKey =
+        scope === "list" ? queryKeys.sourceList() : queryKeys.sourceOverview("source-a")
+      const sourceRead = vi
+        .fn<() => Promise<string>>()
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishSource = resolve
+            })
+        )
+        .mockResolvedValue("new source")
+      const source = new QueryObserver(queryClient, { queryKey: sourceKey, queryFn: sourceRead })
+      const stop = source.subscribe(() => {})
+      const list = vi
+        .spyOn(testTaxMaxi.transactions, "list")
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishList = resolve
+            })
+        )
+        .mockResolvedValue(newPage)
+      mount()
+      await tick()
+      currentPortfolio = portfolio(RUN_B, "2.50")
+      await tick(30_000)
+      expect(list).toHaveBeenCalledTimes(2)
+      expect(sourceRead).toHaveBeenCalledTimes(2)
+      await act(async () => {
+        finishSource?.("old source")
+        finishList?.(oldPage)
+      })
+      await tick()
+      expect(queryClient.getQueryData(sourceKey)).toBe("new source")
+      expect(screen.getByText("New result")).toBeTruthy()
+      expect(screen.queryByText("Old result")).toBeNull()
+      stop()
+    }
+  )
+
   it("refreshes delayed calculations independently of source completion and invalidates each changed active run once", async () => {
     let overviewCalls = 0
     let detailCalls = 0
@@ -408,6 +569,44 @@ describe("Dashboard calculation refresh", () => {
     await tick()
     expect(portfolioCalls).toBe(calls)
   })
+
+  it.each(["unmount", "authentication loss"] as const)(
+    "stops a suspended dependent refresh after %s",
+    async (stopReason) => {
+      const sourceRead = vi.fn(async () => "source data")
+      const source = new QueryObserver(queryClient, {
+        queryKey: queryKeys.sourceList(),
+        queryFn: sourceRead,
+      })
+      const stopSource = source.subscribe(() => {})
+      let release: (() => void) | undefined
+      const cancellationBarrier = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const cancel = queryClient.cancelQueries.bind(queryClient)
+      vi.spyOn(queryClient, "cancelQueries").mockImplementation(async (filters, options) => {
+        await cancel(filters, options)
+        if (filters?.queryKey?.[1] === "sources") await cancellationBarrier
+      })
+      const view = mount()
+      await tick()
+      currentPortfolio = portfolio(RUN_B, "2.50")
+      await tick(30_000)
+      expect(sourceRead).toHaveBeenCalledTimes(1)
+      if (stopReason === "unmount") view.unmount()
+      else
+        await act(async () => {
+          await syncState.onUnauthorized?.()
+        })
+      await act(async () => {
+        release?.()
+      })
+      await tick()
+      expect(sourceRead).toHaveBeenCalledTimes(1)
+      expect(transactionCalls).toBe(1)
+      stopSource()
+    }
+  )
 
   it("bounds request retries and returns to the slow cadence on failure", async () => {
     mount()

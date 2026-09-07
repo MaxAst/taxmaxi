@@ -84,8 +84,17 @@ export function Dashboard({
   const [syncCompletedAt, setSyncCompletedAt] = useState<number | null>(null)
   const [fastRefresh, setFastRefresh] = useState(false)
   const observedRunIds = useRef(new Set<string | null>())
+  const dependentReadsAllowed = useRef(false)
+
+  useEffect(() => {
+    dependentReadsAllowed.current = true
+    return () => {
+      dependentReadsAllowed.current = false
+    }
+  }, [])
 
   const handleUnauthorized = useCallback(async () => {
+    dependentReadsAllowed.current = false
     setAuthenticationLost(true)
     await queryClient.cancelQueries({ queryKey: queryKeys.all })
     await onUnauthorized?.()
@@ -160,8 +169,20 @@ export function Dashboard({
     const isFirstResponse = observedRunIds.current.size === 0
     observedRunIds.current.add(runId)
     if (isFirstResponse) return
-    void queryClient.invalidateQueries({ queryKey: queryKeys.sources() })
-    void queryClient.invalidateQueries({ queryKey: queryKeys.transactions() })
+    const refreshDependentReads = async () => {
+      // Invalidation alone reuses initial pending reads. Cancel their delivery
+      // first so a response started before this run cannot replace its results.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: queryKeys.sources() }),
+        queryClient.cancelQueries({ queryKey: queryKeys.transactions() }),
+      ])
+      if (!dependentReadsAllowed.current) return
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.sources() }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.transactions() }),
+      ])
+    }
+    void refreshDependentReads()
   }, [activeRunId, authenticationLost, hasPortfolio, queryClient])
 
   useEffect(() => {
@@ -344,6 +365,9 @@ export function Dashboard({
             </TabsContent>
             <TabsContent value="transactions">
               <TransactionsTable
+                taxmaxi={taxmaxi}
+                disabled={authenticationLost}
+                onUnauthorized={handleUnauthorized}
                 error={transactionQuery.isError}
                 hasNextPage={transactionQuery.data?.page.hasMore ?? false}
                 loading={transactionQuery.isFetching}
