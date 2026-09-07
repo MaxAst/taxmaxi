@@ -19,6 +19,15 @@ export interface TransactionDetailEvidence {
   readonly importedAt: Date
 }
 
+/** One explicit writer-recorded evidence path, including unavailable retained payloads. */
+export interface TransactionDetailEvidenceLink {
+  readonly origin: "transaction" | "leg" | "provider_transfer" | "canonical_transfer"
+  readonly originId: string
+  readonly sourceRawRecordId: string | null
+  readonly evidence: TransactionDetailEvidence | null
+  readonly status: "available" | "unavailable"
+}
+
 /** Recorded movement facts, including exact writer-selected links. */
 export interface TransactionDetailMovement {
   readonly id: string
@@ -45,6 +54,8 @@ export interface TransactionDetailMovement {
 
 /** Factual foundation, distinct from selected-run results and current correction projections. */
 export interface TransactionDetail {
+  readonly sourceRawRecordId: string | null
+  readonly sourceEvidence: ReadonlyArray<TransactionDetailEvidenceLink>
   readonly transactionId: string
   readonly timestamp: Date
   readonly source: {

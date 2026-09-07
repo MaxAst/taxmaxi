@@ -372,10 +372,37 @@ describe("transaction detail repository", () => {
             .values(unlinkedValues)
             .returning({ id: schema.transactionLegs.id })
           if (unlinkedLeg === undefined) return yield* Effect.die("Missing unlinked leg")
-          return { first, transfer, reconciliation, fees, unlinkedLeg }
+          const [canonicalRaw] = yield* db
+            .insert(schema.sourceRecordsRaw)
+            .values({
+              sourceId: fixture.sourceId,
+              provider: "synthetic",
+              recordType: "transaction",
+              externalRecordId: "canonical-transaction-evidence",
+              occurredAt: time,
+              payload: {},
+            })
+            .returning({ id: schema.sourceRecordsRaw.id })
+          if (canonicalRaw === undefined)
+            return yield* Effect.die("Missing canonical transaction evidence")
+          yield* db
+            .update(schema.transactions)
+            .set({ sourceRawRecordId: canonicalRaw.id })
+            .where(eq(schema.transactions.id, fixture.excludedId))
+          return { first, transfer, reconciliation, fees, unlinkedLeg, canonicalRaw }
         })
       )
       const detail = Option.getOrThrow(yield* read(fixture.transactionId, fixture.principalId))
+      expect(
+        detail.sourceEvidence.find(
+          (link) => link.origin === "transaction" && link.originId === fixture.excludedId
+        )
+      ).toMatchObject({
+        sourceRawRecordId: links.canonicalRaw.id,
+        status: "available",
+        evidence: { id: links.canonicalRaw.id },
+      })
+      expect(detail.sourceRawRecordId).toBeNull()
       expect(detail.movements).toHaveLength(3)
       expect(detail.movements.some((movement) => movement.id === links.unlinkedLeg.id)).toBe(false)
       expect(
@@ -389,6 +416,232 @@ describe("transaction detail repository", () => {
         expect(detail.movements.some((movement) => movement.id === fee.id)).toBe(
           fee.feeForTransactionId === fixture.transactionId
         )
+    })
+  )
+  it.effect("retains transaction and exact origin evidence without changing null leg links", () =>
+    Effect.gen(function* () {
+      const fixture = yield* run(seed)
+      const links = yield* run(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const foreign = yield* seedSyncEngineRepositoryFixture({
+            principalId: "00000000-0000-4000-8000-000000008791",
+            userId: "00000000-0000-4000-8000-000000008792",
+            sourceId: "00000000-0000-4000-8000-000000008793",
+          })
+          const records = yield* db
+            .insert(schema.sourceRecordsRaw)
+            .values(
+              ["transaction", "provider", "canonical", "unrelated", "foreign"].map((name) => ({
+                sourceId: name === "foreign" ? foreign.sourceId : fixture.sourceId,
+                provider: "synthetic",
+                recordType: "transfer",
+                externalRecordId: name,
+                occurredAt: time,
+                payload: { secret: name },
+              }))
+            )
+            .returning({
+              id: schema.sourceRecordsRaw.id,
+              name: schema.sourceRecordsRaw.externalRecordId,
+            })
+          const transactionRaw = records.find((row) => row.name === "transaction")
+          const providerRaw = records.find((row) => row.name === "provider")
+          const canonicalRaw = records.find((row) => row.name === "canonical")
+          const foreignRaw = records.find((row) => row.name === "foreign")
+          const [first, second] = fixture.inserted
+          if (
+            transactionRaw === undefined ||
+            providerRaw === undefined ||
+            canonicalRaw === undefined ||
+            foreignRaw === undefined ||
+            first === undefined ||
+            second === undefined
+          )
+            return yield* Effect.die("Missing evidence fixtures")
+          const [provider] = yield* db
+            .insert(schema.providerTransfers)
+            .values({
+              sourceId: fixture.sourceId,
+              transactionId: fixture.transactionId,
+              sourceRawRecordId: providerRaw.id,
+              externalId: "evidence-provider",
+              timestamp: time,
+              direction: "inbound",
+              processingMode: "evidence_only",
+              amount: "3",
+              fromAccountRef: "source",
+              toAddress: "destination",
+            })
+            .returning({ id: schema.providerTransfers.id })
+          const [canonical] = yield* db
+            .insert(schema.transfers)
+            .values({
+              sourceId: fixture.sourceId,
+              principalId: fixture.principalId,
+              sourceRawRecordId: canonicalRaw.id,
+              externalId: "evidence-canonical",
+              timestamp: time,
+              type: "native",
+              assetId: TEST_BTC_ASSET_ID,
+              amount: "3",
+              fromAddress: "source",
+              toAddress: "destination",
+            })
+            .returning({ id: schema.transfers.id })
+          if (provider === undefined || canonical === undefined)
+            return yield* Effect.die("Missing evidence origins")
+          yield* db
+            .update(schema.transactions)
+            .set({ sourceRawRecordId: transactionRaw.id })
+            .where(eq(schema.transactions.id, fixture.transactionId))
+          yield* db
+            .update(schema.transactionLegs)
+            .set({
+              sourceRawRecordId: null,
+              originKind: "provider_transfer",
+              providerTransferId: provider.id,
+            })
+            .where(eq(schema.transactionLegs.id, first.id))
+          yield* db
+            .update(schema.transactionLegs)
+            .set({
+              sourceRawRecordId: null,
+              originKind: "canonical_transfer",
+              sourceTransferId: canonical.id,
+            })
+            .where(eq(schema.transactionLegs.id, second.id))
+          return {
+            first,
+            second,
+            provider,
+            canonical,
+            transactionRaw,
+            providerRaw,
+            canonicalRaw,
+            foreignRaw,
+          }
+        })
+      )
+      const detail = Option.getOrThrow(yield* read(fixture.transactionId, fixture.principalId))
+      expect(
+        detail.movements.every(
+          (movement) =>
+            movement.sourceRawRecordId === null && movement.evidenceStatus === "unavailable"
+        )
+      ).toBe(true)
+      expect(detail.sourceRawRecordId).toBe(links.transactionRaw.id)
+      expect(
+        detail.sourceEvidence
+          .filter((link) => link.status === "available")
+          .map((link) => ({
+            origin: link.origin,
+            originId: link.originId,
+            rawId: link.evidence?.id,
+          }))
+      ).toEqual([
+        { origin: "transaction", originId: fixture.transactionId, rawId: links.transactionRaw.id },
+        { origin: "provider_transfer", originId: links.provider.id, rawId: links.providerRaw.id },
+        {
+          origin: "canonical_transfer",
+          originId: links.canonical.id,
+          rawId: links.canonicalRaw.id,
+        },
+      ])
+      yield* run(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db
+            .update(schema.transactions)
+            .set({ sourceRawRecordId: links.foreignRaw.id })
+            .where(eq(schema.transactions.id, fixture.transactionId))
+          yield* db
+            .update(schema.providerTransfers)
+            .set({ sourceRawRecordId: links.foreignRaw.id })
+            .where(eq(schema.providerTransfers.id, links.provider.id))
+          yield* db
+            .update(schema.transfers)
+            .set({ sourceRawRecordId: links.foreignRaw.id })
+            .where(eq(schema.transfers.id, links.canonical.id))
+          yield* db
+            .update(schema.transactionLegs)
+            .set({ sourceRawRecordId: links.foreignRaw.id })
+            .where(eq(schema.transactionLegs.id, links.first.id))
+        })
+      )
+      const guarded = Option.getOrThrow(yield* read(fixture.transactionId, fixture.principalId))
+      expect(
+        guarded.sourceEvidence.every(
+          (link) => link.evidence === null && link.status === "unavailable"
+        )
+      ).toBe(true)
+    })
+  )
+  it.effect("returns direct pending reconciliation links without transfer origins", () =>
+    Effect.gen(function* () {
+      const fixture = yield* run(seed)
+      const expected = yield* run(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const foreign = yield* seedSyncEngineRepositoryFixture({
+            principalId: "00000000-0000-4000-8000-000000008791",
+            userId: "00000000-0000-4000-8000-000000008792",
+            sourceId: "00000000-0000-4000-8000-000000008793",
+          })
+          const [foreignTransaction] = yield* db
+            .insert(schema.transactions)
+            .values({
+              sourceId: foreign.sourceId,
+              principalId: foreign.principalId,
+              externalId: "foreign-pending",
+              timestamp: time,
+            })
+            .returning({ id: schema.transactions.id })
+          if (foreignTransaction === undefined)
+            return yield* Effect.die("Missing foreign transaction")
+          const results: Array<string> = []
+          for (const name of ["pending", "needs_review", "unrelated", "foreign"] as const) {
+            const [provider] = yield* db
+              .insert(schema.providerTransfers)
+              .values({
+                sourceId: name === "foreign" ? foreign.sourceId : fixture.sourceId,
+                transactionId: name === "foreign" ? foreignTransaction.id : fixture.unresolvedId,
+                externalId: name,
+                timestamp: time,
+                direction: "outbound",
+                processingMode: "evidence_only",
+                amount: "3",
+                fromAccountRef: "source",
+                toAddress: "destination",
+              })
+              .returning({ id: schema.providerTransfers.id })
+            if (provider === undefined) return yield* Effect.die("Missing pending provider")
+            const [row] = yield* db
+              .insert(schema.transferReconciliations)
+              .values({
+                principalId: name === "foreign" ? foreign.principalId : fixture.principalId,
+                providerTransferId: provider.id,
+                canonicalTransferId: null,
+                canonicalTransactionId:
+                  name === "unrelated" ? fixture.excludedId : fixture.transactionId,
+                status: name === "needs_review" ? "needs_review" : "pending",
+                matchReason: "Synthetic pending match",
+              })
+              .returning({ id: schema.transferReconciliations.id })
+            if (row === undefined) return yield* Effect.die("Missing pending reconciliation")
+            if (name === "pending" || name === "needs_review") results.push(row.id)
+          }
+          return results.sort()
+        })
+      )
+      const detail = Option.getOrThrow(yield* read(fixture.transactionId, fixture.principalId))
+      expect(detail.movements.every((movement) => movement.originKind === "none")).toBe(true)
+      expect(detail.reconciliations.map((row) => row.id)).toEqual(expected)
+      expect(detail.reconciliations.map((row) => row.status).sort()).toEqual([
+        "needs_review",
+        "pending",
+      ])
+      expect(detail.reconciliations.every((row) => row.canonicalTransferId === null)).toBe(true)
     })
   )
 })
