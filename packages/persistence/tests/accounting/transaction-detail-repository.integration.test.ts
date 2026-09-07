@@ -1,12 +1,27 @@
+import { vi } from "vitest"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
-import { JurisdictionCode, TaxYear } from "@my/core/accounting"
+import { JurisdictionCode, TaxYear, type MovementPriceInput } from "@my/core/accounting"
+import { AuthUserId } from "@my/core/authentication"
 import { CurrencyCode } from "@my/core/currency"
 import { PrincipalId } from "@my/core/ownership"
 import { count, eq } from "drizzle-orm"
+import * as BigDecimal from "effect/BigDecimal"
 import * as Effect from "effect/Effect"
 import * as DateTime from "effect/DateTime"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
+import {
+  SourceNormalizationRepository,
+  SourceSyncJobRepository,
+  type SourceSyncExecutionState,
+} from "@my/sync-engine/services"
+import { SourceNormalizationRepositoryLive } from "../../src/layers/SourceNormalizationRepositoryLive.ts"
+import { SourceSyncJobRepositoryLive } from "../../src/layers/SourceSyncJobRepositoryLive.ts"
+import { CalculationRunRepositoryLive } from "../../src/layers/CalculationRunRepositoryLive.ts"
+import { CalculationRunServiceLive } from "../../src/layers/CalculationRunServiceLive.ts"
+import { FactualLedgerRepositoryLive } from "../../src/layers/FactualLedgerRepositoryLive.ts"
+import { CalculationRunId } from "../../src/services/CalculationRunRepository.ts"
+import { CalculationRunService } from "../../src/services/CalculationRunService.ts"
 import { drizzle } from "../../src/layers/PgClientLive.ts"
 import { PrincipalTransactionOverrideRepositoryLive } from "../../src/layers/PrincipalTransactionOverrideRepositoryLive.ts"
 import { PrincipalTransactionOverrideRepository } from "../../src/services/PrincipalTransactionOverrideRepository.ts"
@@ -20,6 +35,40 @@ import {
   seedSyncEngineAssets,
   seedSyncEngineRepositoryFixture,
 } from "../support/integration-test-kit.ts"
+
+// Pause after detail has established its PostgreSQL snapshot, before its remaining reads.
+const detailSnapshot = vi.hoisted(() => ({
+  afterInitialRead: null as (() => Promise<void>) | null,
+}))
+vi.mock("../../src/layers/PrincipalTransactionOverrideRepositoryLive.ts", (importOriginal) =>
+  Promise.all([
+    importOriginal<
+      typeof import("../../src/layers/PrincipalTransactionOverrideRepositoryLive.ts")
+    >(),
+    import("effect/Effect"),
+    import("effect/Layer"),
+    import("../../src/services/PrincipalTransactionOverrideRepository.ts"),
+  ]).then(([original, effect, layer, services]) => ({
+    ...original,
+    PrincipalTransactionOverrideRepositoryLive: layer
+      .effect(
+        services.PrincipalTransactionOverrideRepository,
+        effect.map(services.PrincipalTransactionOverrideRepository, (repository) => ({
+          ...repository,
+          findTransactionTargetsInSnapshot: (
+            params: Parameters<typeof repository.findTransactionTargetsInSnapshot>[0]
+          ) =>
+            effect.gen(function* () {
+              const hook = detailSnapshot.afterInitialRead
+              detailSnapshot.afterInitialRead = null
+              if (hook !== null) yield* effect.promise(hook)
+              return yield* repository.findTransactionTargetsInSnapshot(params)
+            }),
+        }))
+      )
+      .pipe(layer.provide(original.PrincipalTransactionOverrideRepositoryLive)),
+  }))
+)
 
 const context = makeIntegrationTestDatabaseContext({
   databaseNamePrefix: "taxmaxi_transaction_detail",
@@ -107,8 +156,214 @@ const read = (transactionId: string, principalId: string) =>
       repo.find({ transactionId, principalId: PrincipalId.make(principalId), scope })
     ),
   })
+const PRINCIPAL_ID = PrincipalId.make("00000000-0000-4000-8000-000000007101")
+const USER_ID = AuthUserId.make("00000000-0000-4000-8000-000000007102")
+const SOURCE_ID = "00000000-0000-4000-8000-000000007103"
+const EUR = CurrencyCode.make("EUR")
+const runPg = run
+const runId = (index: number) =>
+  CalculationRunId.make(`00000000-0000-4000-8000-${String(7200 + index).padStart(12, "0")}`)
+const runLayer = CalculationRunServiceLive.pipe(
+  Layer.provide(Layer.merge(CalculationRunRepositoryLive, FactualLedgerRepositoryLive))
+)
+const recompute = (index: number) =>
+  context.runWithLayer({
+    layer: runLayer,
+    effect: Effect.flatMap(CalculationRunService, (service) =>
+      service.recompute({
+        id: runId(index),
+        principalId: PRINCIPAL_ID,
+        ...scope,
+        accountingChoices: [],
+      })
+    ),
+  })
+const moneyEquals = (actual: string | null | undefined, expected: string) =>
+  actual != null &&
+  BigDecimal.equals(BigDecimal.fromStringUnsafe(actual), BigDecimal.fromStringUnsafe(expected))
+const seedCalculation = ({
+  quantity = "2",
+  principalId = PRINCIPAL_ID,
+  userId = USER_ID,
+  sourceId = SOURCE_ID,
+  assets = true,
+  systemPurchaseValue = null,
+  transactionType = "buy_fiat",
+}: {
+  readonly quantity?: string
+  readonly principalId?: PrincipalId
+  readonly userId?: AuthUserId
+  readonly sourceId?: string
+  readonly assets?: boolean
+  readonly transactionType?: string | null
+  readonly systemPurchaseValue?: string | null
+} = {}) =>
+  Effect.gen(function* () {
+    const fixture = yield* seedSyncEngineRepositoryFixture({ principalId, userId, sourceId })
+    if (assets) yield* seedSyncEngineAssets(fixture)
+    const db = yield* drizzle
+    const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z"))
+    const saleTimestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-03-01T00:00:00Z"))
+    const [purchase, sale] = yield* db
+      .insert(schema.transactions)
+      .values([
+        {
+          principalId,
+          sourceId,
+          externalId: "synthetic-purchase",
+          timestamp,
+          transactionType,
+          providerFiatAmount: systemPurchaseValue,
+          providerFiatCurrency: systemPurchaseValue === null ? null : "EUR",
+        },
+        {
+          principalId,
+          sourceId,
+          externalId: "synthetic-sale",
+          timestamp: saleTimestamp,
+          transactionType: "sell_fiat",
+          providerFiatAmount: "30",
+          providerFiatCurrency: "EUR",
+        },
+      ])
+      .returning({ id: schema.transactions.id })
+    if (purchase === undefined || sale === undefined)
+      return yield* Effect.die("Missing synthetic transactions")
+    const legs = yield* prepareMovementLegFixtures([
+      {
+        movementIdentity: { sourceRecordKey: "synthetic-purchase", componentKey: "principal" },
+        principalId,
+        sourceId,
+        externalId: "synthetic-purchase-leg",
+        transactionId: purchase.id,
+        timestamp,
+        assetId: TEST_BTC_ASSET_ID,
+        amount: quantity,
+        kind: "acquisition",
+        provenance: "deterministic",
+        originKind: "none",
+      },
+      {
+        movementIdentity: { sourceRecordKey: "synthetic-sale", componentKey: "principal" },
+        principalId,
+        sourceId,
+        externalId: "synthetic-sale-leg",
+        transactionId: sale.id,
+        timestamp: saleTimestamp,
+        assetId: TEST_BTC_ASSET_ID,
+        amount: quantity,
+        kind: "disposal",
+        provenance: "deterministic",
+        originKind: "none",
+      },
+    ])
+    const [acquisition, disposition] = yield* db
+      .insert(schema.transactionLegs)
+      .values(legs)
+      .returning({
+        id: schema.transactionLegs.id,
+        targetId: schema.transactionLegs.movementCorrectionTargetId,
+      })
+    if (acquisition === undefined || disposition === undefined)
+      return yield* Effect.die("Missing synthetic movements")
+    return {
+      acquisition,
+      disposition,
+      purchaseId: purchase.id,
+      saleId: sale.id,
+      timestamp,
+      cexAccountId: fixture.cexAccountId,
+    }
+  })
+
+const changePrice = ({
+  operation,
+  targetId,
+  input,
+}: {
+  readonly operation: "create" | "replace" | "withdraw"
+  readonly targetId: string
+  readonly input?: MovementPriceInput
+}) =>
+  context.runWithLayer({
+    layer: PrincipalTransactionOverrideRepositoryLive,
+    effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repository) =>
+      Effect.gen(function* () {
+        const found = yield* repository.findContext({
+          principalId: PRINCIPAL_ID,
+          targetId,
+          reportingCurrency: EUR,
+        })
+        if (Option.isNone(found) || found.value.current === null)
+          return yield* Effect.die("Missing current synthetic movement")
+        const parameters = {
+          principalId: PRINCIPAL_ID,
+          actorUserId: USER_ID,
+          targetId,
+          expectedSystemRevision: found.value.current.facts.systemRevision,
+          expectedLeafId: found.value.price.leaf?.id ?? null,
+          reason: "Synthetic price evidence",
+          reportingCurrency: EUR,
+        }
+        const result =
+          operation === "withdraw"
+            ? yield* repository.withdraw({ ...parameters, kind: "price" })
+            : input === undefined
+              ? yield* Effect.die("Missing synthetic price")
+              : yield* repository[operation]({
+                  ...parameters,
+                  reportingCurrency: EUR,
+                  input: { _tag: "price", input },
+                })
+        if (Option.isNone(result)) return yield* Effect.die("Synthetic correction was not accepted")
+        return result.value
+      })
+    ),
+  })
+
+const completeReplay = (jobId: string) => {
+  const state: SourceSyncExecutionState = {
+    phase: "completed",
+    processedRecords: 1,
+    totalRecords: 1,
+    fetchedRecords: 1,
+    normalizedRecords: 1,
+    failedRecords: 0,
+    cursorPayload: null,
+    highWatermark: null,
+    checkpointExternalId: null,
+    checkpointRawRecordId: null,
+  }
+  return context.runWithLayer({
+    layer: SourceSyncJobRepositoryLive,
+    effect: Effect.flatMap(SourceSyncJobRepository, (repo) =>
+      Effect.gen(function* () {
+        const job = yield* runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return yield* db
+              .select({ status: schema.processingJobs.status })
+              .from(schema.processingJobs)
+              .where(eq(schema.processingJobs.id, jobId))
+          })
+        )
+        if (job[0]?.status === "pending")
+          yield* repo.claimJob({
+            jobId,
+            workerId: "synthetic-projection-worker",
+            startedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-01-01T00:00:00Z")),
+          })
+        return yield* repo.completeJob({ jobId, state })
+      })
+    ),
+  })
+}
+
 await Effect.runPromise(context.recreateTestDatabase())
-beforeEach(() => Effect.runPromise(context.recreateTestDatabase()))
+beforeEach(() => {
+  detailSnapshot.afterInitialRead = null
+  return Effect.runPromise(context.recreateTestDatabase())
+})
 
 describe("transaction detail repository", () => {
   it.effect("returns exact equal movements and safe evidence in a read-only snapshot", () =>
@@ -997,3 +1252,407 @@ describe("transaction detail repository", () => {
       })
   )
 })
+
+const readCalculation = (transactionId: string) =>
+  Effect.map(read(transactionId, PRINCIPAL_ID), Option.getOrThrow)
+
+const storedRun = (index: number) =>
+  run(
+    Effect.gen(function* () {
+      const db = yield* drizzle
+      return {
+        results: yield* db
+          .select({
+            acquisitionEventId: schema.calculationRunRealizedResults.acquisitionEventId,
+            dispositionEventId: schema.calculationRunRealizedResults.dispositionEventId,
+            costBasis: schema.calculationRunRealizedResults.costBasis,
+            proceeds: schema.calculationRunRealizedResults.proceeds,
+            gainLoss: schema.calculationRunRealizedResults.gainLoss,
+            treatmentCodes: schema.calculationRunRealizedResults.treatmentCodes,
+          })
+          .from(schema.calculationRunRealizedResults)
+          .where(eq(schema.calculationRunRealizedResults.runId, runId(index))),
+        inputs: yield* db
+          .select({ captured: schema.calculationRunCorrectionInputs.captured })
+          .from(schema.calculationRunCorrectionInputs)
+          .where(eq(schema.calculationRunCorrectionInputs.runId, runId(index))),
+      }
+    })
+  )
+
+const acceptTotal = (
+  targetId: string,
+  amount: string,
+  operation: "create" | "replace" = "create"
+) => changePrice({ targetId, operation, input: { _tag: "total_value", amount, currency: EUR } })
+
+const expectResult = (
+  calculation: import("../../src/services/TransactionDetailRepository.ts").TransactionDetail["calculation"],
+  basis: string,
+  gain: string
+) => {
+  expect(calculation.allocations).toHaveLength(1)
+  const allocation = calculation.allocations[0]
+  expect(moneyEquals(allocation?.costBasis, basis)).toBe(true)
+  expect(moneyEquals(allocation?.proceeds, "30")).toBe(true)
+  expect(moneyEquals(allocation?.gainLoss, gain)).toBe(true)
+  expect(allocation?.treatmentCodes.length).toBeGreaterThan(0)
+}
+
+describe("transaction detail calculation snapshot", () => {
+  it.effect(
+    "keeps accepted current input separate from the displayed run through replacement and withdrawal",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* run(seedCalculation())
+        const accepted = yield* acceptTotal(fixture.acquisition.targetId, "20")
+        yield* completeReplay(accepted.processingJobId)
+        yield* recompute(1)
+        const oldStored = yield* storedRun(1)
+        const purchase = yield* readCalculation(fixture.purchaseId)
+        const sale = yield* readCalculation(fixture.saleId)
+        expectResult(sale.calculation, "20", "10")
+        expect(sale.calculation.correctionInputs).toContainEqual(
+          expect.objectContaining({
+            history: expect.objectContaining({ id: accepted.overrideId }),
+            application: "applied",
+            resolvedPrice: expect.objectContaining({ totalValue: "20" }),
+          })
+        )
+        expect(sale.calculation.run).toMatchObject({
+          id: runId(1),
+          status: "complete",
+          taxYear: 2026,
+          reportingCurrency: "EUR",
+        })
+        expect(sale.calculation.run?.inputLedgerRevision).toBeTruthy()
+        expect(purchase.calculation.correctionInputs).toContainEqual(
+          expect.objectContaining({
+            history: expect.objectContaining({ id: accepted.overrideId }),
+            application: "applied",
+            resolvedPrice: expect.objectContaining({ totalValue: "20" }),
+          })
+        )
+        const replacement = yield* acceptTotal(fixture.acquisition.targetId, "30", "replace")
+        const pending = yield* readCalculation(fixture.purchaseId)
+        expect(pending.calculation.run?.id).toBe(runId(1))
+        expect(pending.movementOverrides[0]?.price).toMatchObject({
+          active: { id: replacement.overrideId },
+          coverage: null,
+        })
+        expect(
+          pending.movementOverrides[0]?.inputs.corrections.find(
+            (input) => input.application === "applied"
+          )?.resolvedPrice?.totalValue
+        ).toBe("30")
+        expect(
+          pending.calculation.correctionInputs.find(
+            (input) => input.history.id === accepted.overrideId
+          )?.resolvedPrice?.totalValue
+        ).toBe("20")
+        expect(
+          pending.calculation.correctionInputs.some(
+            (input) => input.history.id === replacement.overrideId
+          )
+        ).toBe(false)
+        expectResult((yield* readCalculation(fixture.saleId)).calculation, "20", "10")
+        yield* completeReplay(replacement.processingJobId)
+        yield* recompute(2)
+        expectResult((yield* readCalculation(fixture.saleId)).calculation, "30", "0")
+        expect(yield* storedRun(1)).toEqual(oldStored)
+        const replaced = yield* readCalculation(fixture.purchaseId)
+        expect(replaced.movementOverrides[0]?.price.coverage).toMatchObject({
+          runId: runId(2),
+          overrideId: replacement.overrideId,
+        })
+        const withdrawal = yield* changePrice({
+          targetId: fixture.acquisition.targetId,
+          operation: "withdraw",
+        })
+        const withdrawn = yield* readCalculation(fixture.purchaseId)
+        expect(withdrawn.movementOverrides[0]?.price.active).toBeNull()
+        expect(withdrawn.movementOverrides[0]?.context.history.map((row) => row.id)).toEqual(
+          expect.arrayContaining([
+            accepted.overrideId,
+            replacement.overrideId,
+            withdrawal.overrideId,
+          ])
+        )
+        expect(
+          withdrawn.calculation.correctionInputs.find(
+            (input) => input.history.id === replacement.overrideId
+          )?.application
+        ).toBe("applied")
+        yield* completeReplay(withdrawal.processingJobId)
+        yield* recompute(3)
+        const final = yield* readCalculation(fixture.purchaseId)
+        expect(final.calculation.run?.status).toBe("partial")
+        expect(
+          final.calculation.correctionInputs.find(
+            (input) => input.history.id === withdrawal.overrideId
+          )
+        ).toMatchObject({ application: "inactive", streamState: "withdrawn", resolvedPrice: null })
+        expect(yield* storedRun(1)).toEqual(oldStored)
+      })
+  )
+
+  for (const precision of [
+    { quantity: "3", total: "1", gain: "29" },
+    { quantity: "2", total: "0", gain: "30" },
+  ])
+    it.effect(`preserves exact total ${precision.total} for ${precision.quantity} tokens`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* run(seedCalculation({ quantity: precision.quantity }))
+        yield* acceptTotal(fixture.acquisition.targetId, precision.total)
+        yield* recompute(1)
+        const purchase = yield* readCalculation(fixture.purchaseId)
+        const sale = yield* readCalculation(fixture.saleId)
+        expectResult(sale.calculation, precision.total, precision.gain)
+        const captured = purchase.calculation.correctionInputs[0]
+        expect(captured?.resolvedPrice?.totalValue).toBe(precision.total)
+        expect(captured?.history.input).toMatchObject({
+          input: { _tag: "total_value", amount: precision.total, currency: "EUR" },
+        })
+        if (precision.quantity === "3")
+          expect(captured?.resolvedPrice?.unitPrice).toEqual({
+            amount: "0.333333333333333333",
+            rounded: true,
+          })
+      })
+    )
+
+  it.effect("reports no active run and missing valuation without manufacturing zero money", () =>
+    Effect.gen(function* () {
+      const fixture = yield* run(seedCalculation())
+      const before = yield* readCalculation(fixture.saleId)
+      expect(before.calculation.run).toBeNull()
+      expect(before.calculation.state).toBe("partial")
+      expect(before.calculation.allocations).toEqual([])
+      yield* recompute(1)
+      const after = yield* readCalculation(fixture.purchaseId)
+      expect(after.calculation.run?.status).toBe("partial")
+      expect(after.calculation.blockers).toContainEqual(
+        expect.objectContaining({ code: "missing_valuation", eventId: fixture.acquisition.id })
+      )
+      expect(after.calculation.allocations).toHaveLength(1)
+      expect(
+        after.calculation.allocations.every(
+          (allocation) => allocation.costBasis === null && allocation.gainLoss === null
+        )
+      ).toBe(true)
+      expect(after.calculation.correctionInputs).toEqual([])
+    })
+  )
+
+  it.effect(
+    "does not attach old result events to regenerated legs with the same stable target",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* run(seedCalculation())
+        yield* acceptTotal(fixture.acquisition.targetId, "20")
+        yield* recompute(1)
+        const old = yield* storedRun(1)
+        // Replay removes a derived row; the production writer records its stable target again.
+        yield* run(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .delete(schema.transactionLegs)
+              .where(eq(schema.transactionLegs.id, fixture.disposition.id))
+          })
+        )
+        const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-03-01T00:00:00Z"))
+        yield* context.runWithLayer({
+          layer: SourceNormalizationRepositoryLive,
+          effect: Effect.flatMap(SourceNormalizationRepository, (repository) =>
+            repository.persistNormalizedArtifacts({
+              transaction: {
+                sourceId: SOURCE_ID,
+                principalId: PRINCIPAL_ID,
+                sourceRawRecordId: null,
+                externalId: "synthetic-sale",
+                externalGroupId: null,
+                timestamp,
+                transactionType: "sell_fiat",
+                providerTransactionType: "sell",
+                providerStatus: "completed",
+                providerResourcePath: null,
+                providerDescription: null,
+                providerCreatedAt: timestamp,
+                providerUpdatedAt: timestamp,
+                metadata: {},
+                providerFiatAmount: "30",
+                providerFiatCurrency: "EUR",
+              },
+              venueContext: {
+                venueType: "cex",
+                cexAccountId: fixture.cexAccountId,
+                externalAccountId: null,
+                externalOrderId: null,
+                externalFillId: null,
+                side: "sell",
+                instrument: "BTC-EUR",
+                fillPrice: null,
+                commissionAmount: null,
+                commissionCurrency: null,
+                metadata: {},
+              },
+              providerTransfers: [],
+              canonicalTransfers: [],
+              providerAssetRowIds: [],
+              transactionReview: null,
+              resolvedTransactionType: {
+                providerTransactionType: "sell",
+                transactionType: "sell_fiat",
+                inventoryEffect: "disposal",
+                taxTreatment: "taxable_by_default",
+                resolutionStrategy: "static",
+                pairedRecordRequired: false,
+                mappingStatus: "approved",
+              },
+              legs: [
+                {
+                  movementIdentity: {
+                    _tag: "identified",
+                    sourceRecordKey: "synthetic-sale",
+                    componentKey: "principal",
+                  },
+                  sourceId: SOURCE_ID,
+                  principalId: PRINCIPAL_ID,
+                  sourceRawRecordId: null,
+                  externalId: "synthetic-sale-leg",
+                  txHash: null,
+                  timestamp,
+                  addressId: null,
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "2",
+                  kind: "disposal",
+                  provenance: "deterministic",
+                  derivationRule: null,
+                  metadata: {},
+                  transactionId: fixture.saleId,
+                  originKind: "none",
+                  providerTransferId: null,
+                  sourceTransferId: null,
+                  fiatAmount: null,
+                  fiatCurrency: null,
+                  feeForTransactionId: null,
+                },
+              ],
+            })
+          ),
+        })
+        const replayed = yield* readCalculation(fixture.saleId)
+        const newId = replayed.movements[0]?.id
+        expect(newId).toBeDefined()
+        expect(newId).not.toBe(fixture.disposition.id)
+        expect(replayed.movements[0]?.movementCorrectionTargetId).toBe(fixture.disposition.targetId)
+        expect(replayed.calculation.run?.id).toBe(runId(1))
+        expect(replayed.calculation.state).toBe("partial")
+        expect(replayed.calculation.allocations).toEqual([])
+        expect(yield* storedRun(1)).toEqual(old)
+        yield* recompute(2)
+        const recomputed = yield* readCalculation(fixture.saleId)
+        expectResult(recomputed.calculation, "20", "10")
+        expect(recomputed.calculation.allocations[0]?.dispositionEventId).toBe(newId)
+      })
+  )
+
+  it.effect(
+    "keeps one snapshot when correction acceptance and run activation race after initial detail lookup",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* run(seedCalculation())
+        yield* acceptTotal(fixture.acquisition.targetId, "20")
+        yield* recompute(1)
+        const previous = yield* readCalculation(fixture.purchaseId)
+        detailSnapshot.afterInitialRead = () =>
+          Effect.runPromise(
+            Effect.gen(function* () {
+              yield* acceptTotal(fixture.acquisition.targetId, "30", "replace")
+              yield* recompute(2)
+            })
+          )
+        const racing = yield* readCalculation(fixture.purchaseId)
+        expect(racing.calculation.run).toEqual(previous.calculation.run)
+        expect(racing.calculation.allocations).toEqual(previous.calculation.allocations)
+        expect(racing.calculation.run?.id).toBe(runId(1))
+        expect(
+          racing.movementOverrides[0]?.inputs.corrections.find(
+            (input) => input.application === "applied"
+          )?.resolvedPrice?.totalValue
+        ).toBe("20")
+        expect(
+          racing.calculation.correctionInputs
+            .filter((input) => input.application === "applied")
+            .map((input) => input.resolvedPrice?.totalValue)
+        ).toEqual(["20"])
+        const next = yield* readCalculation(fixture.purchaseId)
+        expect(next.calculation.run?.id).toBe(runId(2))
+        expect(next.calculation.run?.inputLedgerRevision).not.toBe(
+          previous.calculation.run?.inputLedgerRevision
+        )
+        expect(
+          next.movementOverrides[0]?.inputs.corrections.find(
+            (input) => input.application === "applied"
+          )?.resolvedPrice?.totalValue
+        ).toBe("30")
+        expectResult((yield* readCalculation(fixture.saleId)).calculation, "30", "0")
+      })
+  )
+})
+
+it.effect(
+  "returns the independent current asset projection through the movement's recorded provider link",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* run(seedCalculation())
+      const providerId = yield* run(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const [provider] = yield* db
+            .insert(schema.providerAssets)
+            .values({
+              provider: "synthetic",
+              providerAssetId: "inspector-btc",
+              currencyCode: "BTC",
+              name: "Synthetic Bitcoin",
+              exponent: 8,
+              providerType: "crypto",
+              rawProviderPayload: {},
+              evidenceRevision: 1,
+              discoveredAt: time,
+              retrievedAt: time,
+            })
+            .returning({ id: schema.providerAssets.id })
+          if (provider === undefined) return yield* Effect.die("Missing provider asset")
+          yield* db
+            .insert(schema.providerAssetSourceUses)
+            .values({ providerAssetRowId: provider.id, sourceId: SOURCE_ID })
+          yield* db.insert(schema.providerAssetMappings).values({
+            providerAssetRowId: provider.id,
+            mappingKind: "asset",
+            canonicalAssetId: TEST_BTC_ASSET_ID,
+            mappingStatus: "approved",
+          })
+          yield* db
+            .update(schema.transactionLegs)
+            .set({ providerAssetRowId: provider.id })
+            .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+          return provider.id
+        })
+      )
+      const detail = yield* readCalculation(fixture.purchaseId)
+      expect(detail.calculation.run).toBeNull()
+      expect(detail.assetOverrides).toHaveLength(1)
+      expect(detail.assetOverrides[0]).toMatchObject({
+        movementId: fixture.acquisition.id,
+        projection: {
+          target: { _tag: "provider_asset", providerAssetRowId: providerId },
+          activeIdentityOverride: null,
+          activeInclusionOverride: null,
+          history: [],
+        },
+      })
+    })
+)
