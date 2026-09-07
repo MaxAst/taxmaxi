@@ -427,7 +427,7 @@ const getRequest = ({
   }).pipe(Effect.orDie)
 
 interface AccountResponseBody {
-  readonly account: { readonly welcomeSeenAt: string | null }
+  readonly account: { readonly welcomeSeenAt: string | null; readonly updatedAt: string }
   readonly loginMethods: ReadonlyArray<unknown>
 }
 
@@ -504,7 +504,8 @@ describe("AuthApiLive integration", () => {
     }).pipe(Effect.scoped)
   )
 
-  it.effect("records the welcome-seen fact once and keeps the first timestamp", () =>
+  // it.live: the handler stamps from the live clock, so the wait below must be real time too.
+  it.live("records the welcome-seen fact once and keeps the first timestamp", () =>
     Effect.gen(function* () {
       const { handler } = yield* makeAuthHandlerScoped
       yield* seedCoinbaseSession()
@@ -521,24 +522,28 @@ describe("AuthApiLive integration", () => {
 
       expect(firstMarkResponse.status).toBe(200)
       const firstMark = yield* jsonBody<AccountResponseBody>(firstMarkResponse)
-      const welcomeSeenAt = firstMark.account.welcomeSeenAt
+      const { welcomeSeenAt, updatedAt } = firstMark.account
 
       expect(welcomeSeenAt).toEqual(expect.any(String))
       expect(welcomeSeenAt).toMatch(ISO_TIMESTAMP_PATTERN)
+      expect(updatedAt).toBe(welcomeSeenAt)
       expect(firstMark.loginMethods).toHaveLength(1)
+
+      // Let time move so a rewritten updatedAt would show up as a different value.
+      yield* Effect.sleep("5 millis")
 
       const secondMarkResponse = yield* postRequest({ handler, path: "/auth/me/welcome", cookie })
 
       expect(secondMarkResponse.status).toBe(200)
       expect(yield* jsonBody(secondMarkResponse)).toMatchObject({
-        account: { id: COINBASE_USER_ID, welcomeSeenAt },
+        account: { id: COINBASE_USER_ID, welcomeSeenAt, updatedAt },
       })
 
       const afterResponse = yield* getRequest({ handler, path: "/auth/me", cookie })
 
       expect(afterResponse.status).toBe(200)
       expect(yield* jsonBody(afterResponse)).toMatchObject({
-        account: { id: COINBASE_USER_ID, welcomeSeenAt },
+        account: { id: COINBASE_USER_ID, welcomeSeenAt, updatedAt },
       })
     }).pipe(Effect.scoped)
   )

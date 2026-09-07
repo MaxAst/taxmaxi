@@ -17,7 +17,6 @@ import type {
   AuthProviderType,
   Email,
 } from "@my/core/authentication"
-import type { Timestamp } from "@my/core/shared/values/Timestamp"
 import type { EntityNotFoundError, PersistenceError } from "../errors/RepositoryError.ts"
 
 /**
@@ -47,11 +46,6 @@ export interface AuthUserUpdate {
   readonly role?: UserRole
   readonly primaryProvider?: AuthProviderType
   readonly emailVerified?: boolean
-  /**
-   * Server time of the welcome mark. Set once: when the row already has a
-   * value, the writer keeps it and ignores the new one.
-   */
-  readonly welcomeSeenAt?: Timestamp
 }
 
 /**
@@ -96,6 +90,19 @@ export interface UserRepositoryService {
     id: AuthUserId,
     data: AuthUserUpdate
   ) => Effect.Effect<AuthUser, EntityNotFoundError | PersistenceError>
+
+  /**
+   * Record that the user has seen the welcome. Set once: the first call stamps
+   * `welcomeSeenAt` and `updatedAt` with server time; later calls change
+   * nothing and return the row as it is. This is the only writer of that fact.
+   *
+   * @param params.userId - The user to mark
+   * @returns Effect containing the user after the mark
+   * @throws EntityNotFoundError if user doesn't exist
+   */
+  readonly markWelcomeSeen: (params: {
+    readonly userId: AuthUserId
+  }) => Effect.Effect<AuthUser, EntityNotFoundError | PersistenceError>
 
   /**
    * Delete a user by their ID

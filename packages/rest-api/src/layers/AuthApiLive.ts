@@ -1682,10 +1682,9 @@ export const AuthSessionApiLive = HttpApiBuilder.group(TaxMaxiApi, "authSession"
             userId: currentUser.userId,
           })
 
-          // The writer keeps an existing stamp, so a second mark returns the first timestamp.
-          const welcomeSeenAt = yield* nowTimestamp
+          // Set once at the writer: a repeat mark returns the row unchanged, updatedAt included.
           const updateResult = yield* userRepo
-            .update(currentUser.userId, { welcomeSeenAt })
+            .markWelcomeSeen({ userId: currentUser.userId })
             .pipe(Effect.result)
 
           if (updateResult._tag === "Failure") {
