@@ -1,4 +1,4 @@
-/** Principal-owned factual transaction inspection.
+/** Principal-owned transaction inspection with current decisions and stored run results.
  * @module TransactionDetailRepository
  */
 import type { UnsupportedJurisdictionError } from "@my/accounting"
@@ -7,7 +7,12 @@ import * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import type * as Option from "effect/Option"
 import type { PersistenceError } from "../errors/RepositoryError.ts"
-import type { MovementCalculationScope } from "./PrincipalTransactionOverrideRepository.ts"
+import type { CalculationRunCorrectionInput } from "./FactualLedgerRepository.ts"
+import type { PrincipalAssetOverrideProjection } from "./PrincipalAssetOverrideRepository.ts"
+import type {
+  MovementCalculationScope,
+  PrincipalTransactionOverrideProjection,
+} from "./PrincipalTransactionOverrideRepository.ts"
 
 /** Safe retained provider evidence; payloads and account credentials are never returned. */
 export interface TransactionDetailEvidence {
@@ -54,8 +59,79 @@ export interface TransactionDetailMovement {
   readonly evidenceStatus: "available" | "unavailable"
 }
 
-/** Factual foundation, distinct from selected-run results and current correction projections. */
+/** One immutable selected-scope run and its stored facts; current corrections live outside it. */
+export interface TransactionDetailCalculation {
+  readonly run: {
+    readonly id: string
+    readonly jurisdiction: string
+    readonly taxYear: number
+    readonly reportingCurrency: string
+    readonly status: "pending" | "running" | "complete" | "partial" | "failed"
+    readonly engineVersion: string
+    readonly ruleSetVersion: string
+    readonly inputLedgerRevision: string
+    readonly valuationRevision: string
+    readonly failureCode: string | null
+  } | null
+  /** Completeness of this transaction, independent of run status and current work. */
+  readonly state: "complete" | "partial"
+  /** Money availability is independent of processing and run status; custody has no monetary result. */
+  readonly monetaryStatus: "available" | "partial" | "unavailable" | "not_applicable"
+  /** Stored remaining inventory; per-unit basis is never presented as or multiplied into a total. */
+  readonly derivedLots: ReadonlyArray<{
+    readonly sequence: number
+    readonly acquisitionEventId: string
+    readonly assetId: string
+    readonly custodyUnitId: string
+    readonly acquiredAt: Date
+    readonly remainingQuantity: string
+    readonly costBasisPerUnit: string | null
+  }>
+  readonly allocations: ReadonlyArray<{
+    readonly sequence: number
+    readonly acquisitionEventId: string
+    readonly dispositionEventId: string
+    readonly assetId: string
+    readonly custodyUnitId: string
+    readonly acquiredAt: Date
+    readonly disposedAt: Date
+    readonly quantity: string
+    readonly costBasis: string | null
+    readonly proceeds: string | null
+    readonly gainLoss: string | null
+    readonly treatmentCodes: ReadonlyArray<string>
+  }>
+  readonly income: ReadonlyArray<{
+    readonly sequence: number
+    readonly sourceId: string
+    readonly eventId: string
+    readonly assetId: string
+    readonly occurredAt: Date
+    readonly quantity: string
+    readonly value: string
+    readonly treatmentCodes: ReadonlyArray<string>
+  }>
+  readonly blockers: ReadonlyArray<{
+    readonly sequence: number
+    readonly eventId: string
+    readonly code: string
+    readonly assetId: string | null
+    readonly providerAssetRowId: string | null
+    readonly custodyUnitId: string
+    readonly missingQuantity: string | null
+  }>
+  readonly processedEventIds: ReadonlyArray<string>
+  readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
+}
+
+/** Owned facts, selected-run results and independent current correction projections. */
 export interface TransactionDetail {
+  readonly calculation: TransactionDetailCalculation
+  readonly movementOverrides: ReadonlyArray<PrincipalTransactionOverrideProjection>
+  readonly assetOverrides: ReadonlyArray<{
+    readonly movementId: string
+    readonly projection: PrincipalAssetOverrideProjection | null
+  }>
   readonly sourceRawRecordId: string | null
   readonly sourceEvidence: ReadonlyArray<TransactionDetailEvidenceLink>
   readonly transactionId: string
@@ -95,7 +171,7 @@ export interface TransactionDetailRepositoryService {
   >
 }
 
-/** Factual transaction inspection service. */
+/** Principal-owned transaction inspection service. */
 export class TransactionDetailRepository extends Context.Service<
   TransactionDetailRepository,
   TransactionDetailRepositoryService
