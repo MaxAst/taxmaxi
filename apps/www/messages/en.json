@@ -996,5 +996,6 @@
   "app.treatment.moneyPartial": "Monetary results: partial.",
   "app.treatment.moneyUnavailable": "Monetary results: unavailable.",
   "app.treatment.moneyNotApplicable": "Monetary results: not applicable.",
-  "app.treatment.toggleLabel": "Treatment · {year} · {description} · {transactionId}"
+  "app.treatment.toggleLabel": "Treatment · {year} · {description} · {transactionId}",
+  "app.treatment.transaction": "Transaction"
 }

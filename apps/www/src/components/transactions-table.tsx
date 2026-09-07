@@ -322,7 +322,7 @@ function TransactionTreatmentDisclosure({
         aria-expanded={open}
         aria-label={m["app.treatment.toggleLabel"]({
           year: taxYear,
-          description: transaction.description ?? typeLabel(transaction.transactionType),
+          description: transaction.description ?? m["app.treatment.transaction"](),
           transactionId: transaction.transactionId,
         })}
         className="min-h-11"
@@ -338,7 +338,7 @@ function TransactionTreatmentDisclosure({
           <TransactionTreatmentResults
             key={`${transaction.transactionId}:${taxYear}`}
             transactionId={transaction.transactionId}
-            description={transaction.description ?? typeLabel(transaction.transactionType)}
+            description={transaction.description ?? m["app.treatment.transaction"]()}
             taxYear={taxYear}
             taxmaxi={taxmaxi}
             onUnauthorized={onUnauthorized}

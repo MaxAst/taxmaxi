@@ -13,6 +13,8 @@ import { TaxMaxi, type TransactionDetail, type TransactionListItem } from "taxma
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import type { ReactElement } from "react"
 
+import { setLocale } from "#/paraglide/runtime"
+
 import { TransactionsTable } from "#/components/transactions-table"
 
 const transaction: TransactionListItem = {
@@ -425,6 +427,42 @@ describe("treatment lifecycle and monetary status", () => {
         screen.getByText("No disposal allocations or income results were returned.")
       ).toBeTruthy()
       expect(screen.queryByText("Tax-free holding period")).toBeNull()
+    }
+  )
+
+  it.each([
+    ["en", "Treatment · 2025 · Transaction", "Treatment results · Transaction"],
+    ["de", "Behandlung · 2025 · Transaktion", "Behandlungsergebnisse · Transaktion"],
+  ] as const)(
+    "localizes missing-description disclosure names in %s",
+    async (locale, toggleLabel, regionLabel) => {
+      const originalUrl = window.location.href
+      window.history.replaceState(null, "", "/app")
+      setLocale(locale, { reload: false })
+      try {
+        vi.spyOn(taxmaxi.transactions, "get").mockResolvedValue(detail())
+        render(
+          <TransactionsTable
+            {...defaultProps}
+            transactions={[{ ...transaction, description: null }]}
+          />
+        )
+        fireEvent.click(
+          screen.getByRole("button", { name: `${toggleLabel} · ${transaction.transactionId}` })
+        )
+        await screen.findByText(
+          locale === "de"
+            ? "Zurückgegebener Lauf: run-a · 2025 · DE · EUR"
+            : "Returned run: run-a · 2025 · DE · EUR"
+        )
+        expect(
+          screen.getByRole("region", { name: `${regionLabel} · ${transaction.transactionId}` })
+        ).toBeTruthy()
+      } finally {
+        cleanup()
+        setLocale("en", { reload: false })
+        window.history.replaceState(null, "", originalUrl)
+      }
     }
   )
 
