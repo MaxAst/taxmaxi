@@ -865,9 +865,10 @@ const make = Effect.gen(function* () {
         // Hash the password
         const hashedPassword = yield* passwordHasher.hash(Redacted.make(password))
 
-        // Create user
+        // Create user. The fallback display name keeps its existing default:
+        // it comes from the email as typed, so the casing stays as submitted.
         const userId = AuthUserId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie))
-        const displayName = providedDisplayName ?? inferDisplayNameFromEmail(email)
+        const displayName = providedDisplayName ?? inferDisplayNameFromEmail(submittedEmail)
 
         const user = yield* userRepo
           .create({

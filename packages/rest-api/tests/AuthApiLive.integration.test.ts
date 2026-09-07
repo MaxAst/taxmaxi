@@ -80,6 +80,13 @@ const readStoredLocalProviderIds = () =>
     return rows.filter((row) => row.provider === "local").map((row) => row.providerId)
   }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
 
+const readStoredDisplayNames = () =>
+  Effect.gen(function* () {
+    const db = yield* drizzle
+    const rows = yield* db.select({ name: schema.users.name }).from(schema.users)
+    return rows.map((row) => row.name)
+  }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+
 const clearAuthTables = () =>
   runTestSql({
     statement: `
@@ -897,6 +904,27 @@ describe("AuthApiLive integration", () => {
       expect(loginSessionToken.length).toBeGreaterThanOrEqual(32)
       expect(loginSessionToken).not.toBe(verifiedSessionToken)
     }).pipe(Effect.scoped)
+  )
+
+  it.effect(
+    "derives the fallback display name from the email as typed while storing the canonical email",
+    () =>
+      Effect.gen(function* () {
+        const { handler } = yield* makeAuthHandlerScoped
+
+        const registerResponse = yield* postJson({
+          handler,
+          path: "/auth/register",
+          payload: {
+            email: "Max+Tax@Example.com ",
+            password: "password123",
+          },
+        })
+
+        expect(registerResponse.status).toBe(201)
+        expect(yield* readStoredAccountEmails()).toEqual(["max+tax@example.com"])
+        expect(yield* readStoredDisplayNames()).toEqual(["Max+Tax"])
+      }).pipe(Effect.scoped)
   )
 
   it.effect(
