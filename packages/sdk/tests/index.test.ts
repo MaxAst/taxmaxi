@@ -140,6 +140,7 @@ const sourceOverviewResponseBody = JSON.stringify({
   calculationRunId: null,
   source: sourceResponse,
   latestSync: {
+    jobId: null,
     status: null,
     mode: null,
     queuedAt: null,
