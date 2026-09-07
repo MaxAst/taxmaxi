@@ -3,6 +3,7 @@
  *
  * @module PrincipalTransactionOverrideRepositoryLive
  */
+import { PgClient } from "@effect/sql-pg"
 import {
   ObservedConsiderationFact,
   MarketQuoteFact,
@@ -221,7 +222,7 @@ const loadContext = ({
   readonly retainedValuationEvidence?: MovementValuationEvidence
   readonly allowUnavailableInspection?: boolean
   readonly assetLoader: Effect.Success<typeof makePrincipalAssetOverrideDecisionLoader>
-  readonly tx: SyncEngineDbTransaction
+  readonly tx: Pick<SyncEngineDbTransaction, "select" | "execute">
   readonly principalId: PrincipalTransactionOverrideContext["target"]["principalId"]
   readonly targetId: string
 }) =>
@@ -511,6 +512,7 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
   PrincipalTransactionOverrideRepository,
   Effect.gen(function* () {
     const db = yield* drizzle
+    const pgClient = yield* PgClient.PgClient
     const assetLoader = yield* makePrincipalAssetOverrideDecisionLoader
     const snapshotReader = yield* makeFactualLedgerSnapshotReader
     const findContext: PrincipalTransactionOverrideRepositoryShape["findContext"] = (params) =>
@@ -546,7 +548,7 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
       kind,
       scope,
     }: {
-      readonly tx: SyncEngineDbTransaction
+      readonly tx: Pick<SyncEngineDbTransaction, "select" | "execute">
       readonly context: PrincipalTransactionOverrideContext
       readonly kind: "price" | "classification"
       readonly scope: MovementCalculationScope
@@ -729,7 +731,7 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
       snapshot,
       scope,
     }: {
-      readonly tx: SyncEngineDbTransaction
+      readonly tx: Pick<SyncEngineDbTransaction, "select" | "execute">
       readonly context: PrincipalTransactionOverrideContext
       readonly snapshot: FactualLedgerSnapshot
       readonly inspectionReader: Effect.Success<typeof makeFactualLedgerSnapshotReader>
@@ -864,224 +866,223 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
           )
         )
 
+    const readTransactionTargets: PrincipalTransactionOverrideRepositoryShape["findTransactionTargets"] =
+      (params) =>
+        Effect.gen(function* () {
+          const [transaction] = yield* db
+            .select({ id: schema.transactions.id, sourceId: schema.transactions.sourceId })
+            .from(schema.transactions)
+            .innerJoin(
+              schema.sources,
+              and(
+                eq(schema.sources.id, schema.transactions.sourceId),
+                eq(schema.sources.principalId, params.principalId)
+              )
+            )
+            .where(
+              and(
+                eq(schema.transactions.id, params.transactionId),
+                eq(schema.transactions.principalId, params.principalId)
+              )
+            )
+          if (transaction === undefined) return Option.none()
+          const rows = yield* db
+            .selectDistinct({ targetId: schema.transactionLegs.movementCorrectionTargetId })
+            .from(schema.transactionLegs)
+            .innerJoin(
+              schema.sources,
+              and(
+                eq(schema.sources.id, schema.transactionLegs.sourceId),
+                eq(schema.sources.principalId, params.principalId)
+              )
+            )
+            .innerJoin(
+              schema.movementCorrectionTargets,
+              and(
+                eq(
+                  schema.movementCorrectionTargets.id,
+                  schema.transactionLegs.movementCorrectionTargetId
+                ),
+                eq(schema.movementCorrectionTargets.sourceId, schema.transactionLegs.sourceId),
+                eq(schema.movementCorrectionTargets.principalId, params.principalId)
+              )
+            )
+            .where(
+              and(
+                eq(schema.transactionLegs.principalId, params.principalId),
+                or(
+                  and(
+                    eq(schema.transactionLegs.transactionId, params.transactionId),
+                    eq(schema.transactionLegs.sourceId, transaction.sourceId)
+                  ),
+                  and(
+                    eq(schema.transactionLegs.feeForTransactionId, params.transactionId),
+                    eq(schema.transactionLegs.sourceId, transaction.sourceId)
+                  ),
+                  exists(
+                    db
+                      .select({ id: schema.providerTransfers.id })
+                      .from(schema.providerTransfers)
+                      .where(
+                        and(
+                          eq(schema.transactionLegs.originKind, "provider_transfer"),
+                          eq(
+                            schema.providerTransfers.id,
+                            schema.transactionLegs.providerTransferId
+                          ),
+                          eq(schema.providerTransfers.sourceId, schema.transactionLegs.sourceId),
+                          eq(schema.providerTransfers.transactionId, params.transactionId),
+                          eq(schema.providerTransfers.sourceId, transaction.sourceId)
+                        )
+                      )
+                  ),
+                  exists(
+                    db
+                      .select({ id: schema.transferReconciliations.id })
+                      .from(schema.transferReconciliations)
+                      .innerJoin(
+                        schema.providerTransfers,
+                        eq(
+                          schema.providerTransfers.id,
+                          schema.transferReconciliations.providerTransferId
+                        )
+                      )
+                      .innerJoin(
+                        PROVIDER_TRANSACTION,
+                        and(
+                          eq(PROVIDER_TRANSACTION.id, schema.providerTransfers.transactionId),
+                          eq(PROVIDER_TRANSACTION.sourceId, schema.providerTransfers.sourceId),
+                          eq(PROVIDER_TRANSACTION.principalId, params.principalId)
+                        )
+                      )
+                      .innerJoin(
+                        PROVIDER_SOURCE,
+                        and(
+                          eq(PROVIDER_SOURCE.id, schema.providerTransfers.sourceId),
+                          eq(PROVIDER_SOURCE.principalId, params.principalId)
+                        )
+                      )
+                      .innerJoin(
+                        schema.transfers,
+                        and(
+                          eq(
+                            schema.transfers.id,
+                            schema.transferReconciliations.canonicalTransferId
+                          ),
+                          eq(schema.transfers.principalId, params.principalId)
+                        )
+                      )
+                      .innerJoin(
+                        CANONICAL_TRANSACTION,
+                        and(
+                          eq(
+                            CANONICAL_TRANSACTION.id,
+                            schema.transferReconciliations.canonicalTransactionId
+                          ),
+                          eq(CANONICAL_TRANSACTION.sourceId, schema.transfers.sourceId),
+                          eq(CANONICAL_TRANSACTION.principalId, params.principalId)
+                        )
+                      )
+                      .innerJoin(
+                        CANONICAL_SOURCE,
+                        and(
+                          eq(CANONICAL_SOURCE.id, schema.transfers.sourceId),
+                          eq(CANONICAL_SOURCE.principalId, params.principalId)
+                        )
+                      )
+                      .where(
+                        and(
+                          eq(schema.transferReconciliations.principalId, params.principalId),
+                          or(
+                            eq(schema.transferReconciliations.status, "approved"),
+                            and(
+                              eq(schema.transferReconciliations.status, "auto_applied"),
+                              eq(schema.transferReconciliations.deterministic, true)
+                            )
+                          ),
+                          or(
+                            eq(
+                              schema.transferReconciliations.canonicalTransactionId,
+                              params.transactionId
+                            ),
+                            eq(schema.providerTransfers.transactionId, params.transactionId)
+                          ),
+                          or(
+                            and(
+                              eq(schema.transactionLegs.originKind, "canonical_transfer"),
+                              eq(schema.transactionLegs.sourceTransferId, schema.transfers.id),
+                              eq(schema.transactionLegs.sourceId, schema.transfers.sourceId)
+                            ),
+                            and(
+                              eq(schema.transactionLegs.originKind, "provider_transfer"),
+                              eq(
+                                schema.transactionLegs.providerTransferId,
+                                schema.providerTransfers.id
+                              ),
+                              eq(schema.transactionLegs.sourceId, schema.providerTransfers.sourceId)
+                            )
+                          )
+                        )
+                      )
+                  )
+                )
+              )
+            )
+            .orderBy(asc(schema.transactionLegs.movementCorrectionTargetId))
+          const occurredBefore = yield* readScope(params.scope)
+          if (rows.length === 0) return Option.some([])
+          const snapshot = yield* snapshotReader.load({
+            principalId: params.principalId,
+            reportingCurrency: params.scope.reportingCurrency,
+            occurredBefore,
+          })
+          const inspectionReader = makeInspectionReader()
+          const projections = yield* Effect.forEach(rows, ({ targetId }) =>
+            Effect.gen(function* () {
+              const context = yield* loadContext({
+                tx: db,
+                assetLoader,
+                snapshotReader: inspectionReader,
+                reportingCurrency: params.scope.reportingCurrency,
+                principalId: params.principalId,
+                targetId,
+                allowUnavailableInspection: true,
+              })
+              if (Option.isNone(context))
+                return yield* new PersistenceError({
+                  operation: "movementCorrection.discover",
+                  cause: "Owned target disappeared inside snapshot",
+                })
+              return yield* project({
+                tx: db,
+                context: context.value,
+                snapshot,
+                scope: params.scope,
+                inspectionReader,
+              })
+            })
+          )
+          return Option.some(projections)
+        }).pipe(
+          Effect.mapError((cause) =>
+            Schema.is(UnsupportedJurisdictionError)(cause)
+              ? cause
+              : isPersistenceError(cause)
+                ? cause
+                : new PersistenceError({
+                    operation: "movementCorrection.findTransactionTargets",
+                    cause,
+                  })
+          )
+        )
+
     const findTransactionTargets: PrincipalTransactionOverrideRepositoryShape["findTransactionTargets"] =
       (params) =>
         db
-          .transaction(
-            (tx) =>
-              Effect.gen(function* () {
-                const [transaction] = yield* tx
-                  .select({ id: schema.transactions.id, sourceId: schema.transactions.sourceId })
-                  .from(schema.transactions)
-                  .innerJoin(
-                    schema.sources,
-                    and(
-                      eq(schema.sources.id, schema.transactions.sourceId),
-                      eq(schema.sources.principalId, params.principalId)
-                    )
-                  )
-                  .where(
-                    and(
-                      eq(schema.transactions.id, params.transactionId),
-                      eq(schema.transactions.principalId, params.principalId)
-                    )
-                  )
-                if (transaction === undefined) return Option.none()
-                const rows = yield* tx
-                  .selectDistinct({ targetId: schema.transactionLegs.movementCorrectionTargetId })
-                  .from(schema.transactionLegs)
-                  .innerJoin(
-                    schema.sources,
-                    and(
-                      eq(schema.sources.id, schema.transactionLegs.sourceId),
-                      eq(schema.sources.principalId, params.principalId)
-                    )
-                  )
-                  .innerJoin(
-                    schema.movementCorrectionTargets,
-                    and(
-                      eq(
-                        schema.movementCorrectionTargets.id,
-                        schema.transactionLegs.movementCorrectionTargetId
-                      ),
-                      eq(
-                        schema.movementCorrectionTargets.sourceId,
-                        schema.transactionLegs.sourceId
-                      ),
-                      eq(schema.movementCorrectionTargets.principalId, params.principalId)
-                    )
-                  )
-                  .where(
-                    and(
-                      eq(schema.transactionLegs.principalId, params.principalId),
-                      or(
-                        and(
-                          eq(schema.transactionLegs.transactionId, params.transactionId),
-                          eq(schema.transactionLegs.sourceId, transaction.sourceId)
-                        ),
-                        and(
-                          eq(schema.transactionLegs.feeForTransactionId, params.transactionId),
-                          eq(schema.transactionLegs.sourceId, transaction.sourceId)
-                        ),
-                        exists(
-                          tx
-                            .select({ id: schema.providerTransfers.id })
-                            .from(schema.providerTransfers)
-                            .where(
-                              and(
-                                eq(schema.transactionLegs.originKind, "provider_transfer"),
-                                eq(
-                                  schema.providerTransfers.id,
-                                  schema.transactionLegs.providerTransferId
-                                ),
-                                eq(
-                                  schema.providerTransfers.sourceId,
-                                  schema.transactionLegs.sourceId
-                                ),
-                                eq(schema.providerTransfers.transactionId, params.transactionId),
-                                eq(schema.providerTransfers.sourceId, transaction.sourceId)
-                              )
-                            )
-                        ),
-                        exists(
-                          tx
-                            .select({ id: schema.transferReconciliations.id })
-                            .from(schema.transferReconciliations)
-                            .innerJoin(
-                              schema.providerTransfers,
-                              eq(
-                                schema.providerTransfers.id,
-                                schema.transferReconciliations.providerTransferId
-                              )
-                            )
-                            .innerJoin(
-                              PROVIDER_TRANSACTION,
-                              and(
-                                eq(PROVIDER_TRANSACTION.id, schema.providerTransfers.transactionId),
-                                eq(
-                                  PROVIDER_TRANSACTION.sourceId,
-                                  schema.providerTransfers.sourceId
-                                ),
-                                eq(PROVIDER_TRANSACTION.principalId, params.principalId)
-                              )
-                            )
-                            .innerJoin(
-                              PROVIDER_SOURCE,
-                              and(
-                                eq(PROVIDER_SOURCE.id, schema.providerTransfers.sourceId),
-                                eq(PROVIDER_SOURCE.principalId, params.principalId)
-                              )
-                            )
-                            .innerJoin(
-                              schema.transfers,
-                              and(
-                                eq(
-                                  schema.transfers.id,
-                                  schema.transferReconciliations.canonicalTransferId
-                                ),
-                                eq(schema.transfers.principalId, params.principalId)
-                              )
-                            )
-                            .innerJoin(
-                              CANONICAL_TRANSACTION,
-                              and(
-                                eq(
-                                  CANONICAL_TRANSACTION.id,
-                                  schema.transferReconciliations.canonicalTransactionId
-                                ),
-                                eq(CANONICAL_TRANSACTION.sourceId, schema.transfers.sourceId),
-                                eq(CANONICAL_TRANSACTION.principalId, params.principalId)
-                              )
-                            )
-                            .innerJoin(
-                              CANONICAL_SOURCE,
-                              and(
-                                eq(CANONICAL_SOURCE.id, schema.transfers.sourceId),
-                                eq(CANONICAL_SOURCE.principalId, params.principalId)
-                              )
-                            )
-                            .where(
-                              and(
-                                eq(schema.transferReconciliations.principalId, params.principalId),
-                                or(
-                                  eq(schema.transferReconciliations.status, "approved"),
-                                  and(
-                                    eq(schema.transferReconciliations.status, "auto_applied"),
-                                    eq(schema.transferReconciliations.deterministic, true)
-                                  )
-                                ),
-                                or(
-                                  eq(
-                                    schema.transferReconciliations.canonicalTransactionId,
-                                    params.transactionId
-                                  ),
-                                  eq(schema.providerTransfers.transactionId, params.transactionId)
-                                ),
-                                or(
-                                  and(
-                                    eq(schema.transactionLegs.originKind, "canonical_transfer"),
-                                    eq(
-                                      schema.transactionLegs.sourceTransferId,
-                                      schema.transfers.id
-                                    ),
-                                    eq(schema.transactionLegs.sourceId, schema.transfers.sourceId)
-                                  ),
-                                  and(
-                                    eq(schema.transactionLegs.originKind, "provider_transfer"),
-                                    eq(
-                                      schema.transactionLegs.providerTransferId,
-                                      schema.providerTransfers.id
-                                    ),
-                                    eq(
-                                      schema.transactionLegs.sourceId,
-                                      schema.providerTransfers.sourceId
-                                    )
-                                  )
-                                )
-                              )
-                            )
-                        )
-                      )
-                    )
-                  )
-                  .orderBy(asc(schema.transactionLegs.movementCorrectionTargetId))
-                const occurredBefore = yield* readScope(params.scope)
-                if (rows.length === 0) return Option.some([])
-                const snapshot = yield* snapshotReader.load({
-                  principalId: params.principalId,
-                  reportingCurrency: params.scope.reportingCurrency,
-                  occurredBefore,
-                })
-                const inspectionReader = makeInspectionReader()
-                const projections = yield* Effect.forEach(rows, ({ targetId }) =>
-                  Effect.gen(function* () {
-                    const context = yield* loadContext({
-                      tx,
-                      assetLoader,
-                      snapshotReader: inspectionReader,
-                      reportingCurrency: params.scope.reportingCurrency,
-                      principalId: params.principalId,
-                      targetId,
-                      allowUnavailableInspection: true,
-                    })
-                    if (Option.isNone(context))
-                      return yield* new PersistenceError({
-                        operation: "movementCorrection.discover",
-                        cause: "Owned target disappeared inside snapshot",
-                      })
-                    return yield* project({
-                      tx,
-                      context: context.value,
-                      snapshot,
-                      scope: params.scope,
-                      inspectionReader,
-                    })
-                  })
-                )
-                return Option.some(projections)
-              }),
-            { isolationLevel: "repeatable read", accessMode: "read only" }
-          )
+          .transaction(() => readTransactionTargets(params), {
+            isolationLevel: "repeatable read",
+            accessMode: "read only",
+          })
           .pipe(
             Effect.mapError((cause) =>
               Schema.is(UnsupportedJurisdictionError)(cause)
@@ -1094,6 +1095,39 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
                     })
             )
           )
+
+    const findTransactionTargetsInSnapshot: PrincipalTransactionOverrideRepositoryShape["findTransactionTargetsInSnapshot"] =
+      (params) =>
+        Effect.gen(function* () {
+          if (Option.isNone(yield* Effect.serviceOption(pgClient.transactionService)))
+            return yield* new PersistenceError({
+              operation: "movementCorrection.findTransactionTargetsInSnapshot",
+              cause: "An existing repeatable-read, read-only transaction is required",
+            })
+          const [settings] = yield* db
+            .select({
+              isolation: sql<string>`current_setting('transaction_isolation')`,
+              readOnly: sql<string>`current_setting('transaction_read_only')`,
+            })
+            .from(sql`(select 1) as transaction_scope`)
+          if (settings?.isolation !== "repeatable read" || settings.readOnly !== "on")
+            return yield* new PersistenceError({
+              operation: "movementCorrection.findTransactionTargetsInSnapshot",
+              cause: "An existing repeatable-read, read-only transaction is required",
+            })
+          return yield* readTransactionTargets(params)
+        }).pipe(
+          Effect.mapError((cause) =>
+            Schema.is(UnsupportedJurisdictionError)(cause)
+              ? cause
+              : isPersistenceError(cause)
+                ? cause
+                : new PersistenceError({
+                    operation: "movementCorrection.findTransactionTargetsInSnapshot",
+                    cause,
+                  })
+          )
+        )
 
     const mutate = (request: MutationRequest) =>
       db
@@ -1303,6 +1337,7 @@ export const PrincipalTransactionOverrideRepositoryLive = Layer.effect(
       findContext,
       findProjection,
       findTransactionTargets,
+      findTransactionTargetsInSnapshot,
       create: (params) => mutate({ ...params, operation: "create" }),
       replace: (params) => mutate({ ...params, operation: "replace" }),
       withdraw: (params) => mutate({ ...params, operation: "withdraw" }),
