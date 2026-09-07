@@ -292,7 +292,8 @@ and test changes need the affected and full gates required by the task and
 repository. Judge what a file does, not its extension: scripts or configuration
 are not prose. Explicit task gates, required hosted CI, and independent review
 still apply. Merge only after required CI and review approve the exact final
-commit. Rerun checks when subsequent changes invalidate their evidence.
+commit, subject to the `AGENTS.md` exception for carrying automated Codex
+approval across an unaffected rebase. Rerun checks when subsequent changes invalidate their evidence.
 
 For tests that open local listeners, default to OS-assigned ports (port 0)
 and read the actual bound address, unless the behavior under test requires a

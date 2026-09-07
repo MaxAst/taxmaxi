@@ -200,6 +200,8 @@ Select only needed columns. Do not use `SELECT *`.
 
 Delivery work is one PR per checklist task on a spec issue.
 
+After a rebase, check whether the new base or conflict resolution affects the PR's changes or behavior. If neither is affected, carry the existing automated Codex approval forward and do not request another review only because commit IDs changed. Request a new review when the PR's changes or behavior are affected.
+
 Sometimes new code must give a different result than the old code for the same input, because the old result was wrong. We allow this only when the change is written down first, as a task note on the spec issue or in an ADR.
 
 Implementers:
