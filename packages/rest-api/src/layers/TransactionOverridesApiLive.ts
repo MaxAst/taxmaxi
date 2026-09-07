@@ -105,7 +105,8 @@ const toContext = (context: PrincipalTransactionOverrideContext) =>
     })
   }).pipe(Effect.mapError(internalError))
 
-const toProjection = (projection: PrincipalTransactionOverrideProjection) =>
+/** Serialize current movement facts and history without changing coverage semantics. */
+export const toTransactionOverrideResponse = (projection: PrincipalTransactionOverrideProjection) =>
   Effect.gen(function* () {
     const facts = projection.context.current?.facts
     const validClassificationInputs =
@@ -188,7 +189,7 @@ export const TransactionOverridesApiLive = HttpApiBuilder.group(
             })
             .pipe(Effect.mapError(internalError))
           if (Option.isNone(projection)) return yield* notFound()
-          return yield* toProjection(projection.value)
+          return yield* toTransactionOverrideResponse(projection.value)
         })
       // Acceptance is already committed. Delivery failure leaves the recorded work for recovery.
       const dispatchAccepted = (accepted: MovementCorrectionMutationResult) =>
@@ -263,7 +264,7 @@ export const TransactionOverridesApiLive = HttpApiBuilder.group(
               .pipe(Effect.mapError(internalError))
             if (Option.isNone(targets)) return yield* notFound()
             return yield* Schema.decodeEffect(TransactionOverrideTargetsResponse)({
-              targets: yield* Effect.forEach(targets.value, toProjection),
+              targets: yield* Effect.forEach(targets.value, toTransactionOverrideResponse),
             }).pipe(Effect.mapError(internalError))
           })
         )

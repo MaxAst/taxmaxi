@@ -241,6 +241,9 @@ export type {
   TaxCalculation,
 } from "./sources/index.ts"
 export type {
+  TransactionDetail,
+  TransactionDetailInput,
+  TransactionDetailError,
   TransactionListInput,
   TransactionListItem,
   Transactions,
