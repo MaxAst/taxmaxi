@@ -4,7 +4,7 @@ The public product surface is CLI/API first with a web app that shows off the AP
 
 ## Communication
 
-Use simple, concrete words when talking to the maintainer, writing plans, writing docs, or adding comments. Do not overcomplicate wording. Examples of words to avoid when there is a better, simpler word: materialize, normalize, invariant, provenance
+Use simple, concrete words when talking to the maintainer, writing plans, writing docs, or adding comments. Do not overcomplicate wording. Examples of words to avoid when there is a better, simpler word: materialize, normalize, canonical, canonicalize, invariant, provenance
 
 ## Launch Status
 
