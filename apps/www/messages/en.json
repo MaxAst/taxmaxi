@@ -1,4 +1,7 @@
 {
+  "app.calculation.checking": "Checking for updated results…",
+  "app.calculation.unconfirmed": "Results for the recent sync are not yet confirmed.",
+  "app.calculation.refresh": "Refresh results",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "seo": {
     "title": "TaxMaxi | The Crypto Tax API",

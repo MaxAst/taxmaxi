@@ -1,6 +1,7 @@
 import { infiniteQueryOptions, keepPreviousData, queryOptions } from "@tanstack/react-query"
 import {
   TaxMaxiError,
+  isTaxMaxiUnauthorizedError,
   type AssetCatalogListInput,
   type AssetExceptionListInput,
   type PendingAssetListInput,
@@ -146,8 +147,17 @@ export const queries = {
   portfolioAssets: (taxmaxi: TaxMaxi, sourceId?: string) =>
     queryOptions({
       queryKey: queryKeys.portfolioAssets(sourceId),
-      queryFn: async () => taxmaxi.portfolio.listAssets({ sourceId, currency: "eur" }),
-      staleTime: 60 * 1000,
+      queryFn: async ({ signal }) => {
+        // The SDK read has no transport signal. Consuming Query's signal still
+        // cancels delivery and retries when the dashboard leaves this scope.
+        signal.throwIfAborted()
+        return taxmaxi.portfolio.listAssets({ sourceId, currency: "eur" })
+      },
+      staleTime: 30 * 1000,
+      retry: (failureCount, error) => !isTaxMaxiUnauthorizedError(error) && failureCount < 2,
+      retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 30_000),
+      refetchOnWindowFocus: "always",
+      refetchOnReconnect: "always",
     }),
   transactionList: (taxmaxi: TaxMaxi, input: TransactionListInput = {}) =>
     queryOptions({

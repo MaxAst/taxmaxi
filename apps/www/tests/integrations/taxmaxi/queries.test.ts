@@ -176,3 +176,15 @@ describe("transaction list queries", () => {
     ])
   })
 })
+
+describe("portfolio queries", () => {
+  it("keeps source scopes separate and refreshes on focus and reconnect", () => {
+    const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://portfolio.example.test" })
+    const sourceA = queries.portfolioAssets(taxmaxi, "source-a")
+    const sourceB = queries.portfolioAssets(taxmaxi, "source-b")
+    expect(sourceA.queryKey).not.toEqual(sourceB.queryKey)
+    expect(sourceA.placeholderData).toBeUndefined()
+    expect(sourceA.refetchOnWindowFocus).toBe("always")
+    expect(sourceA.refetchOnReconnect).toBe("always")
+  })
+})

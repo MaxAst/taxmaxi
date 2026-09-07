@@ -1,4 +1,7 @@
 {
+  "app.calculation.checking": "Aktualisierte Ergebnisse werden geprüft…",
+  "app.calculation.unconfirmed": "Die Ergebnisse für die letzte Synchronisierung sind noch nicht bestätigt.",
+  "app.calculation.refresh": "Ergebnisse aktualisieren",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "seo": {
     "title": "TaxMaxi | API für Krypto Steuern",

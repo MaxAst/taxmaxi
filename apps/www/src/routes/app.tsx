@@ -125,7 +125,6 @@ function RouteComponent() {
         exact: true,
         queryKey: queryKeys.sourceOverview(sourceId),
       })
-      await queryClient.invalidateQueries({ queryKey: ["taxmaxi", "portfolio"] })
       await queryClient.invalidateQueries({ queryKey: queryKeys.transactions() })
     },
     [queryClient]
