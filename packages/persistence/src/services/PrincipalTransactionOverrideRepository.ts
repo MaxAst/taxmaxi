@@ -214,6 +214,8 @@ export interface PrincipalTransactionOverrideRepositoryShape {
     Option.Option<ReadonlyArray<PrincipalTransactionOverrideProjection>>,
     PersistenceError | UnsupportedJurisdictionError
   >
+  /** Discover through an existing repeatable-read, read-only transaction. Fails outside that scope. */
+  readonly findTransactionTargetsInSnapshot: PrincipalTransactionOverrideRepositoryShape["findTransactionTargets"]
   /** Append an initial event or create after the explicitly expected withdrawal leaf. */
   readonly create: (
     params: SetMovementCorrectionParams
