@@ -300,6 +300,8 @@ export class SourceReportPageInfo extends Schema.Class<SourceReportPageInfo>(
 export class SourceReportSyncStatus extends Schema.Class<SourceReportSyncStatus>(
   "SourceReportSyncStatus"
 )({
+  /** Id of the latest processing job for the source, or null when the source has no job. */
+  jobId: Schema.NullOr(Schema.String),
   status: Schema.NullOr(
     Schema.Literals(["pending", "processing", "completed", "failed", "credit_required"])
   ),

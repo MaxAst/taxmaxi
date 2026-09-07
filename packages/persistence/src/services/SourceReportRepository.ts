@@ -65,6 +65,8 @@ export interface SourceRunReportPage<T> extends SourceReportPage<T> {
 }
 
 export interface SourceReportSyncStatus {
+  /** Id of the latest processing job for the source, or null when the source has no job. */
+  readonly jobId: string | null
   readonly status: "pending" | "processing" | "completed" | "failed" | "credit_required" | null
   readonly mode: "sync" | "replay" | null
   readonly queuedAt: string | null

@@ -377,6 +377,7 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const [job] = yield* db
         .select({
+          id: schema.processingJobs.id,
           status: schema.processingJobs.status,
           mode: schema.processingJobs.mode,
           queuedAt: schema.processingJobs.queuedAt,
@@ -403,6 +404,7 @@ const make = Effect.gen(function* () {
       const progress = yield* decodeSourceSyncJobProgressSnapshot(job?.progressDetails ?? null)
 
       return {
+        jobId: job?.id ?? null,
         status: job?.status ?? null,
         mode: job?.mode ?? null,
         queuedAt: isoOrNull(job?.queuedAt ?? null),

@@ -5549,6 +5549,34 @@ describe("SourcesApiLive", () => {
     }).pipe(Effect.provide(HttpLive), Effect.scoped)
   )
 
+  it.effect("names the latest job in the source overview", () =>
+    Effect.gen(function* () {
+      const userId = nextTestUuid()
+      const principalId = nextTestUuid()
+      const sourceId = nextTestUuid()
+      yield* seedCoinbaseSource({ userId, principalId, sourceId })
+      yield* seedUsableCredit({ userId })
+
+      const client = yield* makeAuthenticatedClient({ userId })
+      const beforeStart = yield* client.sources.getSourceOverview({
+        params: { sourceId },
+      })
+
+      expect(beforeStart.latestSync.jobId).toBeNull()
+      expect(beforeStart.latestSync.status).toBeNull()
+
+      const started = yield* client.sources.startSourceSyncJob({
+        params: { sourceId },
+      })
+      const afterStart = yield* client.sources.getSourceOverview({
+        params: { sourceId },
+      })
+
+      expect(afterStart.latestSync.jobId).toBe(started.jobId)
+      expect(afterStart.latestSync.status).toBe("pending")
+    }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
+
   it.effect(
     "reads a resumable credit-required status with its credit outcome, and no internal detail, after a worker stops the job on credit exhaustion",
     () =>
