@@ -1,5 +1,14 @@
 import { ChevronLeft, ChevronRight, CircleAlert, Landmark, WalletCards } from "lucide-react"
-import type { TransactionListItem } from "taxmaxi"
+import { useEffect, useId, useState } from "react"
+import { useQuery } from "@tanstack/react-query"
+import {
+  isTaxMaxiUnauthorizedError,
+  type TaxMaxi,
+  type TransactionDetail,
+  type TransactionListItem,
+} from "taxmaxi"
+
+import { queries } from "#/integrations/taxmaxi/queries"
 
 import { Badge } from "#/components/ui/badge"
 import { Button } from "#/components/ui/button"
@@ -74,6 +83,9 @@ const realizedGainLossLabel = (transaction: TransactionListItem): string => {
 }
 
 export function TransactionsTable({
+  taxmaxi,
+  disabled,
+  onUnauthorized,
   error,
   hasNextPage,
   loading,
@@ -84,6 +96,9 @@ export function TransactionsTable({
   totalCount,
   transactions,
 }: {
+  readonly taxmaxi: TaxMaxi
+  readonly disabled: boolean
+  readonly onUnauthorized: () => void | Promise<void>
   readonly error: boolean
   readonly hasNextPage: boolean
   readonly loading: boolean
@@ -208,6 +223,12 @@ export function TransactionsTable({
                     {m["app.dashboard.transactions.realizedGainLoss"]()}
                   </p>
                 </div>
+                <TransactionTreatmentDisclosure
+                  transaction={transaction}
+                  taxmaxi={taxmaxi}
+                  disabled={disabled}
+                  onUnauthorized={onUnauthorized}
+                />
               </article>
             ))}
           </div>
@@ -244,6 +265,208 @@ export function TransactionsTable({
           </nav>
         ) : null}
       </div>
+    </section>
+  )
+}
+
+const treatmentLabel = (code: string) => {
+  switch (code) {
+    case "de.taxable_private_disposal":
+      return m["app.treatment.codes.taxableDisposal"]()
+    case "de.tax_free_holding_period":
+      return m["app.treatment.codes.holdingPeriod"]()
+    case "de.taxable_income_section22_3_staking":
+      return m["app.treatment.codes.stakingIncome"]()
+    default:
+      return m["app.treatment.codes.unknown"]()
+  }
+}
+
+function TreatmentCodes({ codes }: { codes: ReadonlyArray<string> }) {
+  return codes.length === 0 ? (
+    <p className="text-muted-foreground">{m["app.treatment.noCodes"]()}</p>
+  ) : (
+    <ul className="space-y-1">
+      {codes.map((code, index) => (
+        <li key={`${index}:${code}`}>
+          <span className="block">{treatmentLabel(code)}</span>
+          <code className="block break-all text-xs text-muted-foreground">{code}</code>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function TransactionTreatmentDisclosure({
+  transaction,
+  taxmaxi,
+  disabled,
+  onUnauthorized,
+}: {
+  transaction: TransactionListItem
+  taxmaxi: TaxMaxi
+  disabled: boolean
+  onUnauthorized: () => void | Promise<void>
+}) {
+  const [open, setOpen] = useState(false)
+  const contentId = useId()
+  const taxYear = Number(
+    new Intl.DateTimeFormat("en", { timeZone: "Europe/Berlin", year: "numeric" }).format(
+      new Date(transaction.timestamp)
+    )
+  )
+  return (
+    <div className="col-span-full min-w-0 text-sm">
+      <Button
+        aria-controls={contentId}
+        aria-expanded={open}
+        className="min-h-11"
+        disabled={disabled}
+        onClick={() => setOpen((value) => !value)}
+        size="sm"
+        variant="outline"
+      >
+        {m["app.treatment.toggle"]({ year: taxYear })}
+      </Button>
+      <div id={contentId}>
+        {open && !disabled ? (
+          <TransactionTreatmentResults
+            key={`${transaction.transactionId}:${taxYear}`}
+            transactionId={transaction.transactionId}
+            taxYear={taxYear}
+            taxmaxi={taxmaxi}
+            onUnauthorized={onUnauthorized}
+          />
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+const monetaryStatusLabel = (status: TransactionDetail["calculation"]["monetaryStatus"]) => {
+  switch (status) {
+    case "available":
+      return m["app.treatment.moneyAvailable"]()
+    case "partial":
+      return m["app.treatment.moneyPartial"]()
+    case "unavailable":
+      return m["app.treatment.moneyUnavailable"]()
+    case "not_applicable":
+      return m["app.treatment.moneyNotApplicable"]()
+  }
+}
+
+function TransactionTreatmentResults({
+  transactionId,
+  taxYear,
+  taxmaxi,
+  onUnauthorized,
+}: {
+  transactionId: string
+  taxYear: number
+  taxmaxi: TaxMaxi
+  onUnauthorized: () => void | Promise<void>
+}) {
+  const detail = useQuery(queries.transactionDetail(taxmaxi, { transactionId, taxYear }))
+  useEffect(() => {
+    if (isTaxMaxiUnauthorizedError(detail.error)) void onUnauthorized()
+  }, [detail.error, onUnauthorized])
+  const calculation = detail.data?.calculation
+  const run = calculation?.run
+  const currency = run?.reportingCurrency
+  const money = (value: string | null) =>
+    value === null
+      ? m["app.treatment.unavailable"]()
+      : currency === undefined
+        ? value
+        : `${value} ${currency}`
+
+  return (
+    <section
+      aria-label={m["app.treatment.heading"]()}
+      className="mt-3 space-y-3 rounded-lg bg-muted/30 p-3"
+    >
+      <p className="font-medium">{m["app.treatment.requestedYear"]({ year: taxYear })}</p>
+      {detail.isPending ? <p role="status">{m["app.treatment.loading"]()}</p> : null}
+      {detail.isError ? (
+        <div className="space-y-2">
+          <p role="status">{m["app.treatment.error"]()}</p>
+          <Button
+            className="min-h-11"
+            disabled={detail.isFetching}
+            onClick={() => void detail.refetch()}
+            size="sm"
+            variant="outline"
+          >
+            {m["app.treatment.retry"]()}
+          </Button>
+        </div>
+      ) : null}
+      {calculation === undefined ? null : run == null ? (
+        <p>{m["app.treatment.noRun"]()}</p>
+      ) : (
+        <>
+          <p className="break-all">
+            {m["app.treatment.run"]({
+              runId: run.id,
+              year: run.taxYear,
+              jurisdiction: run.jurisdiction,
+              currency: run.reportingCurrency,
+            })}
+          </p>
+          <p>
+            {calculation.state === "partial"
+              ? m["app.treatment.partial"]()
+              : m["app.treatment.complete"]()}
+          </p>
+          <p>{monetaryStatusLabel(calculation.monetaryStatus)}</p>
+          {calculation.allocations.length === 0 && calculation.income.length === 0 ? (
+            <p>{m["app.treatment.noResults"]()}</p>
+          ) : null}
+          {calculation.allocations.map((result) => (
+            <section
+              aria-label={m["app.treatment.allocation"]({ sequence: result.sequence })}
+              className="space-y-2 border-t pt-3"
+              key={result.sequence}
+            >
+              <h3 className="font-medium">
+                {m["app.treatment.allocation"]({ sequence: result.sequence })}
+              </h3>
+              <p className="break-all">{m["app.treatment.asset"]({ assetId: result.assetId })}</p>
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+                <dt>{m["app.treatment.quantity"]()}</dt>
+                <dd className="break-all tabular-nums">{result.quantity}</dd>
+                <dt>{m["app.treatment.costBasis"]()}</dt>
+                <dd className="break-all tabular-nums">{money(result.costBasis)}</dd>
+                <dt>{m["app.treatment.proceeds"]()}</dt>
+                <dd className="break-all tabular-nums">{money(result.proceeds)}</dd>
+                <dt>{m["app.treatment.gainLoss"]()}</dt>
+                <dd className="break-all tabular-nums">{money(result.gainLoss)}</dd>
+              </dl>
+              <TreatmentCodes codes={result.treatmentCodes} />
+            </section>
+          ))}
+          {calculation.income.map((result) => (
+            <section
+              aria-label={m["app.treatment.income"]({ sequence: result.sequence })}
+              className="space-y-2 border-t pt-3"
+              key={result.sequence}
+            >
+              <h3 className="font-medium">
+                {m["app.treatment.income"]({ sequence: result.sequence })}
+              </h3>
+              <p className="break-all">{m["app.treatment.asset"]({ assetId: result.assetId })}</p>
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+                <dt>{m["app.treatment.quantity"]()}</dt>
+                <dd className="break-all tabular-nums">{result.quantity}</dd>
+                <dt>{m["app.treatment.value"]()}</dt>
+                <dd className="break-all tabular-nums">{money(result.value)}</dd>
+              </dl>
+              <TreatmentCodes codes={result.treatmentCodes} />
+            </section>
+          ))}
+        </>
+      )}
     </section>
   )
 }

@@ -344,6 +344,9 @@ export function Dashboard({
             </TabsContent>
             <TabsContent value="transactions">
               <TransactionsTable
+                taxmaxi={taxmaxi}
+                disabled={authenticationLost}
+                onUnauthorized={handleUnauthorized}
                 error={transactionQuery.isError}
                 hasNextPage={transactionQuery.data?.page.hasMore ?? false}
                 loading={transactionQuery.isFetching}

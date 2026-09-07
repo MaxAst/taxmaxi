@@ -9,7 +9,12 @@ import {
 } from "@tanstack/react-query"
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import type { ReactNode } from "react"
-import { TaxMaxi, type PortfolioAssets, type TransactionListInput } from "taxmaxi"
+import {
+  TaxMaxi,
+  type PortfolioAssets,
+  type TransactionDetail,
+  type TransactionListInput,
+} from "taxmaxi"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { Dashboard } from "#/components/dashboard"
@@ -263,6 +268,71 @@ describe("Dashboard calculation refresh", () => {
         <Dashboard accounts={[]} onUnauthorized={onUnauthorized} />
       </QueryClientProvider>
     )
+
+  it("refreshes an open treatment detail once when the actual active run changes", async () => {
+    const row = transaction("00000000-0000-4000-8000-000000000101", "Treatment transaction")
+    vi.spyOn(testTaxMaxi.transactions, "list").mockResolvedValue({
+      transactions: [row],
+      totalCount: 1,
+      page: { hasMore: false, nextCursor: null },
+    })
+    const response = (): TransactionDetail => ({
+      transactionId: row.transactionId,
+      timestamp: row.timestamp,
+      source: row.source,
+      transactionType: row.transactionType,
+      description: row.description,
+      externalId: row.externalId,
+      sourceRawRecordId: null,
+      providerTransactionType: null,
+      classificationHistoryStatus: "unavailable",
+      sourceEvidence: [],
+      movements: [],
+      reconciliations: [],
+      movementOverrides: [],
+      assetOverrides: [],
+      calculation: {
+        run: {
+          id: currentPortfolio.activeRun?.runId ?? "unavailable",
+          taxYear: 2025,
+          jurisdiction: "DE",
+          reportingCurrency: "EUR",
+          status: "complete",
+          engineVersion: "test",
+          ruleSetVersion: "test",
+          inputLedgerRevision: "1",
+          valuationRevision: "1",
+          failureCode: null,
+        },
+        state: "complete",
+        monetaryStatus: "not_applicable",
+        derivedLots: [],
+        allocations: [],
+        income: [],
+        blockers: [],
+        processedEventIds: [],
+        correctionInputs: [],
+      },
+    })
+    const get = vi.spyOn(testTaxMaxi.transactions, "get").mockImplementation(async () => response())
+    mount()
+    await tick()
+    expect(get).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole("button", { name: "Treatment · 2025" }))
+    await tick()
+    expect(get).toHaveBeenCalledExactlyOnceWith({ transactionId: row.transactionId, taxYear: 2025 })
+    expect(screen.getByText(`Returned run: ${RUN_A} · 2025 · DE · EUR`)).toBeTruthy()
+    currentPortfolio = portfolio("run-b", "2.50")
+    await tick(30_000)
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(screen.getByText("Returned run: run-b · 2025 · DE · EUR")).toBeTruthy()
+    await tick(30_000)
+    expect(get).toHaveBeenCalledTimes(2)
+    fireEvent.click(screen.getByRole("button", { name: "Treatment · 2025" }))
+    currentPortfolio = portfolio("run-c", "3.75")
+    await tick(30_000)
+    expect(get).toHaveBeenCalledTimes(2)
+  })
 
   it("refreshes delayed calculations independently of source completion and invalidates each changed active run once", async () => {
     let overviewCalls = 0
