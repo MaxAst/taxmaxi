@@ -668,7 +668,7 @@ describe("AuthServiceLive OAuth orchestration", () => {
   )
 
   it.effect(
-    "stores the canonical account email for an OAuth-created account and keeps the provider payload as reported",
+    "stores an OAuth-created account's email trimmed and lowercased and keeps the provider payload as reported",
     () =>
       Effect.gen(function* () {
         const harness = makeHarness([makeMixedCaseEmailGoogleProvider()])
@@ -757,7 +757,7 @@ describe("AuthServiceLive OAuth orchestration", () => {
   )
 
   it.effect(
-    "register stores the canonical email, rejects a casing variant, and logs in with any casing",
+    "register stores the email trimmed and lowercased, rejects a casing variant, and logs in with any casing",
     () =>
       Effect.gen(function* () {
         const harness = makeHarness([makeLocalProvider({ emailVerified: true })])

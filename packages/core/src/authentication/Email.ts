@@ -25,8 +25,8 @@ const EMAIL_PATTERN =
  *
  * Validates format against a simplified RFC 5322 pattern. An `Email` never
  * carries surrounding whitespace; request bodies trim the raw string before
- * this check. It may carry any casing; the writer stores the canonical form
- * from `canonicalizeEmail`.
+ * this check. It may carry any casing; the writer stores it trimmed and
+ * lowercased through `sanitizeEmail`.
  */
 export const Email = Schema.String.pipe(
   Schema.annotate({
@@ -50,11 +50,11 @@ export type Email = typeof Email.Type
 export const isEmail = Schema.is(Email)
 
 /**
- * Canonical form of an account email: trimmed and lowercased.
+ * Sanitize an account email: trim and lowercase it.
  *
  * The writer applies this before it stores an account email, a local
  * identity's provider ID, or a verification request, and before it looks a
  * local identity up for login. `Max@Example.com` and `max@example.com` are
- * one account (#133 D01).
+ * one account.
  */
-export const canonicalizeEmail = (email: Email): Email => Email.make(email.trim().toLowerCase())
+export const sanitizeEmail = (email: Email): Email => Email.make(email.trim().toLowerCase())

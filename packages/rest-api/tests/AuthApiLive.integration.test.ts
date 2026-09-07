@@ -807,11 +807,11 @@ describe("AuthApiLive integration", () => {
       }).pipe(Effect.scoped)
   )
 
-  it.effect("stores the canonical account email and accepts any casing of it for login", () =>
+  it.effect("stores the email trimmed and lowercased and accepts any casing of it for login", () =>
     Effect.gen(function* () {
       const { handler, sentVerificationCodes } = yield* makeAuthHandlerScoped
 
-      const canonicalEmail = "max+tax@example.com"
+      const storedEmail = "max+tax@example.com"
       const password = "password123"
 
       const registerResponse = yield* postJson({
@@ -826,10 +826,10 @@ describe("AuthApiLive integration", () => {
 
       expect(registerResponse.status).toBe(201)
       expect(yield* jsonBody(registerResponse)).toMatchObject({
-        email: canonicalEmail,
+        email: storedEmail,
         redirectTo: "/verify-email",
       })
-      expect(sentVerificationCodes[0]?.email).toBe(canonicalEmail)
+      expect(sentVerificationCodes[0]?.email).toBe(storedEmail)
 
       const verificationRequestId = yield* Effect.sync(() =>
         getCookieValue({
@@ -869,11 +869,11 @@ describe("AuthApiLive integration", () => {
       expect(meResponse.status).toBe(200)
       expect(yield* jsonBody(meResponse)).toMatchObject({
         account: {
-          email: canonicalEmail,
+          email: storedEmail,
         },
       })
-      expect(yield* readStoredAccountEmails()).toEqual([canonicalEmail])
-      expect(yield* readStoredLocalProviderIds()).toEqual([canonicalEmail])
+      expect(yield* readStoredAccountEmails()).toEqual([storedEmail])
+      expect(yield* readStoredLocalProviderIds()).toEqual([storedEmail])
 
       const loginResponse = yield* postJson({
         handler,
@@ -890,7 +890,7 @@ describe("AuthApiLive integration", () => {
       expect(loginResponse.status).toBe(200)
       expect(yield* jsonBody(loginResponse)).toMatchObject({
         user: {
-          email: canonicalEmail,
+          email: storedEmail,
         },
       })
 
@@ -907,7 +907,7 @@ describe("AuthApiLive integration", () => {
   )
 
   it.effect(
-    "derives the fallback display name from the email as typed while storing the canonical email",
+    "derives the fallback display name from the email as typed while storing the email trimmed and lowercased",
     () =>
       Effect.gen(function* () {
         const { handler } = yield* makeAuthHandlerScoped
@@ -933,14 +933,14 @@ describe("AuthApiLive integration", () => {
       Effect.gen(function* () {
         const { handler } = yield* makeAuthHandlerScoped
 
-        const canonicalEmail = "taken@taxmaxi.test"
+        const storedEmail = "taken@taxmaxi.test"
         const password = "password123"
 
         const firstRegisterResponse = yield* postJson({
           handler,
           path: "/auth/register",
           payload: {
-            email: canonicalEmail,
+            email: storedEmail,
             password,
             displayName: "First",
           },
@@ -961,10 +961,10 @@ describe("AuthApiLive integration", () => {
         expect(secondRegisterResponse.status).toBe(409)
         expect(yield* jsonBody(secondRegisterResponse)).toMatchObject({
           _tag: "UserExistsError",
-          email: canonicalEmail,
+          email: storedEmail,
         })
-        expect(yield* readStoredAccountEmails()).toEqual([canonicalEmail])
-        expect(yield* readStoredLocalProviderIds()).toEqual([canonicalEmail])
+        expect(yield* readStoredAccountEmails()).toEqual([storedEmail])
+        expect(yield* readStoredLocalProviderIds()).toEqual([storedEmail])
       }).pipe(Effect.scoped)
   )
 

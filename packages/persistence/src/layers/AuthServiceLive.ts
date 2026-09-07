@@ -9,8 +9,8 @@
  * - Routes authentication requests to appropriate provider by type
  * - Auto-provisions users for external provider authentication
  * - Links identities to existing users by email (configurable)
- * - Stores account emails, local provider IDs, and verification requests in
- *   canonical form (trimmed, lowercased) and looks local logins up the same way
+ * - Stores account emails, local provider IDs, and verification requests
+ *   trimmed and lowercased, and looks local logins up the same way
  * - Creates and manages sessions via SessionRepository
  * - Configurable session duration per provider
  *
@@ -31,7 +31,7 @@ import {
   EmailVerificationRequestId,
   LocalAuthRequest,
   PasswordHasher,
-  canonicalizeEmail,
+  sanitizeEmail,
   inferDisplayNameFromEmail,
   isEmailVerificationRequestExpired,
   isLocalAuthRequest,
@@ -445,12 +445,12 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const userId = AuthUserId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie))
 
-      // Create the user. The account email is the canonical form of the
-      // provider-reported email; the provider payload stays as reported.
+      // Create the user. The account email is the provider-reported email,
+      // trimmed and lowercased; the provider payload stays as reported.
       yield* userRepo
         .create({
           id: userId,
-          email: canonicalizeEmail(authResult.email),
+          email: sanitizeEmail(authResult.email),
           displayName: authResult.displayName,
           role: "member",
           primaryProvider: authResult.provider,
@@ -752,7 +752,7 @@ const make = Effect.gen(function* () {
         .create({
           id: requestId,
           userId,
-          email: canonicalizeEmail(email),
+          email: sanitizeEmail(email),
           code: generateEmailVerificationCode(verificationCodeBytes),
           expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
         })
@@ -775,12 +775,12 @@ const make = Effect.gen(function* () {
 
   /**
    * Rewrite a local login request so the provider looks the identity up by the
-   * canonical email. Other request kinds pass through unchanged.
+   * sanitized email. Other request kinds pass through unchanged.
    */
-  const canonicalizeLocalAuthRequest = (request: AuthRequest): AuthRequest =>
+  const sanitizeLocalAuthRequest = (request: AuthRequest): AuthRequest =>
     isLocalAuthRequest(request)
       ? LocalAuthRequest.make({
-          email: canonicalizeEmail(request.email),
+          email: sanitizeEmail(request.email),
           password: request.password,
         })
       : request
@@ -822,8 +822,8 @@ const make = Effect.gen(function* () {
         const provider = yield* getProvider(providerType)
 
         // Authenticate with the provider. A local login is looked up by the
-        // canonical email, so the typed casing never matters.
-        const authResult = yield* provider.authenticate(canonicalizeLocalAuthRequest(request))
+        // sanitized email, so the typed casing never matters.
+        const authResult = yield* provider.authenticate(sanitizeLocalAuthRequest(request))
 
         if (providerType === "local" && !authResult.emailVerified) {
           return yield* new UnverifiedEmailError({ email: authResult.email })
@@ -844,8 +844,8 @@ const make = Effect.gen(function* () {
     register: (submittedEmail, password, providedDisplayName) =>
       Effect.gen(function* () {
         // The account email, the local provider ID, and the conflict check all
-        // use the canonical form of what was typed.
-        const email = canonicalizeEmail(submittedEmail)
+        // use what was typed, trimmed and lowercased.
+        const email = sanitizeEmail(submittedEmail)
 
         // Validate password strength
         const passwordErrors = validatePassword(password, config.localAuth)

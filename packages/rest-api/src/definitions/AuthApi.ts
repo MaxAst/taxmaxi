@@ -303,7 +303,7 @@ export class ProvidersResponse extends Schema.Class<ProvidersResponse>("Provider
  *
  * Trims surrounding whitespace from the raw string before the `Email` check,
  * so `Max+Tax@Example.com ` reaches the writer as a clean address. The writer
- * canonicalizes casing (#133 D01); `Email` itself never accepts whitespace.
+ * lowercases it; `Email` itself never accepts whitespace.
  */
 const SubmittedEmail = Schema.Trim.pipe(
   Schema.decodeTo(Email),

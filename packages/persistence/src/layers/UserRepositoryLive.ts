@@ -7,7 +7,7 @@ import {
   AuthUser,
   AuthUserId,
   Email,
-  canonicalizeEmail,
+  sanitizeEmail,
   inferDisplayNameFromEmail,
   type AuthProviderType,
   type UserRole,
@@ -111,7 +111,7 @@ const make = Effect.gen(function* () {
     }).pipe(wrapSqlError("findById"))
 
   /**
-   * Account emails are stored in canonical form (#133 D01), so any casing of
+   * Account emails are stored trimmed and lowercased, so any casing of
    * the argument finds the same account. The comparison runs on `lower(email)`
    * and is served by the `users_email_lower_uidx` index.
    */
@@ -120,7 +120,7 @@ const make = Effect.gen(function* () {
       const [row] = yield* db
         .select(selectAuthUserFields)
         .from(users)
-        .where(eq(sql`lower(${users.email})`, canonicalizeEmail(email)))
+        .where(eq(sql`lower(${users.email})`, sanitizeEmail(email)))
 
       if (row === undefined) {
         return Option.none<AuthUser>()

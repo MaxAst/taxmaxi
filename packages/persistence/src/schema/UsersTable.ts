@@ -7,7 +7,6 @@ export const users = pgTable(
   "users",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    /** Account email in canonical form (trimmed, lowercased). The writer canonicalizes; see #133 D01. */
     email: text("email").notNull(),
     emailVerified: boolean("email_verified").notNull().default(false),
     name: text("name"),
@@ -17,10 +16,7 @@ export const users = pgTable(
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
-  (table) => [
-    /** Backstop for the canonical email: rejects case-variant duplicates even from a raw insert. */
-    uniqueIndex("users_email_lower_uidx").on(sql`lower(${table.email})`),
-  ]
+  (table) => [uniqueIndex("users_email_lower_uidx").on(sql`lower(${table.email})`)]
 )
 
 export type UserRow = typeof users.$inferSelect
