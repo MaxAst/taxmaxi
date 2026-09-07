@@ -11,6 +11,7 @@ import {
 } from "taxmaxi"
 
 import { appSurfaceClassName } from "#/components/app-workspace"
+import { CalculationStatus } from "#/components/calculation-status"
 import { AssetsTable } from "#/components/assets-table"
 import { SourceCards } from "#/components/source-cards"
 import { Button } from "#/components/ui/button"
@@ -199,7 +200,8 @@ export function Dashboard({
         yearSummary.taxYear === taxYear && activeAccountIds.has(yearSummary.accountId)
     )
 
-    const portfolioSummary = portfolioQuery.data?.summary
+    const portfolioSummary =
+      portfolioQuery.data?.activeRun == null ? undefined : portfolioQuery.data.summary
 
     return {
       currentBalance: portfolioSummary?.totalValue == null ? null : portfolioSummary.totalValue,
@@ -238,7 +240,7 @@ export function Dashboard({
         0
       ),
     }
-  }, [activeAccountIds, activeAccounts, portfolioQuery.data?.summary, taxYear])
+  }, [activeAccountIds, activeAccounts, portfolioQuery.data, taxYear])
 
   const onAccountScopeChange = (scope: AccountScope) => {
     setAccountScope(scope)
@@ -300,24 +302,16 @@ export function Dashboard({
           <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
             <div className="min-w-0 space-y-3">
               <PortfolioOverview key={selectedSourceId ?? ALL_ACCOUNTS} summary={summary} />
-              {syncCompletedAt === null ? null : (
-                <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-                  <p role="status">
-                    {fastRefresh
-                      ? m["app.calculation.checking"]()
-                      : m["app.calculation.unconfirmed"]()}
-                  </p>
-                  <Button
-                    className="min-h-11"
-                    disabled={portfolioQuery.isFetching || authenticationLost}
-                    onClick={() => void portfolioQuery.refetch()}
-                    size="sm"
-                    variant="outline"
-                  >
-                    {m["app.calculation.refresh"]()}
-                  </Button>
-                </div>
-              )}
+              <CalculationStatus
+                portfolio={portfolioQuery.data}
+                requestFailed={portfolioQuery.isError}
+                refreshing={portfolioQuery.isFetching}
+                disabled={authenticationLost}
+                onRefresh={() => void portfolioQuery.refetch()}
+                postSyncNotice={
+                  syncCompletedAt === null ? null : fastRefresh ? "checking" : "unconfirmed"
+                }
+              />
             </div>
             <SelectedSourceMenu
               account={replayAccount}
@@ -335,12 +329,18 @@ export function Dashboard({
               <TabsTrigger value="taxes">{m["app.dashboard.tabs.taxes"]()}</TabsTrigger>
             </TabsList>
             <TabsContent value="assets">
-              <AssetsTable
-                currency={portfolioQuery.data?.currency ?? "EUR"}
-                error={portfolioQuery.isError}
-                holdings={activeHoldings}
-                loading={portfolioQuery.isPending && portfolioQuery.data === undefined}
-              />
+              {portfolioQuery.data?.activeRun === null ? (
+                <p className="rounded-lg border border-border p-6 text-sm text-muted-foreground">
+                  {m["app.calculation.positionsUnavailable"]()}
+                </p>
+              ) : (
+                <AssetsTable
+                  currency={portfolioQuery.data?.currency ?? "EUR"}
+                  error={portfolioQuery.isError && portfolioQuery.data === undefined}
+                  holdings={activeHoldings}
+                  loading={portfolioQuery.isPending && portfolioQuery.data === undefined}
+                />
+              )}
             </TabsContent>
             <TabsContent value="transactions">
               <TransactionsTable
