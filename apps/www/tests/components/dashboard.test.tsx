@@ -533,7 +533,7 @@ describe("Dashboard calculation refresh", () => {
       await tick()
       const status = screen.getByRole("region", { name: "Portfolio calculation" })
       expect(within(status).getByText("Partial calculation available.")).toBeTruthy()
-      expect(within(status).getByText("3 blockers in the whole calculation")).toBeTruthy()
+      expect(within(status).getByText("Blockers in the whole calculation: 3")).toBeTruthy()
       expect(status.textContent).toContain(
         latestStatus === "failed"
           ? "The latest calculation failed."
@@ -554,7 +554,7 @@ describe("Dashboard calculation refresh", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Source B" }))
       await tick()
-      expect(within(status).getByText("3 blockers in the whole calculation")).toBeTruthy()
+      expect(within(status).getByText("Blockers in the whole calculation: 3")).toBeTruthy()
       expect(
         within(status).getByText(
           "Counts cover the whole calculation across all sources. One transaction can have multiple blockers."
@@ -586,11 +586,7 @@ describe("Dashboard calculation refresh", () => {
     respond = async () => Response.json({ message: "Unavailable" }, { status: 503 })
     await tick(33_000)
     const status = screen.getByRole("region", { name: "Portfolio calculation" })
-    expect(
-      within(status).getByText(
-        "Could not refresh calculation status. Previously loaded results may be out of date."
-      )
-    ).toBeTruthy()
+    expect(within(status).getByText("Could not load calculation status. Try again.")).toBeTruthy()
     expect(within(status).queryByText(/The latest calculation failed/)).toBeNull()
     expect(screen.getByText("1,25")).toBeTruthy()
     const calls = portfolioCalls
@@ -599,7 +595,7 @@ describe("Dashboard calculation refresh", () => {
     await tick()
     expect(portfolioCalls).toBe(calls + 1)
     expect(transactionCalls).toBe(1)
-    expect(within(status).queryByText(/Could not refresh calculation status/)).toBeNull()
+    expect(within(status).queryByText(/Could not load calculation status/)).toBeNull()
   })
 
   it("does not claim there is no calculation when the first request fails", async () => {
@@ -607,8 +603,9 @@ describe("Dashboard calculation refresh", () => {
     mount()
     await tick(3_000)
     const status = screen.getByRole("region", { name: "Portfolio calculation" })
-    expect(status.textContent).toContain("Could not refresh calculation status.")
+    expect(status.textContent).toContain("Could not load calculation status.")
     expect(status.textContent).not.toContain("No calculation available.")
+    expect(status.textContent).not.toContain("Previously loaded")
   })
 
   it("announces changed calculation facts once, not identical polls or manual refresh state", async () => {
@@ -631,7 +628,7 @@ describe("Dashboard calculation refresh", () => {
     await tick(30_000)
     expect(updates).toHaveLength(1)
     expect(updates[0]).toContain("Partial calculation available.")
-    expect(updates[0]).toContain("3 blockers in the whole calculation")
+    expect(updates[0]).toContain("Blockers in the whole calculation: 3")
     await tick(30_000)
     fireEvent.click(screen.getByRole("button", { name: "Refresh results" }))
     await tick()

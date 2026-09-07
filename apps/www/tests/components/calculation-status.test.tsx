@@ -66,6 +66,12 @@ describe("calculation blocker labels", () => {
     expect(screen.queryByText("Unknown blocker")).toBeNull()
   })
 
+  it("labels one blocker accurately in the visible summary and announcement", () => {
+    renderBlockers(["missing_valuation"])
+    expect(screen.getByText("Blockers in the whole calculation: 1")).toBeTruthy()
+    expect(screen.getByRole("status").textContent).toContain("Blockers in the whole calculation: 1")
+  })
+
   it.each(["future.example", "constructor", "__proto__"])(
     "preserves unknown code %s without interpreting it",
     (code) => {
