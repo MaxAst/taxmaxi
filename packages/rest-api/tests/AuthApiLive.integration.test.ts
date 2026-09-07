@@ -426,6 +426,13 @@ const getRequest = ({
     catch: (cause) => String(cause),
   }).pipe(Effect.orDie)
 
+interface AccountResponseBody {
+  readonly account: { readonly welcomeSeenAt: string | null }
+  readonly loginMethods: ReadonlyArray<unknown>
+}
+
+const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/
+
 const jsonBody = <A = unknown>(response: Response) =>
   Effect.tryPromise({
     try: () => response.json() as Promise<A>,
@@ -477,6 +484,7 @@ describe("AuthApiLive integration", () => {
           displayName: "Coinbase Owner",
           role: "member",
           emailVerified: true,
+          welcomeSeenAt: null,
           createdAt: expect.any(String),
           updatedAt: expect.any(String),
         },
@@ -492,6 +500,45 @@ describe("AuthApiLive integration", () => {
             canRemove: false,
           },
         ],
+      })
+    }).pipe(Effect.scoped)
+  )
+
+  it.effect("records the welcome-seen fact once and keeps the first timestamp", () =>
+    Effect.gen(function* () {
+      const { handler } = yield* makeAuthHandlerScoped
+      yield* seedCoinbaseSession()
+      const cookie = makeCookieHeader({ taxmaxi_session: COINBASE_SESSION_ID })
+
+      const beforeResponse = yield* getRequest({ handler, path: "/auth/me", cookie })
+
+      expect(beforeResponse.status).toBe(200)
+      expect(yield* jsonBody(beforeResponse)).toMatchObject({
+        account: { id: COINBASE_USER_ID, welcomeSeenAt: null },
+      })
+
+      const firstMarkResponse = yield* postRequest({ handler, path: "/auth/me/welcome", cookie })
+
+      expect(firstMarkResponse.status).toBe(200)
+      const firstMark = yield* jsonBody<AccountResponseBody>(firstMarkResponse)
+      const welcomeSeenAt = firstMark.account.welcomeSeenAt
+
+      expect(welcomeSeenAt).toEqual(expect.any(String))
+      expect(welcomeSeenAt).toMatch(ISO_TIMESTAMP_PATTERN)
+      expect(firstMark.loginMethods).toHaveLength(1)
+
+      const secondMarkResponse = yield* postRequest({ handler, path: "/auth/me/welcome", cookie })
+
+      expect(secondMarkResponse.status).toBe(200)
+      expect(yield* jsonBody(secondMarkResponse)).toMatchObject({
+        account: { id: COINBASE_USER_ID, welcomeSeenAt },
+      })
+
+      const afterResponse = yield* getRequest({ handler, path: "/auth/me", cookie })
+
+      expect(afterResponse.status).toBe(200)
+      expect(yield* jsonBody(afterResponse)).toMatchObject({
+        account: { id: COINBASE_USER_ID, welcomeSeenAt },
       })
     }).pipe(Effect.scoped)
   )
@@ -715,6 +762,7 @@ describe("AuthApiLive integration", () => {
             displayName: "Owner",
             role: "member",
             emailVerified: true,
+            welcomeSeenAt: null,
             createdAt: expect.any(String),
             updatedAt: expect.any(String),
           },

@@ -1,4 +1,4 @@
-import { and, asc, eq, ilike } from "drizzle-orm"
+import { and, asc, eq, ilike, sql, type SQL } from "drizzle-orm"
 import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -20,7 +20,7 @@ import { drizzle } from "./PgClientLive.ts"
 
 type SelectedUserRow = Pick<
   UserRow,
-  "id" | "email" | "emailVerified" | "name" | "role" | "createdAt" | "updatedAt"
+  "id" | "email" | "emailVerified" | "name" | "role" | "welcomeSeenAt" | "createdAt" | "updatedAt"
 >
 
 const toAuthRole = (role: "user" | "admin"): UserRole => (role === "admin" ? "admin" : "member")
@@ -50,6 +50,7 @@ const make = Effect.gen(function* () {
     emailVerified: users.emailVerified,
     name: users.name,
     role: users.role,
+    welcomeSeenAt: users.welcomeSeenAt,
     createdAt: users.createdAt,
     updatedAt: users.updatedAt,
   } as const
@@ -87,6 +88,10 @@ const make = Effect.gen(function* () {
         role: toAuthRole(row.role),
         primaryProvider,
         emailVerified: row.emailVerified,
+        welcomeSeenAt:
+          row.welcomeSeenAt === null
+            ? null
+            : Timestamp.make({ epochMillis: row.welcomeSeenAt.getTime() }),
         createdAt: Timestamp.make({ epochMillis: row.createdAt.getTime() }),
         updatedAt: Timestamp.make({ epochMillis: row.updatedAt.getTime() }),
       })
@@ -150,12 +155,19 @@ const make = Effect.gen(function* () {
         readonly name?: string
         readonly role?: "user" | "admin"
         readonly emailVerified?: boolean
+        readonly welcomeSeenAt?: SQL
         readonly updatedAt: Date
       } = {
         ...(data.email !== undefined ? { email: data.email } : {}),
         ...(data.displayName !== undefined ? { name: data.displayName } : {}),
         ...(data.role !== undefined ? { role: fromAuthRole(data.role) } : {}),
         ...(data.emailVerified !== undefined ? { emailVerified: data.emailVerified } : {}),
+        // Set once: an existing stamp wins over the new value, so concurrent first marks keep one timestamp.
+        ...(data.welcomeSeenAt !== undefined
+          ? {
+              welcomeSeenAt: sql`coalesce(${users.welcomeSeenAt}, ${sql.param(data.welcomeSeenAt.toDate(), users.welcomeSeenAt)})`,
+            }
+          : {}),
         updatedAt: yield* DateTime.nowAsDate,
       }
 

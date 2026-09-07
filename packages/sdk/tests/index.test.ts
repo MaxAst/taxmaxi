@@ -81,6 +81,7 @@ const accountResponse = {
     displayName: "Account Owner",
     role: "member",
     emailVerified: true,
+    welcomeSeenAt: null,
     createdAt: "2026-08-18T12:00:00.000Z",
     updatedAt: "2026-08-18T12:30:00.000Z",
   },

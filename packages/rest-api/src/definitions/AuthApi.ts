@@ -419,6 +419,10 @@ export const AccountDetails = Schema.Struct({
   displayName: AuthUser.fields.displayName,
   role: AuthUser.fields.role,
   emailVerified: AuthUser.fields.emailVerified,
+  welcomeSeenAt: Schema.NullOr(Schema.DateTimeUtc).annotate({
+    description:
+      "When the user first finished or skipped the welcome, encoded as an ISO 8601 string, or null if not yet seen",
+  }),
   createdAt: Schema.DateTimeUtc.annotate({
     description: "When the user account was created, encoded as an ISO 8601 string",
   }),
@@ -807,6 +811,23 @@ const updateMe = HttpApiEndpoint.put("updateMe", "/me", {
 )
 
 /**
+ * POST /auth/me/welcome - Record that the current user has seen the welcome
+ *
+ * Stamps `welcomeSeenAt` with server time on the first call. Later calls keep
+ * the first timestamp and return the account unchanged.
+ */
+const markWelcomeSeen = HttpApiEndpoint.post("markWelcomeSeen", "/me/welcome", {
+  success: AccountResponse,
+  error: AuthUserNotFoundError,
+}).annotateMerge(
+  OpenApi.annotations({
+    summary: "Mark the welcome as seen",
+    description:
+      "Record server time as the moment the authenticated user finished or skipped the welcome. A second call keeps the first timestamp.",
+  })
+)
+
+/**
  * POST /auth/refresh - Refresh session token
  */
 const refresh = HttpApiEndpoint.post("refresh", "/refresh", {
@@ -967,6 +988,7 @@ export class AuthApi extends HttpApiGroup.make("auth")
  * - POST /logout - Logout
  * - GET /me - Get current user
  * - PUT /me - Update current user profile
+ * - POST /me/welcome - Mark the welcome as seen
  * - POST /refresh - Refresh session
  * - POST /link/:provider - Initiate provider linking
  * - GET /link/callback/:provider - Complete provider linking
@@ -977,6 +999,7 @@ export class AuthSessionApi extends HttpApiGroup.make("authSession")
   .add(logout)
   .add(me)
   .add(updateMe)
+  .add(markWelcomeSeen)
   .add(refresh)
   .add(linkProvider)
   .add(linkCallback)

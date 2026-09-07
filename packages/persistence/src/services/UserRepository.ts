@@ -17,6 +17,7 @@ import type {
   AuthProviderType,
   Email,
 } from "@my/core/authentication"
+import type { Timestamp } from "@my/core/shared/values/Timestamp"
 import type { EntityNotFoundError, PersistenceError } from "../errors/RepositoryError.ts"
 
 /**
@@ -46,6 +47,11 @@ export interface AuthUserUpdate {
   readonly role?: UserRole
   readonly primaryProvider?: AuthProviderType
   readonly emailVerified?: boolean
+  /**
+   * Server time of the welcome mark. Set once: when the row already has a
+   * value, the writer keeps it and ignores the new one.
+   */
+  readonly welcomeSeenAt?: Timestamp
 }
 
 /**

@@ -370,6 +370,7 @@ const toAccountResponse = ({
     displayName: user.displayName,
     role: user.role,
     emailVerified: user.emailVerified,
+    welcomeSeenAt: user.welcomeSeenAt === null ? null : user.welcomeSeenAt.toDateTime(),
     createdAt: user.createdAt.toDateTime(),
     updatedAt: user.updatedAt.toDateTime(),
   },
@@ -1670,6 +1671,77 @@ export const AuthSessionApiLive = HttpApiBuilder.group(TaxMaxiApi, "authSession"
         }).pipe(
           authRouteSpan({
             name: "session.update-me",
+          })
+        )
+      )
+      .handle("markWelcomeSeen", () =>
+        Effect.gen(function* () {
+          const currentUser = yield* CurrentUser
+
+          yield* Effect.annotateCurrentSpan({
+            userId: currentUser.userId,
+          })
+
+          // The writer keeps an existing stamp, so a second mark returns the first timestamp.
+          const welcomeSeenAt = yield* nowTimestamp
+          const updateResult = yield* userRepo
+            .update(currentUser.userId, { welcomeSeenAt })
+            .pipe(Effect.result)
+
+          if (updateResult._tag === "Failure") {
+            if (updateResult.failure._tag === "EntityNotFoundError") {
+              return yield* new AuthUserNotFoundError({})
+            }
+
+            yield* Effect.logError(
+              {
+                userId: currentUser.userId,
+                error: updateResult.failure,
+              },
+              "auth:failed-to-mark-welcome-seen"
+            )
+
+            return yield* internalServerResponse("Failed to mark the welcome as seen")
+          }
+
+          const user = updateResult.success
+
+          const identitiesResult = yield* identityRepo
+            .findByUserId(currentUser.userId)
+            .pipe(Effect.result)
+
+          if (identitiesResult._tag === "Failure") {
+            yield* Effect.logError(
+              {
+                userId: currentUser.userId,
+                error: identitiesResult.failure,
+              },
+              "auth:failed-to-load-linked-identities"
+            )
+
+            return yield* internalServerResponse("Failed to load linked identities")
+          }
+
+          const identities = Chunk.toReadonlyArray(identitiesResult.success)
+          const enabledProviders = yield* getEnabledProviderSet(authService)
+
+          yield* Effect.logInfo(
+            {
+              userId: currentUser.userId,
+              welcomeSeenAt: user.welcomeSeenAt?.toISOString() ?? null,
+            },
+            "auth:mark-welcome-seen-succeeded"
+          )
+
+          return toAccountResponse({
+            user,
+            identities,
+            enabledProviders,
+            currentSessionProvider: currentUser.provider,
+          })
+        }).pipe(
+          authRouteSpan({
+            name: "session.mark-welcome-seen",
           })
         )
       )

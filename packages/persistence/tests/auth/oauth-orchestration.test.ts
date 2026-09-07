@@ -179,6 +179,7 @@ const makeUserRepo = (state: HarnessState): UserRepositoryService => ({
       ...insert,
       createdAt: timestamp,
       emailVerified: insert.emailVerified,
+      welcomeSeenAt: null,
       updatedAt: timestamp,
     })
     state.users.set(user.id, user)
