@@ -33,6 +33,7 @@ import {
   type Account,
   type AccountId,
   type AccountScope,
+  type SourceSyncSeed,
   type TaxYear,
 } from "#/lib/dashboard-types"
 import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
@@ -60,6 +61,7 @@ export function Dashboard({
   onUnauthorized,
   replaySourceSync,
   resolveName,
+  sourceSyncSeeds,
   startSourceSync,
 }: {
   accounts?: ReadonlyArray<Account>
@@ -69,6 +71,8 @@ export function Dashboard({
   onUnauthorized?: () => void | Promise<void>
   replaySourceSync?: (sourceId: AccountId) => Promise<SourceSyncStart>
   resolveName?: (name: string) => Promise<{ name: string; resolvedAddress: string }>
+  /** Jobs still running or paused on the server when the page loaded; the island reconnects to them. */
+  sourceSyncSeeds?: ReadonlyArray<SourceSyncSeed>
   startSourceSync?: (sourceId: AccountId) => Promise<SourceSyncStart>
 }) {
   const taxmaxi = useRouteContext({
@@ -279,6 +283,7 @@ export function Dashboard({
     getSourceSyncJob,
     onCompleted: handleSourceSyncCompleted,
     onUnauthorized: handleUnauthorized,
+    seeds: sourceSyncSeeds,
     startSourceReplay: replaySourceSync,
     startSourceSync,
   })

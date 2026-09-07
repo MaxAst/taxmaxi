@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { TaxMaxiError, type SourceSyncJob } from "taxmaxi"
 
 import { useSourceSyncs } from "#/hooks/use-source-syncs"
+import type { SourceSyncSeed } from "#/lib/dashboard-types"
 
 const source = {
   id: "source-1",
@@ -174,5 +175,140 @@ describe("useSourceSyncs", () => {
       creditsConsumed: 0,
       additionalCreditsRequired: null,
     })
+  })
+})
+
+describe("useSourceSyncs reload reconnect", () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const seed = (status: SourceSyncSeed["status"]): SourceSyncSeed => ({
+    sourceId: source.id,
+    jobId: "job-1",
+    mode: "sync",
+    status,
+  })
+
+  const renderSeeded = (
+    seeds: ReadonlyArray<SourceSyncSeed>,
+    getSourceSyncJob: () => Promise<SourceSyncJob>
+  ) =>
+    renderHook(
+      ({ seeds: currentSeeds }: { seeds: ReadonlyArray<SourceSyncSeed> }) =>
+        useSourceSyncs({
+          accountsById: new Map([[source.id, source]]),
+          getSourceSyncJob,
+          seeds: currentSeeds,
+        }),
+      { initialProps: { seeds } }
+    )
+
+  it("reads a seeded queued job once right away and then keeps polling it", async () => {
+    vi.useFakeTimers()
+    const initialRead = deferred<SourceSyncJob>()
+    const getSourceSyncJob = vi
+      .fn<() => Promise<SourceSyncJob>>()
+      .mockReturnValueOnce(initialRead.promise)
+      .mockResolvedValue(makeJob("running"))
+
+    const { result } = renderSeeded([seed("queued")], getSourceSyncJob)
+
+    expect(getSourceSyncJob).toHaveBeenCalledExactlyOnceWith({
+      sourceId: source.id,
+      jobId: "job-1",
+    })
+    expect(result.current.activeSyncs).toHaveLength(1)
+    expect(result.current.activeSyncs[0]).toMatchObject({
+      id: source.id,
+      jobId: "job-1",
+      mode: "sync",
+      sourceName: source.name,
+      status: "queued",
+    })
+    expect(result.current.syncingSourceIds.has(source.id)).toBe(true)
+
+    await act(async () => {
+      initialRead.resolve(makeJob("running"))
+      await Promise.resolve()
+    })
+    expect(result.current.activeSyncs[0]?.status).toBe("running")
+    expect(result.current.activeSyncs[0]?.phase).toBe("classifying")
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(getSourceSyncJob).toHaveBeenCalledTimes(3)
+    expect(result.current.activeSyncs[0]?.jobId).toBe("job-1")
+  })
+
+  it("does not re-open a failed job from a past session", async () => {
+    vi.useFakeTimers()
+    const getSourceSyncJob = vi
+      .fn<() => Promise<SourceSyncJob>>()
+      .mockResolvedValue(makeJob("failed"))
+
+    const { result } = renderSeeded([seed("failed")], getSourceSyncJob)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(result.current.activeSyncs).toEqual([])
+    expect(getSourceSyncJob).not.toHaveBeenCalled()
+  })
+
+  it("carries the credit outcome of a reconnected credit-required job from the job read", async () => {
+    vi.useFakeTimers()
+    const getSourceSyncJob = vi.fn<() => Promise<SourceSyncJob>>().mockResolvedValue({
+      ...makeJob("credit_required"),
+      resumable: true,
+      creditOutcome: {
+        reasonCode: "no_usable_credits",
+        availableCredits: 0,
+        creditsConsumed: 8,
+        additionalCreditsRequired: 22,
+      },
+    })
+
+    const { result } = renderSeeded([seed("credit_required")], getSourceSyncJob)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(result.current.activeSyncs[0]).toMatchObject({
+      jobId: "job-1",
+      progress: 100,
+      status: "credit_required",
+      creditOutcome: {
+        reasonCode: "no_usable_credits",
+        availableCredits: 0,
+        creditsConsumed: 8,
+        additionalCreditsRequired: 22,
+      },
+    })
+    expect(result.current.syncingSourceIds.has(source.id)).toBe(false)
+
+    // A paused job has nothing to poll; the one read on mount is the only one.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000)
+    })
+    expect(getSourceSyncJob).toHaveBeenCalledTimes(1)
+  })
+
+  it("applies seeds only on mount, so a later overview refetch opens nothing", async () => {
+    vi.useFakeTimers()
+    const getSourceSyncJob = vi
+      .fn<() => Promise<SourceSyncJob>>()
+      .mockResolvedValue(makeJob("running"))
+
+    const { rerender, result } = renderSeeded([], getSourceSyncJob)
+    expect(result.current.activeSyncs).toEqual([])
+
+    rerender({ seeds: [seed("queued")] })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(result.current.activeSyncs).toEqual([])
+    expect(getSourceSyncJob).not.toHaveBeenCalled()
   })
 })

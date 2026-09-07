@@ -12,7 +12,7 @@ import { AccountMenu } from "#/components/account-menu"
 import { AppWorkspace } from "#/components/app-workspace"
 import { Dashboard } from "#/components/dashboard"
 import { useAppLogout } from "#/hooks/use-app-logout"
-import type { Account } from "#/lib/dashboard-types"
+import type { Account, SourceSyncSeed } from "#/lib/dashboard-types"
 import { m } from "#/paraglide/messages"
 import { getLocale } from "#/paraglide/runtime"
 import { clearAuthSessionCookie, getAuthStatus } from "#/server-functions/auth"
@@ -74,6 +74,11 @@ function RouteComponent() {
     )
     return sources.map((source) => toDashboardAccount(source, overviewsBySourceId.get(source.id)))
   }, [sourceOverviews, sources])
+
+  const sourceSyncSeeds = useMemo(
+    () => sourceOverviews.flatMap((overview) => toSourceSyncSeeds(overview)),
+    [sourceOverviews]
+  )
 
   const startSourceSync = useCallback(
     async (sourceId: string) => taxmaxi().sources.startSync({ sourceId }),
@@ -143,6 +148,7 @@ function RouteComponent() {
         onUnauthorized={onUnauthorized}
         replaySourceSync={replaySourceSync}
         resolveName={resolveName}
+        sourceSyncSeeds={sourceSyncSeeds}
         startSourceSync={startSourceSync}
       />
       <Outlet />
@@ -164,6 +170,41 @@ function toDashboardAccount(source: TaxMaxiSource, overview: SourceOverview | un
     unresolvedItems: overview?.review.needsReviewCount ?? 0,
     lastSync: formatLastSync(lastSyncedAt),
     ...(lastSyncedAt === null ? {} : { lastSyncedAt }),
+  }
+}
+
+/**
+ * A source whose latest job is still queued, running, or waiting for credits
+ * gives the island one job to reconnect to after a page load. A completed or
+ * failed job is history and yields nothing, so it never pops the island again.
+ * The status is translated into the job endpoint's words the same way the
+ * server does (`pending` is `queued`, `processing` is `running`).
+ */
+function toSourceSyncSeeds(overview: SourceOverview): ReadonlyArray<SourceSyncSeed> {
+  const { jobId, mode } = overview.latestSync
+  const status = toReconnectableJobStatus(overview.latestSync.status)
+
+  if (jobId === null || mode === null || status === undefined) {
+    return []
+  }
+
+  return [{ sourceId: overview.source.id, jobId, mode, status }]
+}
+
+function toReconnectableJobStatus(
+  status: SourceOverview["latestSync"]["status"]
+): SourceSyncSeed["status"] | undefined {
+  switch (status) {
+    case "pending":
+      return "queued"
+    case "processing":
+      return "running"
+    case "credit_required":
+      return "credit_required"
+    case "completed":
+    case "failed":
+    case null:
+      return undefined
   }
 }
 

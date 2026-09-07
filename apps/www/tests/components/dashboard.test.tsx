@@ -19,10 +19,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { Dashboard } from "#/components/dashboard"
 import { queryKeys } from "#/integrations/taxmaxi/queries"
+import type { SourceSyncSeed } from "#/lib/dashboard-types"
 
 const syncState = vi.hoisted(() => ({
   onCompleted: undefined as undefined | ((sourceId: string) => void | Promise<void>),
   onUnauthorized: undefined as undefined | (() => void | Promise<void>),
+  seeds: undefined as undefined | ReadonlyArray<SourceSyncSeed>,
 }))
 
 let testTaxMaxi: TaxMaxi
@@ -77,12 +79,15 @@ vi.mock("#/hooks/use-source-syncs", () => ({
   useSourceSyncs: ({
     onCompleted,
     onUnauthorized,
+    seeds,
   }: {
     readonly onCompleted?: (sourceId: string) => void | Promise<void>
     readonly onUnauthorized?: () => void | Promise<void>
+    readonly seeds?: ReadonlyArray<SourceSyncSeed>
   }) => {
     syncState.onCompleted = onCompleted
     syncState.onUnauthorized = onUnauthorized
+    syncState.seeds = seeds
     return {
       activeSyncs: [],
       onDismissSync: vi.fn(),
@@ -179,6 +184,47 @@ describe("Dashboard transaction pagination", () => {
 
     await waitFor(() => expect(requestedCursors.at(-1)).toBeNull())
     expect(await screen.findByText("First transaction page")).toBeTruthy()
+  })
+})
+
+describe("Dashboard sync reconnect", () => {
+  afterEach(() => {
+    cleanup()
+    syncState.seeds = undefined
+    vi.clearAllMocks()
+  })
+
+  it("hands the page's sync seeds to the sync hook", async () => {
+    testTaxMaxi = {
+      portfolio: {
+        listAssets: vi.fn(async () => ({ assets: [], summary: undefined })),
+      },
+      transactions: {
+        list: vi.fn(async () => ({
+          transactions: [],
+          totalCount: 0,
+          page: { hasMore: false, nextCursor: null },
+        })),
+      },
+    } as unknown as TaxMaxi
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const seeds: ReadonlyArray<SourceSyncSeed> = [
+      {
+        sourceId: "00000000-0000-4000-8000-000000000201",
+        jobId: "job-1",
+        mode: "sync",
+        status: "running",
+      },
+    ]
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Dashboard accounts={[]} sourceSyncSeeds={seeds} />
+      </QueryClientProvider>
+    )
+
+    expect(await screen.findByText("No transactions yet.")).toBeTruthy()
+    expect(syncState.seeds).toBe(seeds)
   })
 })
 

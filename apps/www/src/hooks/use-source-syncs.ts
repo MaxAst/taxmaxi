@@ -15,18 +15,27 @@ import {
   type SourceSyncMode,
   type SourceSyncStatus,
 } from "#/components/source-sync-island"
-import type { Account, AccountId } from "#/lib/dashboard-types"
+import type { Account, AccountId, SourceSyncSeed } from "#/lib/dashboard-types"
 
 type ActiveSourceSync = SourceSyncIslandItem & {
   sourceId: AccountId
   jobId?: string
 }
 
+/** The part of an item a job read needs: which item to update and which job to ask for. */
+type PolledSourceSync = Pick<ActiveSourceSync, "id" | "sourceId"> & { jobId: string }
+
 type UseSourceSyncsOptions = {
   accountsById: ReadonlyMap<AccountId, Account>
   getSourceSyncJob?: (input: SourceSyncJobInput) => Promise<SourceSyncJob>
   onCompleted?: (sourceId: AccountId) => void | Promise<void>
   onUnauthorized?: () => void | Promise<void>
+  /**
+   * Jobs the server already knows about, from the source overviews loaded
+   * with the page. Applied once per mount so the island reconnects to a sync
+   * that was running before a reload.
+   */
+  seeds?: ReadonlyArray<SourceSyncSeed>
   startSourceSync?: (sourceId: AccountId) => Promise<SourceSyncStart>
   startSourceReplay?: (sourceId: AccountId) => Promise<SourceSyncStart>
 }
@@ -34,12 +43,14 @@ type UseSourceSyncsOptions = {
 const SOURCE_SYNC_POLL_INTERVAL_MS = 500
 const COMPLETED_SYNC_DISMISS_DELAY_MS = 2800
 const MAX_CONSECUTIVE_POLL_FAILURES = 3
+const NO_SEEDS: ReadonlyArray<SourceSyncSeed> = []
 
 export function useSourceSyncs({
   accountsById,
   getSourceSyncJob,
   onCompleted,
   onUnauthorized,
+  seeds = NO_SEEDS,
   startSourceReplay,
   startSourceSync,
 }: UseSourceSyncsOptions) {
@@ -47,6 +58,7 @@ export function useSourceSyncs({
   const completionTimeoutsRef = useRef(new Map<string, number>())
   const completedNotificationsRef = useRef(new Set<string>())
   const pollFailureCountsRef = useRef(new Map<string, number>())
+  const seededRef = useRef(false)
   const syncingSourceIds = useMemo(
     () =>
       new Set(
@@ -170,93 +182,128 @@ export function useSourceSyncs({
     [startSourceReplay, startSyncJob]
   )
 
-  useEffect(() => {
-    if (!getSourceSyncJob) {
-      return
-    }
+  // One job read, shared by the poll loop and the reload reconnect. The
+  // response only lands on the item that still carries this job id, so a late
+  // response can never overwrite a newer job or a terminal state.
+  const readSourceSyncJob = useCallback(
+    (sync: PolledSourceSync) => {
+      if (!getSourceSyncJob) {
+        return
+      }
 
-    const pollableSyncs = activeSyncs.filter(
-      (sync) => sync.jobId !== undefined && (sync.status === "queued" || sync.status === "running")
+      const { jobId } = sync
+      const syncKey = getSourceSyncKey(sync)
+
+      void getSourceSyncJob({ sourceId: sync.sourceId, jobId }).then(
+        (job) => {
+          pollFailureCountsRef.current.delete(syncKey)
+          if (job.status === "completed" && !completedNotificationsRef.current.has(syncKey)) {
+            completedNotificationsRef.current.add(syncKey)
+            void notifySourceSyncCompleted({
+              completedNotifications: completedNotificationsRef.current,
+              onCompleted,
+              sourceId: sync.sourceId,
+              syncKey,
+            })
+          }
+          setActiveSyncs((syncs) => {
+            const currentSync = syncs.find((candidate) => candidate.id === sync.id)
+
+            if (
+              !currentSync ||
+              currentSync.jobId !== jobId ||
+              currentSync.status === "completed" ||
+              currentSync.status === "failed"
+            ) {
+              return syncs
+            }
+
+            return replaceSourceSync(syncs, toActiveSourceSync(job, currentSync))
+          })
+        },
+        (error: unknown) => {
+          if (isTaxMaxiUnauthorizedError(error)) {
+            pollFailureCountsRef.current.delete(syncKey)
+            failPolledSourceSync({
+              expectedJobId: jobId,
+              message: "Your session expired. Sign in again to continue syncing.",
+              setActiveSyncs,
+              sourceId: sync.sourceId,
+            })
+            void handlePollingUnauthorized({ onUnauthorized })
+            return
+          }
+
+          const failureCount = (pollFailureCountsRef.current.get(syncKey) ?? 0) + 1
+          const jobNotFound = error instanceof TaxMaxiError && error.status === 404
+
+          if (!jobNotFound && failureCount < MAX_CONSECUTIVE_POLL_FAILURES) {
+            pollFailureCountsRef.current.set(syncKey, failureCount)
+            return
+          }
+
+          pollFailureCountsRef.current.delete(syncKey)
+          failPolledSourceSync({
+            expectedJobId: jobId,
+            message: jobNotFound
+              ? "The sync job could not be found. Start the sync again."
+              : "The sync status could not be loaded after several attempts. Try again.",
+            setActiveSyncs,
+            sourceId: sync.sourceId,
+          })
+        }
+      )
+    },
+    [getSourceSyncJob, onCompleted, onUnauthorized]
+  )
+
+  useEffect(() => {
+    const pollableSyncs = activeSyncs.flatMap((sync) =>
+      sync.jobId !== undefined && (sync.status === "queued" || sync.status === "running")
+        ? [{ id: sync.id, jobId: sync.jobId, sourceId: sync.sourceId }]
+        : []
     )
 
-    if (pollableSyncs.length === 0) {
+    if (!getSourceSyncJob || pollableSyncs.length === 0) {
       return
     }
 
     const intervalId = window.setInterval(() => {
       for (const sync of pollableSyncs) {
-        if (sync.jobId === undefined) {
-          continue
-        }
-        const jobId = sync.jobId
-
-        void getSourceSyncJob({ sourceId: sync.sourceId, jobId }).then(
-          (job) => {
-            const syncKey = getSourceSyncKey(sync)
-            pollFailureCountsRef.current.delete(syncKey)
-            if (job.status === "completed" && !completedNotificationsRef.current.has(syncKey)) {
-              completedNotificationsRef.current.add(syncKey)
-              void notifySourceSyncCompleted({
-                completedNotifications: completedNotificationsRef.current,
-                onCompleted,
-                sourceId: sync.sourceId,
-                syncKey,
-              })
-            }
-            setActiveSyncs((syncs) => {
-              const currentSync = syncs.find((candidate) => candidate.id === sync.id)
-
-              if (
-                !currentSync ||
-                currentSync.jobId !== jobId ||
-                currentSync.status === "completed" ||
-                currentSync.status === "failed"
-              ) {
-                return syncs
-              }
-
-              return replaceSourceSync(syncs, toActiveSourceSync(job, currentSync))
-            })
-          },
-          (error: unknown) => {
-            const syncKey = getSourceSyncKey(sync)
-
-            if (isTaxMaxiUnauthorizedError(error)) {
-              pollFailureCountsRef.current.delete(syncKey)
-              failPolledSourceSync({
-                expectedJobId: jobId,
-                message: "Your session expired. Sign in again to continue syncing.",
-                setActiveSyncs,
-                sourceId: sync.sourceId,
-              })
-              void handlePollingUnauthorized({ onUnauthorized })
-              return
-            }
-
-            const failureCount = (pollFailureCountsRef.current.get(syncKey) ?? 0) + 1
-            const jobNotFound = error instanceof TaxMaxiError && error.status === 404
-
-            if (!jobNotFound && failureCount < MAX_CONSECUTIVE_POLL_FAILURES) {
-              pollFailureCountsRef.current.set(syncKey, failureCount)
-              return
-            }
-
-            pollFailureCountsRef.current.delete(syncKey)
-            failPolledSourceSync({
-              expectedJobId: jobId,
-              message: jobNotFound
-                ? "The sync job could not be found. Start the sync again."
-                : "The sync status could not be loaded after several attempts. Try again.",
-              setActiveSyncs,
-              sourceId: sync.sourceId,
-            })
-          }
-        )
+        readSourceSyncJob(sync)
       }
     }, SOURCE_SYNC_POLL_INTERVAL_MS)
 
     return () => window.clearInterval(intervalId)
-  }, [activeSyncs, getSourceSyncJob, onCompleted, onUnauthorized])
+  }, [activeSyncs, getSourceSyncJob, readSourceSyncJob])
+
+  // Reload reconnect: the server already knows these jobs, so each seed
+  // becomes an item right away and its job is read once. From there the
+  // regular poll loop takes over. Seeds apply once per mount; a later
+  // overview refetch must not re-open an item the user has dismissed.
+  useEffect(() => {
+    if (seededRef.current || !getSourceSyncJob) {
+      return
+    }
+
+    seededRef.current = true
+    const reconnectedSyncs = seeds.flatMap((seed) => {
+      const source = accountsById.get(seed.sourceId)
+
+      return source !== undefined && isReconnectableSeedStatus(seed.status)
+        ? [makeSeededSourceSync(seed, source)]
+        : []
+    })
+
+    if (reconnectedSyncs.length === 0) {
+      return
+    }
+
+    setActiveSyncs((syncs) => reconnectedSyncs.reduce(upsertSourceSync, syncs))
+    for (const sync of reconnectedSyncs) {
+      readSourceSyncJob(sync)
+    }
+  }, [accountsById, getSourceSyncJob, readSourceSyncJob, seeds])
 
   useEffect(() => {
     const completedSyncKeys = new Set<string>()
@@ -353,6 +400,29 @@ function makePendingSourceSync(source: Account, mode: SourceSyncMode): ActiveSou
   }
 }
 
+/**
+ * A terminal job from a past session must not pop the island on every load;
+ * only jobs that can still change, or still need the user, are reconnected.
+ */
+function isReconnectableSeedStatus(status: SourceSyncStatus): boolean {
+  return status === "queued" || status === "running" || status === "credit_required"
+}
+
+function makeSeededSourceSync(
+  seed: SourceSyncSeed,
+  source: Account
+): PolledSourceSync & ActiveSourceSync {
+  return {
+    id: seed.sourceId,
+    jobId: seed.jobId,
+    mode: seed.mode,
+    progress: getProgressForStatus(seed.status),
+    sourceId: seed.sourceId,
+    sourceName: source.name,
+    status: seed.status,
+  }
+}
+
 function toActiveSourceSync(job: SourceSyncJob, current: ActiveSourceSync): ActiveSourceSync {
   return {
     ...current,
@@ -396,7 +466,7 @@ function replaceSourceSync(
   return syncs.map((sync) => (sync.id === nextSync.id ? nextSync : sync))
 }
 
-function getSourceSyncKey(sync: ActiveSourceSync): string {
+function getSourceSyncKey(sync: Pick<ActiveSourceSync, "sourceId" | "jobId">): string {
   return `${sync.sourceId}:${sync.jobId ?? "pending"}`
 }
 
