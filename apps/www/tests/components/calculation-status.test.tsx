@@ -75,3 +75,43 @@ describe("calculation blocker labels", () => {
     }
   )
 })
+
+describe("first calculation status", () => {
+  afterEach(cleanup)
+
+  it.each(["running", "failed"] as const)(
+    "does not claim retained results when the first calculation is %s",
+    (status) => {
+      render(
+        <CalculationStatus
+          portfolio={{
+            currency: "EUR",
+            activeRun: null,
+            latestRun: { runId: "first-run", status, failureCode: null },
+            assets: [],
+            summary: {
+              totalValue: null,
+              costBasis: null,
+              profitLoss: null,
+              profitLossPercentage: null,
+            },
+          }}
+          requestFailed={false}
+          refreshing={false}
+          disabled={false}
+          onRefresh={vi.fn()}
+          postSyncNotice={null}
+        />
+      )
+      expect(screen.getByText("No calculation available.")).toBeTruthy()
+      expect(
+        screen.getAllByText(
+          status === "running"
+            ? "The latest calculation is running."
+            : "The latest calculation failed."
+        ).length
+      ).toBeGreaterThan(0)
+      expect(screen.queryByText(/results remain visible/i)).toBeNull()
+    }
+  )
+})
