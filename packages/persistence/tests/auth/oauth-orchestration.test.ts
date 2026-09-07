@@ -179,6 +179,7 @@ const makeUserRepo = (state: HarnessState): UserRepositoryService => ({
       ...insert,
       createdAt: timestamp,
       emailVerified: insert.emailVerified,
+      welcomeSeenAt: null,
       updatedAt: timestamp,
     })
     state.users.set(user.id, user)
@@ -197,6 +198,20 @@ const makeUserRepo = (state: HarnessState): UserRepositoryService => ({
     })
     state.users.set(id, updated)
     return Effect.succeed(updated)
+  },
+  markWelcomeSeen: ({ userId }) => {
+    const existing = state.users.get(userId)
+    if (existing === undefined) {
+      return unsupported()
+    }
+    if (existing.welcomeSeenAt !== null) {
+      return Effect.succeed(existing)
+    }
+
+    const timestamp = Timestamp.now()
+    const marked = AuthUser.make({ ...existing, welcomeSeenAt: timestamp, updatedAt: timestamp })
+    state.users.set(userId, marked)
+    return Effect.succeed(marked)
   },
   delete: (id) => {
     state.users.delete(id)

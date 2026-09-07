@@ -8,6 +8,8 @@ export const users = pgTable("users", {
   emailVerified: boolean("email_verified").notNull().default(false),
   name: text("name"),
   role: userRoleEnum("role").notNull().default("user"),
+  /** Server time of the first welcome mark. Null until the user finishes or skips the welcome. */
+  welcomeSeenAt: timestamp("welcome_seen_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 })

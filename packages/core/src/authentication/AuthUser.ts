@@ -93,6 +93,17 @@ export class AuthUser extends Schema.Class<AuthUser>("AuthUser")({
   }),
 
   /**
+   * When the user first finished or skipped the welcome.
+   *
+   * Null means the welcome has not been seen. The server stamps this once;
+   * later marks keep the first timestamp.
+   */
+  welcomeSeenAt: Schema.NullOr(Timestamp).annotate({
+    title: "Welcome Seen At",
+    description: "When the user first finished or skipped the welcome, or null if not yet seen",
+  }),
+
+  /**
    * When the user account was created
    */
   createdAt: Timestamp,

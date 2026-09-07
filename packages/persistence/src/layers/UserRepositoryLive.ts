@@ -1,4 +1,4 @@
-import { and, asc, eq, ilike } from "drizzle-orm"
+import { and, asc, eq, ilike, isNull } from "drizzle-orm"
 import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -20,7 +20,7 @@ import { drizzle } from "./PgClientLive.ts"
 
 type SelectedUserRow = Pick<
   UserRow,
-  "id" | "email" | "emailVerified" | "name" | "role" | "createdAt" | "updatedAt"
+  "id" | "email" | "emailVerified" | "name" | "role" | "welcomeSeenAt" | "createdAt" | "updatedAt"
 >
 
 const toAuthRole = (role: "user" | "admin"): UserRole => (role === "admin" ? "admin" : "member")
@@ -50,6 +50,7 @@ const make = Effect.gen(function* () {
     emailVerified: users.emailVerified,
     name: users.name,
     role: users.role,
+    welcomeSeenAt: users.welcomeSeenAt,
     createdAt: users.createdAt,
     updatedAt: users.updatedAt,
   } as const
@@ -87,6 +88,10 @@ const make = Effect.gen(function* () {
         role: toAuthRole(row.role),
         primaryProvider,
         emailVerified: row.emailVerified,
+        welcomeSeenAt:
+          row.welcomeSeenAt === null
+            ? null
+            : Timestamp.make({ epochMillis: row.welcomeSeenAt.getTime() }),
         createdAt: Timestamp.make({ epochMillis: row.createdAt.getTime() }),
         updatedAt: Timestamp.make({ epochMillis: row.updatedAt.getTime() }),
       })
@@ -172,6 +177,26 @@ const make = Effect.gen(function* () {
       return yield* rowToAuthUserWithPrimaryProvider(updated)
     }).pipe(wrapSqlError("update"))
 
+  const markWelcomeSeen: UserRepositoryService["markWelcomeSeen"] = ({ userId }) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.nowAsDate
+
+      // Set once: the row changes only while the stamp is null, so a repeat mark
+      // (or a racing first mark) leaves both the stamp and updatedAt as they are.
+      yield* db
+        .update(users)
+        .set({ welcomeSeenAt: now, updatedAt: now })
+        .where(and(eq(users.id, userId), isNull(users.welcomeSeenAt)))
+
+      const [row] = yield* db.select(selectAuthUserFields).from(users).where(eq(users.id, userId))
+
+      if (row === undefined) {
+        return yield* new EntityNotFoundError({ entityType: "AuthUser", entityId: userId })
+      }
+
+      return yield* rowToAuthUserWithPrimaryProvider(row)
+    }).pipe(wrapSqlError("markWelcomeSeen"))
+
   const deleteUser: UserRepositoryService["delete"] = (id) =>
     Effect.gen(function* () {
       const [deleted] = yield* db.delete(users).where(eq(users.id, id)).returning({ id: users.id })
@@ -205,6 +230,7 @@ const make = Effect.gen(function* () {
     findByEmail,
     create,
     update,
+    markWelcomeSeen,
     delete: deleteUser,
     findPlatformAdmins,
     isPlatformAdmin,

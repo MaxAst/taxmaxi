@@ -92,6 +92,19 @@ export interface UserRepositoryService {
   ) => Effect.Effect<AuthUser, EntityNotFoundError | PersistenceError>
 
   /**
+   * Record that the user has seen the welcome. Set once: the first call stamps
+   * `welcomeSeenAt` and `updatedAt` with server time; later calls change
+   * nothing and return the row as it is. This is the only writer of that fact.
+   *
+   * @param params.userId - The user to mark
+   * @returns Effect containing the user after the mark
+   * @throws EntityNotFoundError if user doesn't exist
+   */
+  readonly markWelcomeSeen: (params: {
+    readonly userId: AuthUserId
+  }) => Effect.Effect<AuthUser, EntityNotFoundError | PersistenceError>
+
+  /**
    * Delete a user by their ID
    *
    * @param id - The user ID to delete

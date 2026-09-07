@@ -302,6 +302,7 @@ const userRepositoryStub: UserRepositoryService = {
   findByEmail: () => Effect.succeed(Option.none()),
   create: () => Effect.die("unused user repository create"),
   update: () => Effect.die("unused user repository update"),
+  markWelcomeSeen: () => Effect.die("unused user repository markWelcomeSeen"),
   delete: () => Effect.die("unused user repository delete"),
   findPlatformAdmins: Effect.succeed([]),
   isPlatformAdmin: () => Effect.succeed(false),
