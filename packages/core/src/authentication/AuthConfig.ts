@@ -9,7 +9,6 @@
  * - AUTH_DEFAULT_ROLE: Default role for new users
  * - AUTH_SESSION_DURATION: Session duration (e.g., "24 hours")
  * - AUTH_AUTO_LINK_BY_EMAIL: Auto-link identities by email match
- * - AUTH_REQUIRE_EMAIL_VERIFICATION: For local provider
  *
  * @module AuthConfig
  */
@@ -36,14 +35,6 @@ import { isUserRole } from "./AuthUser.ts"
  * LocalAuthConfig - Configuration for local (email/password) authentication
  */
 export class LocalAuthConfig extends Schema.Class<LocalAuthConfig>("LocalAuthConfig")({
-  /**
-   * Whether email verification is required for local registration
-   */
-  requireEmailVerification: Schema.Boolean.annotate({
-    title: "Require Email Verification",
-    description: "Whether new users must verify their email before login",
-  }),
-
   /**
    * Minimum password length
    */
@@ -195,14 +186,6 @@ export interface AuthConfigData {
    * to the existing account.
    */
   readonly autoLinkByEmail: boolean
-
-  /**
-   * Whether email verification is required for local provider
-   *
-   * When true, local registration requires email verification
-   * before the user can log in.
-   */
-  readonly requireEmailVerification: boolean
 }
 
 /**
@@ -230,7 +213,6 @@ export class AuthConfig extends Context.Service<AuthConfig, AuthConfigData>()("A
  * Default LocalAuthConfig values
  */
 export const localAuthDefaults: LocalAuthConfig = LocalAuthConfig.make({
-  requireEmailVerification: false,
   minPasswordLength: 8,
   requireUppercase: false,
   requireNumbers: false,
@@ -245,13 +227,11 @@ export const authConfigDefaults: {
   readonly defaultRole: UserRole
   readonly sessionDuration: Duration.Duration
   readonly autoLinkByEmail: boolean
-  readonly requireEmailVerification: boolean
 } = {
   enabledProviders: ["local"],
   defaultRole: "member",
   sessionDuration: Duration.hours(24),
   autoLinkByEmail: true,
-  requireEmailVerification: false,
 }
 
 // =============================================================================
@@ -281,9 +261,6 @@ const parseUserRole = (value: string): UserRole => {
  * Config for local auth provider settings
  */
 const localAuthConfig: Config.Config<Option.Option<LocalAuthConfig>> = Config.all({
-  requireEmailVerification: Config.boolean("REQUIRE_EMAIL_VERIFICATION").pipe(
-    Config.withDefault(localAuthDefaults.requireEmailVerification)
-  ),
   minPasswordLength: Config.int("MIN_PASSWORD_LENGTH").pipe(
     Config.withDefault(localAuthDefaults.minPasswordLength)
   ),
@@ -362,9 +339,6 @@ export const authConfig: Config.Config<AuthConfigData> = Config.all({
   autoLinkByEmail: Config.boolean("AUTH_AUTO_LINK_BY_EMAIL").pipe(
     Config.withDefault(authConfigDefaults.autoLinkByEmail)
   ),
-  requireEmailVerification: Config.boolean("AUTH_REQUIRE_EMAIL_VERIFICATION").pipe(
-    Config.withDefault(authConfigDefaults.requireEmailVerification)
-  ),
   local: localAuthConfig,
   google: googleAuthConfig,
   coinbase: coinbaseAuthConfig,
@@ -375,7 +349,6 @@ export const authConfig: Config.Config<AuthConfigData> = Config.all({
       defaultRole: c.defaultRole,
       sessionDuration: c.sessionDuration,
       autoLinkByEmail: c.autoLinkByEmail,
-      requireEmailVerification: c.requireEmailVerification,
       providerConfigs: {
         local: c.local,
         google: c.google,
@@ -402,7 +375,6 @@ export const authConfigFromEnv: Effect.Effect<AuthConfigData, ConfigError> = aut
  * - AUTH_DEFAULT_ROLE: Default user role (default: "member")
  * - AUTH_SESSION_DURATION: Session duration (default: "24 hours")
  * - AUTH_AUTO_LINK_BY_EMAIL: Auto-link by email (default: true)
- * - AUTH_REQUIRE_EMAIL_VERIFICATION: Require verification (default: false)
  *
  * Provider-specific configs (nested):
  * - AUTH_LOCAL_*: Local auth settings

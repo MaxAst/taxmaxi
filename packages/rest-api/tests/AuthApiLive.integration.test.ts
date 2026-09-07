@@ -4,7 +4,6 @@ import { Etag, HttpRouter } from "effect/unstable/http"
 import { NodeHttpPlatform, NodeServices } from "@effect/platform-node"
 import {
   HashedPassword,
-  LocalAuthConfig,
   PasswordHasher,
   SessionId,
   SessionTokenGenerator,
@@ -230,10 +229,7 @@ const makeAuthHandler = () => {
       return {
         providers: Chunk.of(localProvider),
         sessionDurations: SessionDurationConfig.Default,
-        localAuth: LocalAuthConfig.make({
-          ...localAuthDefaults,
-          requireEmailVerification: true,
-        }),
+        localAuth: localAuthDefaults,
         autoProvisionUsers: true,
         linkIdentitiesByEmail: true,
       }
