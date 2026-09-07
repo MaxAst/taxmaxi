@@ -125,8 +125,12 @@ describe("transaction detail repository", () => {
         })
       }
       expect(detail.classificationHistoryStatus).toBe("unavailable")
-      expect(detail.movements[0]?.evidence).not.toHaveProperty("payload")
-      expect(detail.movements[0]?.evidence).not.toHaveProperty("externalAccountId")
+      const evidence = detail.movements.find(
+        (movement) => movement.evidenceStatus === "available"
+      )?.evidence
+      expect(evidence).toMatchObject({ provider: "synthetic", externalRecordId: "safe-evidence" })
+      expect(evidence).not.toHaveProperty("payload")
+      expect(evidence).not.toHaveProperty("externalAccountId")
       const rows = yield* run(
         Effect.gen(function* () {
           const db = yield* drizzle
@@ -255,7 +259,7 @@ describe("transaction detail repository", () => {
               principalId: fixture.principalId,
               providerTransferId: provider.id,
               canonicalTransferId: transfer.id,
-              canonicalTransactionId: fixture.transactionId,
+              canonicalTransactionId: fixture.excludedId,
               status: "approved",
               matchReason: "Synthetic custody",
               confidence: "1",
@@ -267,7 +271,11 @@ describe("transaction detail repository", () => {
             return yield* Effect.die("Missing fixture movement")
           yield* db
             .update(schema.transactionLegs)
-            .set({ originKind: "canonical_transfer", sourceTransferId: transfer.id })
+            .set({
+              originKind: "canonical_transfer",
+              sourceTransferId: transfer.id,
+              transactionId: fixture.excludedId,
+            })
             .where(eq(schema.transactionLegs.id, first.id))
           const feeValues = yield* prepareMovementLegFixtures(
             ["linked-fee", "unrelated-fee"].map((componentKey) => ({
@@ -290,11 +298,89 @@ describe("transaction detail repository", () => {
             id: schema.transactionLegs.id,
             feeForTransactionId: schema.transactionLegs.feeForTransactionId,
           })
-          return { first, transfer, reconciliation, fees }
+          const [unlinkedProvider] = yield* db
+            .insert(schema.providerTransfers)
+            .values({
+              sourceId: fixture.sourceId,
+              transactionId: fixture.unresolvedId,
+              externalId: "unlinked-provider",
+              fromAccountRef: "source",
+              toAddress: "destination",
+              timestamp: time,
+              direction: "outbound",
+              processingMode: "accounting_and_evidence",
+              amount: "3",
+            })
+            .returning({ id: schema.providerTransfers.id })
+          const [unlinkedTransfer] = yield* db
+            .insert(schema.transfers)
+            .values({
+              sourceId: fixture.sourceId,
+              principalId: fixture.principalId,
+              externalId: "unlinked-canonical",
+              fromAddress: "source",
+              toAddress: "destination",
+              timestamp: time,
+              type: "native",
+              assetId: TEST_BTC_ASSET_ID,
+              amount: "3",
+            })
+            .returning({ id: schema.transfers.id })
+          if (unlinkedProvider === undefined || unlinkedTransfer === undefined)
+            return yield* Effect.die("Missing unlinked origins")
+          yield* db.insert(schema.inventoryMovements).values({
+            sourceId: fixture.sourceId,
+            principalId: fixture.principalId,
+            transactionId: fixture.unresolvedId,
+            providerTransferId: unlinkedProvider.id,
+            assetId: TEST_BTC_ASSET_ID,
+            timestamp: time,
+            direction: "outbound",
+            purpose: "principal",
+            taxTreatment: "non_taxable",
+            reconciliationStatus: "matched",
+            amount: "3",
+          })
+          yield* db.insert(schema.transferReconciliations).values({
+            principalId: fixture.principalId,
+            providerTransferId: unlinkedProvider.id,
+            canonicalTransferId: unlinkedTransfer.id,
+            canonicalTransactionId: fixture.excludedId,
+            status: "approved",
+            matchReason: "Synthetic unrelated custody",
+            confidence: "1",
+            deterministic: true,
+          })
+          const unlinkedValues = yield* prepareMovementLegFixtures([
+            {
+              sourceId: fixture.sourceId,
+              principalId: fixture.principalId,
+              externalId: "unlinked-leg",
+              timestamp: time,
+              assetId: TEST_BTC_ASSET_ID,
+              amount: "3",
+              kind: "acquisition",
+              provenance: "deterministic",
+              originKind: "canonical_transfer",
+              sourceTransferId: unlinkedTransfer.id,
+              transactionId: fixture.excludedId,
+              movementIdentity: { sourceRecordKey: "unlinked-leg", componentKey: "main" },
+            },
+          ])
+          const [unlinkedLeg] = yield* db
+            .insert(schema.transactionLegs)
+            .values(unlinkedValues)
+            .returning({ id: schema.transactionLegs.id })
+          if (unlinkedLeg === undefined) return yield* Effect.die("Missing unlinked leg")
+          return { first, transfer, reconciliation, fees, unlinkedLeg }
         })
       )
       const detail = Option.getOrThrow(yield* read(fixture.transactionId, fixture.principalId))
       expect(detail.movements).toHaveLength(3)
+      expect(detail.movements.some((movement) => movement.id === links.unlinkedLeg.id)).toBe(false)
+      expect(
+        detail.movements.find((movement) => movement.id === links.first.id)?.transactionId
+      ).toBe(fixture.excludedId)
       expect(
         detail.movements.find((movement) => movement.id === links.first.id)?.sourceTransferId
       ).toBe(links.transfer.id)
