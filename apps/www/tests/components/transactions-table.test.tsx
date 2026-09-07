@@ -7,15 +7,27 @@ import {
   render as testingRender,
   screen,
   within,
+  waitFor,
 } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { TaxMaxi, type TransactionDetail, type TransactionListItem } from "taxmaxi"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import type { ReactElement } from "react"
+import { useRef, useState, type ComponentProps, type ReactElement } from "react"
 
 import { setLocale } from "#/paraglide/runtime"
 
 import { TransactionsTable } from "#/components/transactions-table"
+import { TransactionInspector } from "#/components/transaction-inspector"
+import { m } from "#/paraglide/messages"
+
+beforeEach(() => {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi
+      .fn()
+      .mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }),
+  })
+})
 
 const transaction: TransactionListItem = {
   transactionId: "00000000-0000-4000-8000-000000000101",
@@ -88,6 +100,8 @@ const detail = (): TransactionDetail => ({
 
 const defaultProps = {
   taxmaxi,
+  onSelect: vi.fn(),
+  selectedTransactionId: null,
   disabled: false,
   onUnauthorized: vi.fn(),
   error: false,
@@ -101,6 +115,47 @@ const defaultProps = {
   transactions: [transaction],
 }
 
+function TransactionsWithInspector(props: typeof defaultProps) {
+  const [selection, setSelection] =
+    useState<ComponentProps<typeof TransactionInspector>["selection"]>(null)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
+  return (
+    <>
+      <TransactionsTable
+        {...props}
+        selectedTransactionId={selection?.transactionId ?? null}
+        onSelect={(row, trigger) => {
+          props.onSelect(row, trigger)
+          returnFocusRef.current = trigger
+          setSelection({
+            transactionId: row.transactionId,
+            taxYear: Number(
+              new Intl.DateTimeFormat("en", { year: "numeric", timeZone: "Europe/Berlin" }).format(
+                new Date(row.timestamp)
+              )
+            ),
+            description: row.description ?? m["app.treatment.transaction"](),
+          })
+        }}
+      />
+      <TransactionInspector
+        selection={selection}
+        taxmaxi={props.taxmaxi}
+        disabled={props.disabled}
+        onUnauthorized={props.onUnauthorized}
+        onClose={() => setSelection(null)}
+        returnFocusRef={returnFocusRef}
+      />
+    </>
+  )
+}
+
+const openName = (row: TransactionListItem = transaction) =>
+  m["app.inspector.open"]({
+    description: row.description ?? m["app.treatment.transaction"](),
+    transactionId: row.transactionId,
+  })
+
 describe("TransactionsTable", () => {
   afterEach(() => {
     cleanup()
@@ -110,7 +165,7 @@ describe("TransactionsTable", () => {
   })
 
   it("renders real compact rows and the exact total", () => {
-    render(<TransactionsTable {...defaultProps} />)
+    render(<TransactionsWithInspector {...defaultProps} />)
 
     expect(screen.getByText("Sold Bitcoin")).toBeTruthy()
     expect(screen.getByText("0.4 BTC")).toBeTruthy()
@@ -119,9 +174,38 @@ describe("TransactionsTable", () => {
     expect(screen.getByText("1–1 of 1")).toBeTruthy()
   })
 
+  it("uses a full-row native button and reports the selected transaction and opener", async () => {
+    vi.spyOn(taxmaxi.transactions, "get").mockResolvedValue(detail())
+    render(<TransactionsWithInspector {...defaultProps} />)
+    const opener = screen.getByRole("button", { name: openName() })
+    expect(opener.tagName).toBe("BUTTON")
+    expect(opener.getAttribute("type")).toBe("button")
+    expect(opener.getAttribute("aria-haspopup")).toBe("dialog")
+    expect(opener.getAttribute("aria-expanded")).toBe("false")
+    opener.focus()
+    fireEvent.click(opener)
+    expect(defaultProps.onSelect).toHaveBeenCalledExactlyOnceWith(transaction, opener)
+    expect(screen.getAllByRole("dialog")).toHaveLength(1)
+    expect(opener.getAttribute("aria-expanded")).toBe("true")
+    const close = screen.getByRole("button", { name: m["app.inspector.close"]() })
+    expect(document.activeElement).toBe(close)
+    fireEvent.click(close)
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+    expect(opener.getAttribute("aria-expanded")).toBe("false")
+  })
+
+  it("disables selection after authentication is lost", () => {
+    render(<TransactionsWithInspector {...defaultProps} disabled />)
+    const opener = screen.getByRole("button", { name: openName() })
+    expect(opener.hasAttribute("disabled")).toBe(true)
+    fireEvent.click(opener)
+    expect(defaultProps.onSelect).not.toHaveBeenCalled()
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
   it("shows incomplete valuation as pending without hiding the transaction row", () => {
     render(
-      <TransactionsTable
+      <TransactionsWithInspector
         {...defaultProps}
         transactions={[
           {
@@ -140,7 +224,7 @@ describe("TransactionsTable", () => {
 
   it("does not label a complete transaction with no gain or loss as pending", () => {
     render(
-      <TransactionsTable
+      <TransactionsWithInspector
         {...defaultProps}
         transactions={[
           {
@@ -156,7 +240,7 @@ describe("TransactionsTable", () => {
   })
 
   it("shows gain and calculation state in the compact mobile row", () => {
-    const { rerender } = render(<TransactionsTable {...defaultProps} />)
+    const { rerender } = render(<TransactionsWithInspector {...defaultProps} />)
 
     const mobileGain = screen
       .getAllByText("+€2,000.00")
@@ -164,7 +248,7 @@ describe("TransactionsTable", () => {
     expect(mobileGain).toBeDefined()
 
     rerender(
-      <TransactionsTable
+      <TransactionsWithInspector
         {...defaultProps}
         transactions={[
           {
@@ -184,7 +268,7 @@ describe("TransactionsTable", () => {
 
   it("formats gains beyond Number.MAX_SAFE_INTEGER without losing precision", () => {
     render(
-      <TransactionsTable
+      <TransactionsWithInspector
         {...defaultProps}
         transactions={[{ ...transaction, realizedGainLoss: "9007199254740993" }]}
       />
@@ -195,7 +279,7 @@ describe("TransactionsTable", () => {
 
   it("formats large fractional losses from the exact decimal string", () => {
     render(
-      <TransactionsTable
+      <TransactionsWithInspector
         {...defaultProps}
         transactions={[
           {
@@ -210,20 +294,24 @@ describe("TransactionsTable", () => {
   })
 
   it("shows loading, empty, and error states", () => {
-    const { rerender } = render(<TransactionsTable {...defaultProps} loading transactions={[]} />)
+    const { rerender } = render(
+      <TransactionsWithInspector {...defaultProps} loading transactions={[]} />
+    )
     expect(screen.getByRole("status").textContent).toContain("Loading transactions")
 
-    rerender(<TransactionsTable {...defaultProps} totalCount={0} transactions={[]} />)
+    rerender(<TransactionsWithInspector {...defaultProps} totalCount={0} transactions={[]} />)
     expect(screen.getByText("No transactions yet.")).toBeTruthy()
 
-    rerender(<TransactionsTable {...defaultProps} error transactions={[]} />)
+    rerender(<TransactionsWithInspector {...defaultProps} error transactions={[]} />)
     expect(screen.getByText("Transactions could not be loaded.")).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Retry" }))
     expect(defaultProps.onRetry).toHaveBeenCalledOnce()
   })
 
   it("exposes previous and next cursor controls", () => {
-    const { rerender } = render(<TransactionsTable {...defaultProps} hasNextPage totalCount={8} />)
+    const { rerender } = render(
+      <TransactionsWithInspector {...defaultProps} hasNextPage totalCount={8} />
+    )
     const previous = screen.getByRole("button", { name: "Previous page" })
     const next = screen.getByRole("button", { name: "Next page" })
     expect(previous.hasAttribute("disabled")).toBe(true)
@@ -232,14 +320,22 @@ describe("TransactionsTable", () => {
     fireEvent.click(next)
     expect(defaultProps.onNextPage).toHaveBeenCalledOnce()
 
-    rerender(<TransactionsTable {...defaultProps} pageIndex={1} totalCount={8} transactions={[]} />)
+    rerender(
+      <TransactionsWithInspector {...defaultProps} pageIndex={1} totalCount={8} transactions={[]} />
+    )
     fireEvent.click(screen.getByRole("button", { name: "Previous page" }))
     expect(defaultProps.onPreviousPage).toHaveBeenCalledOnce()
   })
 
   it("can return to the previous page when a later page fails", () => {
     render(
-      <TransactionsTable {...defaultProps} error pageIndex={1} totalCount={0} transactions={[]} />
+      <TransactionsWithInspector
+        {...defaultProps}
+        error
+        pageIndex={1}
+        totalCount={0}
+        transactions={[]}
+      />
     )
 
     fireEvent.click(screen.getByRole("button", { name: "Previous page" }))
@@ -247,7 +343,7 @@ describe("TransactionsTable", () => {
   })
 })
 
-describe("transaction treatment disclosure", () => {
+describe("selected transaction treatment", () => {
   afterEach(() => {
     cleanup()
     clients.splice(0).forEach((client) => client.clear())
@@ -294,14 +390,14 @@ describe("transaction treatment disclosure", () => {
       calculation: { ...response.calculation, allocations, income: incomeResults },
     })
     render(
-      <TransactionsTable
+      <TransactionsWithInspector
         {...defaultProps}
         transactions={[transaction, { ...transaction, transactionId: "other" }]}
         totalCount={2}
       />
     )
     expect(get).not.toHaveBeenCalled()
-    const firstToggle = screen.getAllByRole("button", { name: /Treatment · 2025/ }).at(0)
+    const firstToggle = screen.getAllByRole("button", { name: openName() }).at(0)
     if (firstToggle === undefined) throw new Error("Missing disclosure toggle")
     fireEvent.click(firstToggle)
     await screen.findByText("Taxable private disposal")
@@ -350,18 +446,20 @@ describe("transaction treatment disclosure", () => {
       )
       .mockResolvedValue(detail())
     const { rerender } = render(
-      <TransactionsTable
+      <TransactionsWithInspector
         {...defaultProps}
         transactions={[{ ...transaction, timestamp: "2025-12-31T23:30:00.000Z" }]}
       />
     )
-    fireEvent.click(screen.getByRole("button", { name: /Treatment · 2026/ }))
+    fireEvent.click(screen.getByRole("button", { name: openName() }))
     expect(screen.getByText("Loading treatment results…")).toBeTruthy()
     expect(get).toHaveBeenLastCalledWith({
       transactionId: transaction.transactionId,
       taxYear: 2026,
     })
-    rerender(<TransactionsTable {...defaultProps} />)
+    fireEvent.click(screen.getByRole("button", { name: m["app.inspector.close"]() }))
+    rerender(<TransactionsWithInspector {...defaultProps} />)
+    fireEvent.click(screen.getByRole("button", { name: openName() }))
     await screen.findByText("Returned run: run-a · 2025 · DE · EUR")
     expect(get).toHaveBeenLastCalledWith({
       transactionId: transaction.transactionId,
@@ -378,12 +476,12 @@ describe("transaction treatment disclosure", () => {
     })
     expect(screen.queryByText(/old-year/)).toBeNull()
     rerender(
-      <TransactionsTable
+      <TransactionsWithInspector
         {...defaultProps}
         transactions={[{ ...transaction, transactionId: "other" }]}
       />
     )
-    expect(screen.queryByRole("region", { name: /Treatment results/ })).toBeNull()
+    expect(screen.getByRole("region", { name: /Treatment results/ })).toBeTruthy()
     expect(get).toHaveBeenCalledTimes(2)
   })
 
@@ -393,11 +491,11 @@ describe("transaction treatment disclosure", () => {
       .mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValueOnce({ ...detail(), calculation: { ...detail().calculation, run: null } })
       .mockResolvedValue(detail())
-    render(<TransactionsTable {...defaultProps} />)
-    const toggle = screen.getByRole("button", { name: /Treatment · 2025/ })
+    render(<TransactionsWithInspector {...defaultProps} />)
+    const toggle = screen.getByRole("button", { name: openName() })
     fireEvent.click(toggle)
     await screen.findByText("Could not load treatment results. Try again.")
-    expect(screen.getByText("Sold Bitcoin")).toBeTruthy()
+    expect(screen.getAllByText("Sold Bitcoin").length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole("button", { name: "Retry results" }))
     await screen.findByText("No calculation is available for this requested year.")
     expect(screen.queryByText("Tax-free holding period")).toBeNull()
@@ -420,8 +518,8 @@ describe("treatment lifecycle and monetary status", () => {
         ...response,
         calculation: { ...response.calculation, state: "complete", monetaryStatus },
       })
-      render(<TransactionsTable {...defaultProps} />)
-      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
+      render(<TransactionsWithInspector {...defaultProps} />)
+      fireEvent.click(screen.getByRole("button", { name: openName() }))
       await screen.findByText(`Monetary results: ${monetaryStatus.replace("_", " ")}.`)
       expect(
         screen.getByText("No disposal allocations or income results were returned.")
@@ -431,24 +529,24 @@ describe("treatment lifecycle and monetary status", () => {
   )
 
   it.each([
-    ["en", "Treatment · 2025 · Transaction", "Treatment results · Transaction"],
-    ["de", "Behandlung · 2025 · Transaktion", "Behandlungsergebnisse · Transaktion"],
+    ["en", "Treatment results · Transaction"],
+    ["de", "Behandlungsergebnisse · Transaktion"],
   ] as const)(
     "localizes missing-description disclosure names in %s",
-    async (locale, toggleLabel, regionLabel) => {
+    async (locale, regionLabel) => {
       const originalUrl = window.location.href
       window.history.replaceState(null, "", "/app")
-      setLocale(locale, { reload: false })
+      await setLocale(locale, { reload: false })
       try {
         vi.spyOn(taxmaxi.transactions, "get").mockResolvedValue(detail())
         render(
-          <TransactionsTable
+          <TransactionsWithInspector
             {...defaultProps}
             transactions={[{ ...transaction, description: null }]}
           />
         )
         fireEvent.click(
-          screen.getByRole("button", { name: `${toggleLabel} · ${transaction.transactionId}` })
+          screen.getByRole("button", { name: openName({ ...transaction, description: null }) })
         )
         await screen.findByText(
           locale === "de"
@@ -460,35 +558,41 @@ describe("treatment lifecycle and monetary status", () => {
         ).toBeTruthy()
       } finally {
         cleanup()
-        setLocale("en", { reload: false })
+        await setLocale("en", { reload: false })
         window.history.replaceState(null, "", originalUrl)
       }
     }
   )
 
-  it("gives same-year rows unique control and result region names", async () => {
+  it("switches same-year rows in one inspector with unique control and result region names", async () => {
     vi.spyOn(taxmaxi.transactions, "get").mockImplementation(async ({ transactionId }) => ({
       ...detail(),
       transactionId,
     }))
     render(
-      <TransactionsTable
+      <TransactionsWithInspector
         {...defaultProps}
         transactions={[transaction, { ...transaction, transactionId: "other" }]}
         totalCount={2}
       />
     )
     const first = screen.getByRole("button", {
-      name: `Treatment · 2025 · Sold Bitcoin · ${transaction.transactionId}`,
+      name: openName(),
     })
-    const second = screen.getByRole("button", { name: "Treatment · 2025 · Sold Bitcoin · other" })
+    const second = screen.getByRole("button", {
+      name: openName({ ...transaction, transactionId: "other" }),
+    })
     fireEvent.click(first)
+    await screen.findByRole("region", {
+      name: `Treatment results · Sold Bitcoin · ${transaction.transactionId}`,
+    })
+    fireEvent.click(screen.getByRole("button", { name: m["app.inspector.close"]() }))
     fireEvent.click(second)
     expect(
-      screen.getByRole("region", {
+      screen.queryByRole("region", {
         name: `Treatment results · Sold Bitcoin · ${transaction.transactionId}`,
       })
-    ).toBeTruthy()
+    ).toBeNull()
     expect(
       screen.getByRole("region", { name: "Treatment results · Sold Bitcoin · other" })
     ).toBeTruthy()
@@ -508,8 +612,8 @@ describe("treatment lifecycle and monetary status", () => {
               fail = reject
             })
         )
-      render(<TransactionsTable {...defaultProps} />)
-      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
+      render(<TransactionsWithInspector {...defaultProps} />)
+      fireEvent.click(screen.getByRole("button", { name: openName() }))
       const retry = await screen.findByRole("button", { name: "Retry results" })
       retry.focus()
       fireEvent.click(retry)
@@ -538,11 +642,11 @@ describe("treatment lifecycle and monetary status", () => {
           })
       )
       .mockResolvedValue(detail())
-    render(<TransactionsTable {...defaultProps} />)
-    const toggle = screen.getByRole("button", { name: /Treatment · 2025/ })
+    render(<TransactionsWithInspector {...defaultProps} />)
+    const toggle = screen.getByRole("button", { name: openName() })
     fireEvent.click(toggle)
     expect(screen.getByText("Loading treatment results…")).toBeTruthy()
-    fireEvent.click(toggle)
+    fireEvent.click(screen.getByRole("button", { name: m["app.inspector.close"]() }))
     await act(async () => {
       finish?.(detail())
     })

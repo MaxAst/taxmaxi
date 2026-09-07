@@ -21,6 +21,15 @@ import { Dashboard } from "#/components/dashboard"
 import { queryKeys } from "#/integrations/taxmaxi/queries"
 import type { SourceSyncSeed } from "#/lib/dashboard-types"
 
+beforeEach(() => {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi
+      .fn()
+      .mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }),
+  })
+})
+
 const syncState = vi.hoisted(() => ({
   onCompleted: undefined as undefined | ((sourceId: string) => void | Promise<void>),
   onUnauthorized: undefined as undefined | (() => void | Promise<void>),
@@ -315,6 +324,51 @@ describe("Dashboard calculation refresh", () => {
       </QueryClientProvider>
     )
 
+  it("follows a surviving transaction across the Berlin year boundary and keeps its last year when removed", async () => {
+    const row = {
+      ...transaction("00000000-0000-4000-8000-000000000101", "Boundary transaction"),
+      timestamp: "2024-12-31T22:30:00.000Z",
+    }
+    let rows = [row]
+    vi.spyOn(testTaxMaxi.transactions, "list").mockImplementation(async () => ({
+      transactions: rows,
+      totalCount: rows.length,
+      page: { hasMore: false, nextCursor: null },
+    }))
+    const get = vi
+      .spyOn(testTaxMaxi.transactions, "get")
+      .mockImplementation(() => new Promise(() => undefined))
+    mount()
+    await tick()
+    fireEvent.click(screen.getByRole("button", { name: /Open transaction/ }))
+    await tick()
+    expect(get).toHaveBeenLastCalledWith({ transactionId: row.transactionId, taxYear: 2024 })
+    rows = [{ ...row, timestamp: "2024-12-31T23:30:00.000Z" }]
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.transactionList({ cursor: null, limit: 7 }),
+        exact: true,
+      })
+    })
+    await tick()
+    expect(get).toHaveBeenLastCalledWith({ transactionId: row.transactionId, taxYear: 2025 })
+    expect(get).toHaveBeenCalledTimes(2)
+    rows = []
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.transactionList({ cursor: null, limit: 7 }),
+        exact: true,
+      })
+    })
+    await tick()
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(screen.getByText("Boundary transaction")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
+    await tick(500)
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: "Transactions" }))
+  })
+
   it.each(["loaded", "pending", "failed refresh"] as const)(
     "refreshes an open %s treatment detail when the actual active run changes",
     async (scenario) => {
@@ -381,7 +435,7 @@ describe("Dashboard calculation refresh", () => {
       mount()
       await tick()
       expect(get).not.toHaveBeenCalled()
-      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
+      fireEvent.click(screen.getByRole("button", { name: /Open transaction/ }))
       await tick()
       expect(get).toHaveBeenCalledExactlyOnceWith({
         transactionId: row.transactionId,
@@ -396,7 +450,7 @@ describe("Dashboard calculation refresh", () => {
       if (scenario === "failed refresh") {
         expect(screen.getByText("Could not load treatment results. Try again.")).toBeTruthy()
         expect(screen.queryByText(`Returned run: ${RUN_A} · 2025 · DE · EUR`)).toBeNull()
-        expect(screen.getByText("Treatment transaction")).toBeTruthy()
+        expect(screen.getAllByText("Treatment transaction").length).toBeGreaterThan(0)
         failRefresh = false
         fireEvent.click(screen.getByRole("button", { name: "Retry results" }))
         await tick()
@@ -410,7 +464,7 @@ describe("Dashboard calculation refresh", () => {
       const expectedCalls = scenario === "failed refresh" ? 3 : 2
       await tick(30_000)
       expect(get).toHaveBeenCalledTimes(expectedCalls)
-      fireEvent.click(screen.getByRole("button", { name: /Treatment · 2025/ }))
+      fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
       currentPortfolio = portfolio("run-c", "3.75")
       await tick(30_000)
       expect(get).toHaveBeenCalledTimes(expectedCalls)
