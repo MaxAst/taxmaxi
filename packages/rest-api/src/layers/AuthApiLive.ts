@@ -129,7 +129,8 @@ const OAUTH_REDIRECT_COOKIE_MAX_AGE = Duration.minutes(10)
 const AUTH_PUBLIC_BASE_URL_DEFAULT = "http://localhost:4000"
 const FRONTEND_URL_DEFAULT = "http://localhost:3000"
 const VERIFY_EMAIL_REDIRECT = "/verify-email"
-const POST_AUTH_REDIRECT = "/home"
+const POST_AUTH_REDIRECT = "/app"
+const CHANGE_PASSWORD_MIN_LENGTH = 8
 
 const randomUuid = Crypto.Crypto.pipe(
   Effect.flatMap((crypto) => crypto.randomUUIDv4),
@@ -559,33 +560,34 @@ const logCoinbaseCallbackCause = ({
   )
 
 /**
- * Get provider metadata based on provider type
+ * Capability flags for a provider type. Adding a password to an OAuth-only
+ * account is a separate flow (#136), so `local` does not support linking.
  */
 const getProviderMetadata = (providerType: AuthProviderType): ProviderMetadata => {
   switch (providerType) {
     case "local":
       return ProviderMetadata.make({
         type: "local",
-        name: "Email & Password",
         supportsRegistration: true,
         supportsPasswordLogin: true,
         oauthEnabled: false,
+        supportsLinking: false,
       })
     case "google":
       return ProviderMetadata.make({
         type: "google",
-        name: "Google",
         supportsRegistration: false,
         supportsPasswordLogin: false,
         oauthEnabled: true,
+        supportsLinking: true,
       })
     case "coinbase":
       return ProviderMetadata.make({
         type: "coinbase",
-        name: "Coinbase",
         supportsRegistration: false,
         supportsPasswordLogin: false,
         oauthEnabled: true,
+        supportsLinking: true,
       })
   }
 }
@@ -756,6 +758,7 @@ export const AuthApiLive = HttpApiBuilder.group(TaxMaxiApi, "auth", (handlers) =
               if (isPasswordTooWeakError(error)) {
                 return new PasswordWeakError({
                   requirements: Chunk.toReadonlyArray(error.requirements),
+                  minPasswordLength: error.minPasswordLength,
                 })
               }
               if (isUserAlreadyExistsError(error)) {
@@ -2020,10 +2023,12 @@ export const AuthSessionApiLive = HttpApiBuilder.group(TaxMaxiApi, "authSession"
             return yield* new ChangePasswordError({})
           }
 
-          // Validate new password strength (minimum 8 characters from Schema)
-          if (newPassword.length < 8) {
+          // Length-only rule for a changed password. Applying the configured
+          // password policy here is reserved for #137.
+          if (newPassword.length < CHANGE_PASSWORD_MIN_LENGTH) {
             return yield* new PasswordWeakError({
-              requirements: ["Password must be at least 8 characters"],
+              requirements: ["min_length"],
+              minPasswordLength: CHANGE_PASSWORD_MIN_LENGTH,
             })
           }
 

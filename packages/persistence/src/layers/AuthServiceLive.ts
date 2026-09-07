@@ -66,6 +66,7 @@ import {
   SessionNotFoundError,
   SessionExpiredError,
   PasswordTooWeakError,
+  type PasswordRequirement,
   SessionCleanupError,
   OAuthStateError,
   UnverifiedEmailError,
@@ -114,31 +115,32 @@ const generateEmailVerificationCode = (bytes: Uint8Array): EmailVerificationCode
 }
 
 /**
- * Password validation requirements
+ * Password validation. Returns the codes of the rules the password did not
+ * meet, in rule order; empty when the password passes.
  */
 const validatePassword = (
   password: string,
   localAuthConfig: LocalAuthConfig
-): Chunk.Chunk<string> => {
-  const errors: string[] = []
+): Chunk.Chunk<PasswordRequirement> => {
+  const unmet: PasswordRequirement[] = []
 
   if (password.length < localAuthConfig.minPasswordLength) {
-    errors.push(`Password must be at least ${localAuthConfig.minPasswordLength} characters long`)
+    unmet.push("min_length")
   }
   if (!/[a-z]/.test(password)) {
-    errors.push("Password must contain at least one lowercase letter")
+    unmet.push("lowercase")
   }
   if (localAuthConfig.requireUppercase && !/[A-Z]/.test(password)) {
-    errors.push("Password must contain at least one uppercase letter")
+    unmet.push("uppercase")
   }
   if (localAuthConfig.requireNumbers && !/[0-9]/.test(password)) {
-    errors.push("Password must contain at least one digit")
+    unmet.push("number")
   }
   if (localAuthConfig.requireSpecialChars && !/[^A-Za-z0-9]/.test(password)) {
-    errors.push("Password must contain at least one special character")
+    unmet.push("special_char")
   }
 
-  return Chunk.fromIterable(errors)
+  return Chunk.fromIterable(unmet)
 }
 
 /**
@@ -848,9 +850,12 @@ const make = Effect.gen(function* () {
         const email = sanitizeEmail(submittedEmail)
 
         // Validate password strength
-        const passwordErrors = validatePassword(password, config.localAuth)
-        if (!Chunk.isEmpty(passwordErrors)) {
-          return yield* new PasswordTooWeakError({ requirements: passwordErrors })
+        const unmetRequirements = validatePassword(password, config.localAuth)
+        if (!Chunk.isEmpty(unmetRequirements)) {
+          return yield* new PasswordTooWeakError({
+            requirements: unmetRequirements,
+            minPasswordLength: config.localAuth.minPasswordLength,
+          })
         }
 
         // Check if user already exists

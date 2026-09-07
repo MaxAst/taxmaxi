@@ -292,18 +292,42 @@ export const isIdentityAlreadyLinkedError = Schema.is(IdentityAlreadyLinkedError
 // =============================================================================
 
 /**
+ * PasswordRequirement - One password rule a submitted password did not meet
+ *
+ * Codes only, never display text. The web app maps each code to localized copy.
+ */
+export const PasswordRequirement = Schema.Literals([
+  "min_length",
+  "lowercase",
+  "uppercase",
+  "number",
+  "special_char",
+]).annotate({
+  description: "Code of a password rule that was not met",
+})
+
+export type PasswordRequirement = typeof PasswordRequirement.Type
+
+/**
  * PasswordTooWeakError - Password validation failed (local provider)
  *
  * Returned when a password does not meet the required strength criteria.
- * Includes details about which specific requirements were not met.
+ * Carries the codes of the rules that were not met and the minimum length
+ * the rules require, so a client can render the exact unmet rules.
  *
  * HTTP Status: 400 Bad Request
  */
 export class PasswordTooWeakError extends Schema.TaggedError<PasswordTooWeakError>()(
   "PasswordTooWeakError",
   {
-    requirements: Schema.Chunk(Schema.String).annotate({
-      description: "List of password requirements that were not met",
+    requirements: Schema.Chunk(PasswordRequirement).annotate({
+      description: "Codes of the password rules that were not met",
+    }),
+    minPasswordLength: Schema.Finite.pipe(
+      Schema.check(Schema.isInt()),
+      Schema.check(Schema.isGreaterThan(0))
+    ).annotate({
+      description: "Minimum password length the rules require",
     }),
   },
   { httpApiStatus: 400 }

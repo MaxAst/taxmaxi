@@ -24,6 +24,7 @@ import {
   SessionId,
   UserIdentityId,
 } from "@my/core/authentication"
+import { PasswordRequirement } from "@my/core/authentication/errors"
 import { AuthMiddleware } from "./AuthMiddleware.ts"
 import { InternalServerError } from "./ApiErrors.ts"
 
@@ -49,6 +50,9 @@ export class AuthValidationError extends Schema.TaggedError<AuthValidationError>
 
 /**
  * PasswordWeakError - Password does not meet requirements (400)
+ *
+ * `requirements` carries codes, never display text; the client maps each code
+ * to its own copy. `minPasswordLength` lets the client render the length rule.
  */
 export class PasswordWeakError extends Schema.TaggedError<PasswordWeakError>()(
   "PasswordWeakError",
@@ -56,8 +60,14 @@ export class PasswordWeakError extends Schema.TaggedError<PasswordWeakError>()(
     message: Schema.String.pipe(
       Schema.withConstructorDefault(Effect.succeed("Password does not meet requirements"))
     ),
-    requirements: Schema.Array(Schema.String).annotate({
-      description: "List of password requirements that were not met",
+    requirements: Schema.Array(PasswordRequirement).annotate({
+      description: "Codes of the password rules that were not met",
+    }),
+    minPasswordLength: Schema.Finite.pipe(
+      Schema.check(Schema.isInt()),
+      Schema.check(Schema.isGreaterThan(0))
+    ).annotate({
+      description: "Minimum password length the rules require",
     }),
   },
   { httpApiStatus: 400 }
@@ -273,13 +283,12 @@ export class CannotUnlinkLastIdentityError extends Schema.TaggedError<CannotUnli
 // =============================================================================
 
 /**
- * ProviderMetadata - Information about an enabled auth provider
+ * ProviderMetadata - Capability flags of an enabled auth provider
+ *
+ * Carries no display text; the client maps `type` to its own label.
  */
 export class ProviderMetadata extends Schema.Class<ProviderMetadata>("ProviderMetadata")({
   type: AuthProviderType,
-  name: Schema.String.annotate({
-    description: "Display name for the provider",
-  }),
   supportsRegistration: Schema.Boolean.annotate({
     description: "Whether this provider supports user registration",
   }),
@@ -288,6 +297,10 @@ export class ProviderMetadata extends Schema.Class<ProviderMetadata>("ProviderMe
   }),
   oauthEnabled: Schema.Boolean.annotate({
     description: "Whether this provider uses OAuth/SAML flow",
+  }),
+  supportsLinking: Schema.Boolean.annotate({
+    description:
+      "Whether a signed-in user can link this provider to their account as another login method",
   }),
 }) {}
 
@@ -318,8 +331,9 @@ const SubmittedEmail = Schema.Trim.pipe(
  */
 export class RegisterRequest extends Schema.Class<RegisterRequest>("RegisterRequest")({
   email: SubmittedEmail,
-  password: Schema.String.check(Schema.isMinLength(8)).annotate({
-    description: "User's password (min 8 characters)",
+  password: Schema.String.annotate({
+    description:
+      "User's password. The configured password rules apply; unmet rules come back as PasswordWeakError codes.",
     examples: ["kNmGP3sW_ygVLdcNVbxU"],
   }),
   displayName: Schema.optional(Schema.Trimmed.check(Schema.isNonEmpty())).annotate({
@@ -354,7 +368,7 @@ export class VerifyEmailRequest extends Schema.Class<VerifyEmailRequest>("Verify
 export class VerifyEmailResponse extends Schema.Class<VerifyEmailResponse>("VerifyEmailResponse")({
   redirectTo: Schema.String.annotate({
     description: "Frontend route to navigate to after verification succeeds",
-    examples: ["/home"],
+    examples: ["/app"],
   }),
 }) {}
 
