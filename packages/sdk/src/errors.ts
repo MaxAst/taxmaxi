@@ -10,6 +10,7 @@ import {
   AssetLookupValidationError,
   AssetStaleRevisionError,
   AuthValidationError,
+  PortfolioCalculationJobNotFoundResponse,
   SourceCreditRequiredError,
   TransactionOverrideConflictError,
   TransactionOverrideNotFoundError,
@@ -267,6 +268,16 @@ export const getTaxMaxiAssetDecisionConflict = (
 export const toTaxMaxiError = (error: unknown): TaxMaxiError => {
   if (isTaxMaxiError(error)) {
     return error
+  }
+
+  const portfolioNotFound = Schema.decodeUnknownExit(PortfolioCalculationJobNotFoundResponse)(error)
+  if (Exit.isSuccess(portfolioNotFound)) {
+    return new TaxMaxiError({
+      cause: error,
+      code: portfolioNotFound.value._tag,
+      message: "TaxMaxi API request failed.",
+      status: 404,
+    })
   }
 
   if (HttpClientError.isHttpClientError(error)) {

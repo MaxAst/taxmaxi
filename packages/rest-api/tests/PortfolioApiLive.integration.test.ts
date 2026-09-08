@@ -1,7 +1,8 @@
+import { TaxMaxi, TaxMaxiError, toTaxMaxiError } from "../../sdk/src/index.ts"
 import { SourceSyncQueueUnexpectedTestLive } from "./support/SourceSyncQueueUnexpectedTestLive.ts"
 import { prepareMovementLegFixtures } from "../../persistence/tests/support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
-import { HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
+import { HttpClient, HttpClientRequest, HttpRouter, HttpServer } from "effect/unstable/http"
 import { NodeHttpServer } from "@effect/platform-node"
 import { JurisdictionCode, TaxYear } from "@my/core/accounting"
 import {
@@ -516,18 +517,27 @@ const getSourceFifoLots = ({ sourceId, userId }: { sourceId: string; userId: str
     return { status: response.status, body: yield* response.json }
   })
 
+// Each read starts fresh SDK clients against the same real HTTP server. Comparing
+// the whole wire value preserves every request/attempt ID, state, null and date.
 const calculationStatus = (sourceJobId?: string, taxYear = 2024) =>
-  getPortfolio({
-    userId: fixtureIds.userId,
-    path: `/v1/portfolio/calculation-status?taxYear=${taxYear}${sourceJobId === undefined ? "" : `&sourceJobId=${sourceJobId}`}`,
-  }).pipe(
-    Effect.provide(HttpLive),
-    Effect.scoped,
-    Effect.flatMap(({ status, body }) => {
+  HttpServer.addressFormattedWith((baseUrl) =>
+    Effect.gen(function* () {
+      const { status, body } = yield* getPortfolio({
+        userId: fixtureIds.userId,
+        path: `/v1/portfolio/calculation-status?taxYear=${taxYear}${sourceJobId === undefined ? "" : `&sourceJobId=${sourceJobId}`}`,
+      })
       expect(status).toBe(200)
-      return Schema.decodeUnknownEffect(PortfolioCalculationStatusResponse)(body)
+      const input = { taxYear, ...(sourceJobId === undefined ? {} : { sourceJobId }) }
+      const options = { baseUrl, apiKey: `user_${fixtureIds.userId}_admin` }
+      const promiseResult = yield* Effect.promise(() =>
+        new TaxMaxi(options).portfolio.getCalculationStatus(input)
+      )
+      const effectResult = yield* new TaxMaxi(options).effect.portfolio.getCalculationStatus(input)
+      expect(promiseResult).toEqual(body)
+      expect(effectResult).toEqual(body)
+      return yield* Schema.decodeUnknownEffect(PortfolioCalculationStatusResponse)(body)
     })
-  )
+  ).pipe(Effect.provide(HttpLive), Effect.scoped)
 
 const completeCalculationSourceJob = context.runWithLayer({
   layer: RepositoriesLive,
@@ -1183,6 +1193,46 @@ describe("PortfolioApiLive", () => {
               })).status
             ).toBe(400)
           }
+          yield* HttpServer.addressFormattedWith((baseUrl) =>
+            Effect.gen(function* () {
+              const client = new TaxMaxi({
+                baseUrl,
+                apiKey: `user_${fixtureIds.userId}_admin`,
+              })
+              for (const sourceJobId of ["00000000-0000-4000-8000-000000000599", jobs.other.id]) {
+                const input = { taxYear: 2024, sourceJobId }
+                const effectError = yield* Effect.flip(
+                  client.effect.portfolio.getCalculationStatus(input)
+                )
+                expect(effectError).toMatchObject({ code: "source_job_not_found" })
+                expect(toTaxMaxiError(effectError)).toMatchObject({
+                  status: 404,
+                  code: "PortfolioCalculationJobNotFoundResponse",
+                  cause: { code: "source_job_not_found" },
+                })
+                yield* Effect.promise(() =>
+                  expect(client.portfolio.getCalculationStatus(input)).rejects.toMatchObject({
+                    status: 404,
+                    code: "PortfolioCalculationJobNotFoundResponse",
+                    cause: { code: "source_job_not_found" },
+                  })
+                )
+              }
+              for (const input of [
+                { taxYear: 2024.5 },
+                { taxYear: Number.POSITIVE_INFINITY },
+                { taxYear: 2024, sourceJobId: "bad" },
+              ]) {
+                const effectError = yield* Effect.flip(
+                  client.effect.portfolio.getCalculationStatus(input)
+                )
+                expect(toTaxMaxiError(effectError).status).toBe(400)
+                const result = client.portfolio.getCalculationStatus(input)
+                yield* Effect.promise(() => expect(result).rejects.toBeInstanceOf(TaxMaxiError))
+                yield* Effect.promise(() => expect(result).rejects.toMatchObject({ status: 400 }))
+              }
+            })
+          )
           const unauthorized = yield* HttpClientRequest.get(
             "/v1/portfolio/calculation-status?taxYear=2024"
           ).pipe(HttpClient.execute)

@@ -1483,3 +1483,11 @@ describe("public movement correction client registration", () => {
     })
   )
 })
+
+describe("portfolio status error conversion", () => {
+  it("recognizes the full decoded 404 schema without guessing from the tag", () => {
+    const cause = { _tag: "PortfolioCalculationJobNotFoundResponse", code: "source_job_not_found" }
+    expect(toTaxMaxiError(cause)).toMatchObject({ status: 404, code: cause._tag, cause })
+    expect(toTaxMaxiError({ ...cause, code: "unrelated" }).status).toBe(500)
+  })
+})
