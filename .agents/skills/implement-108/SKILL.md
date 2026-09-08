@@ -8,10 +8,10 @@ Implement exactly one task from the delivery checklist of issue #108 (feat(www):
 
 ## Allowed tasks
 
-Run the assigned next unchecked task only. Order: T01 welcome fact, T02 overview `jobId`, T03 reload reconnect, T04 prototype gate, T05 state and panel, T06 billing return, T07 welcome sequence, T08 browser verification, T09 Harvest with the `harvest` skill. Tasks are sequential from merged `main`; refuse a task whose predecessor is unmerged and say why.
+Run the assigned next unchecked task only. Order: T01 welcome fact, T02 overview `jobId`, T03 reload reconnect, T04 prototype gate, T05 state and wizard, T05b Coinbase connect step, T06 billing return, T07 welcome step, T08 browser verification, T09 Harvest with the `harvest` skill. T01–T04 are merged or approved; the maintainer approved variant D (full-screen letter wizard) on 2026-09-08 and amendment 1 added the `needs_source` state and T05b; read the live body. Tasks are sequential from merged `main`; refuse a task whose predecessor is unmerged and say why.
 
 - T04 is a gate. Run the `prototype` skill on its UI branch, commit to a throwaway branch, link it from #108 with a verdict comment, and stop. No production files change. Draft PR #211 (branch `claude/issue-108-discussion-696170`) is an older three-variant prototype of the same question; read it as reference material, do not merge it.
-- T05 is blocked until the maintainer has recorded the approved variant on #108. Refuse T05 without that comment.
+- T05 is unblocked: variant D is recorded on #108 (T04 ticked, comment of 2026-09-08). The prototype on branch `prototype/108-t04-first-sync-body` (`fe30c3f555`, variant D in `first-sync-body-PROTOTYPE.tsx`) is the visual reference for the wizard; port its design, not its mock wiring.
 - T08 changes no code. It records redacted results on #108 and files gaps or fix PRs.
 - Every task is result-preserving. Say so in the PR and paste the D-notes the task names verbatim from the live issue body.
 - The latest recorded decisions on #108 always govern over this file. If this file and a newer recorded decision disagree, follow the decision and say so in the PR.
@@ -42,13 +42,13 @@ Refresh open PRs at pickup. Active streams: #133 (verified email sign-up, armed 
 
 - D01: the welcome gate is one server fact, `welcome_seen_at`, nullable, stamped with server time by `POST /auth/me/welcome`. A second call keeps the first timestamp. No local-storage flag. Finish and Skip both call it.
 - D02: `latestSync.jobId` comes from `processing_jobs.id` in the same query that reads the job status. Reload seeds only from `pending`, `processing`, or `credit_required` jobs with a `jobId`. Never re-seed `failed` or `completed`.
-- D03: first-sync state is a pure function of overviews, billing status, and the hook's in-memory items. Never stored. The panel shows only while at least one source exists and none has `lastSyncedAt`. Zero sources behaves as today. Use the exact state names from the D03 table.
+- D03: first-sync state is a pure function of overviews, billing status, and the hook's in-memory items. Never stored. The wizard shows while no source has `lastSyncedAt`, including zero sources (`needs_source`). Use the exact state names from the D03 table. "Panel" in the spec means the variant D wizard.
 - D04: "usable credits" means `credits` ≥ 1, mirroring `assertHasSyncCredits`. The panel only picks which action to show; the server stays the enforcer. Buy credits when `subscriptionStatus` is `active` or `trialing`, otherwise Choose a plan.
 - D05: the panel never renders `lastErrorMessage` or a job's `message`. Failed states use one generic localized message. Island text is unchanged (#160 owns it).
 - D06: the island owns progress, dismissal, its retry, and the billing action. The panel owns Start, Continue, and Try again, all through the hook's existing start function. No second floating surface, no island motion changes.
 - D07: the billing overlay writes refreshed status into the `billingStatus` query cache and invalidates it on close. The panel reads that cache through `useQuery`.
 - D08: the `/app` loader loads account and billing next to sources and overviews. Any 401 redirects to login. A non-401 billing failure does not block; the panel shows `billing_unknown` with a retry.
-- D09: welcome has three to four short steps and a founder sign-off. The video step renders only when the video id constant is set; it ships empty.
+- D09: the welcome is the wizard's first step, shown while `welcomeSeenAt` is null, three to four short screens with a founder sign-off; Continue and Skip both mark it seen. The video step renders only when the video id constant is set; it ships empty.
 - Sync never starts without an explicit click. No accounting changes. No REST or schema changes beyond D01 and D02. Every user-visible string is a paraglide message in `en.json` and `de.json`.
 
 ## Seams for TDD
