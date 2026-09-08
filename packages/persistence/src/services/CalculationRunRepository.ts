@@ -124,11 +124,14 @@ export type CalculationRunResult = Omit<TaxAccountingResult, "blockers"> & {
 
 /** Input required to write one terminal calculation run and compare it for activation. */
 export interface PersistCalculationRunParams {
+  /** Finalization never recreates a run removed since start; atomic writes create a new run. */
+  readonly writeMode: "finalize_started" | "atomic"
   readonly id: CalculationRunId
   readonly principalId: PrincipalId
   readonly reportingCurrency: CurrencyCode
   readonly inputLedgerRevision: InputLedgerRevision
   readonly valuationRevision: ValuationRevision
+  readonly syncCapture: CalculationRunSyncCapture
   readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
   readonly result: CalculationRunResult
 }
@@ -144,6 +147,7 @@ export interface StartCalculationRunParams {
   readonly ruleSetVersion: string
   readonly inputLedgerRevision: InputLedgerRevision
   readonly valuationRevision: ValuationRevision
+  readonly syncCapture: CalculationRunSyncCapture
   readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
   readonly custodyUnitMembership: ReadonlyArray<CustodyUnitMembership>
 }
@@ -214,8 +218,68 @@ export interface CalculationRunMaintenanceResult {
   readonly principalIds: ReadonlyArray<PrincipalId>
 }
 
+/** Exact scope and optional owned job selected by the shared read. */
+export interface GetCalculationSyncStatusParams extends GetLatestCalculationRunStatusParams {
+  readonly sourceJobId?: string
+}
+
+/** A supplied job is absent or belongs to another principal. */
+export class CalculationSyncJobNotFoundError extends Schema.TaggedError<CalculationSyncJobNotFoundError>()(
+  "CalculationSyncJobNotFoundError",
+  { sourceJobId: Schema.String }
+) {}
+
+/** Durable request state, independent of whether the active result covers it. */
+export interface CalculationSyncWork {
+  readonly requestId: CalculationSyncRequestId
+  readonly sourceId: string
+  readonly sourceJobId: string
+  readonly status: "queued" | "running" | "succeeded" | "failed"
+  readonly attempts: ReadonlyArray<{
+    readonly attemptId: CalculationSyncAttemptId
+    readonly runId: CalculationRunId | null
+    readonly status: "running" | "succeeded" | "failed"
+    readonly failureCode: string | null
+  }>
+}
+
+/** A finalized run whose exact captured membership includes the request. */
+export interface CalculationSyncCoveringRun {
+  readonly runId: CalculationRunId
+  readonly status: "complete" | "partial"
+}
+
+/** Coverage for a discovered completed job or an explicitly selected owned job. */
+export interface CalculationSyncJobStatus {
+  readonly sourceJobStatus: "pending" | "processing" | "completed" | "failed" | "credit_required"
+  readonly sourceJobId: string
+  readonly sourceId: string
+  readonly work: CalculationSyncWork | null
+  readonly coveringRun: CalculationSyncCoveringRun | null
+  /** Unknown when the source job has not completed, or the active run has no recorded capture. */
+  readonly activeCoverage: "covered" | "not_covered" | "unknown"
+}
+
+/** One database snapshot of active results, scope-wide work, and selected job coverage. */
+export interface CalculationSyncStatus {
+  readonly scope: GetLatestCalculationRunStatusParams
+  readonly activeRun: CalculationSyncCoveringRun | null
+  readonly work: {
+    /** Running takes precedence, then queued, failed, succeeded; no requests means not_requested. */
+    readonly status: "not_requested" | "queued" | "running" | "succeeded" | "failed"
+    /** Outstanding scope requests only; succeeded requests remain available on selected jobs. */
+    readonly requests: ReadonlyArray<CalculationSyncWork>
+  }
+  readonly jobs: ReadonlyArray<CalculationSyncJobStatus>
+}
+
 /** Persistence contract for atomic, write-once calculation results. */
 export interface CalculationRunRepositoryShape {
+  /** Read all scope work and exact selected-job coverage without writing or enqueueing. */
+  readonly getSyncStatus: (
+    params: GetCalculationSyncStatusParams
+  ) => Effect.Effect<CalculationSyncStatus, CalculationSyncJobNotFoundError | PersistenceError>
+
   /** List the tax years with an active-run pointer for one principal and scope. */
   readonly listActiveTaxYears: (
     params: ListActiveCalculationRunTaxYearsParams
