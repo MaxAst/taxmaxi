@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import {
   RouterProvider,
   createMemoryHistory,
@@ -15,7 +16,8 @@ import {
   type BillingStatus,
 } from "taxmaxi"
 
-import { BillingPageContent } from "#/routes/app.billing"
+import { queryKeys } from "#/integrations/taxmaxi/queries"
+import { BillingPageContent, loadBillingPageData } from "#/routes/app.billing"
 
 const catalog: BillingCatalog = {
   prices: [
@@ -84,6 +86,7 @@ const renderBillingPage = async ({
   annualCheckout = vi.fn().mockResolvedValue({ url: "https://stripe.test/annual" }),
   assignLocation = vi.fn(),
   checkoutReturnKind = null,
+  initialStatus,
   loadStatus,
   onClose = vi.fn(),
   onUnauthorized = vi.fn().mockResolvedValue(undefined),
@@ -94,6 +97,8 @@ const renderBillingPage = async ({
   readonly annualCheckout?: BillingPromiseResource["createAnnualCheckout"]
   readonly assignLocation?: (url: string) => void
   readonly checkoutReturnKind?: "annual" | "topUp" | null
+  /** The status the loader handed over; defaults to 10,000 credits with `subscriptionStatus`. */
+  readonly initialStatus?: BillingStatus
   readonly loadStatus?: BillingPromiseResource["status"]
   readonly onClose?: () => void
   readonly onUnauthorized?: () => Promise<void>
@@ -101,13 +106,18 @@ const renderBillingPage = async ({
   readonly subscriptionStatus?: BillingStatus["subscriptionStatus"]
   readonly topUpCheckout?: BillingPromiseResource["createTopUpCheckout"]
 } = {}) => {
+  const loadedStatus = initialStatus ?? status(subscriptionStatus)
   const billing: BillingPromiseResource = {
     catalog: () => Promise.resolve(catalog),
-    status: loadStatus ?? (() => Promise.resolve(status(subscriptionStatus))),
+    status: loadStatus ?? (() => Promise.resolve(loadedStatus)),
     createAnnualCheckout: annualCheckout,
     createTopUpCheckout: topUpCheckout,
     createPortalSession: portal,
   }
+  // The route loader leaves the loaded status in the cache the dashboard's
+  // first-sync wizard reads (#108 D07).
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  queryClient.setQueryData(queryKeys.billingStatus(), loadedStatus)
   const rootRoute = createRootRoute({
     component: () => (
       <BillingPageContent
@@ -117,7 +127,7 @@ const renderBillingPage = async ({
         checkoutReturnKind={checkoutReturnKind}
         onClose={onClose}
         onUnauthorized={onUnauthorized}
-        status={status(subscriptionStatus)}
+        status={loadedStatus}
       />
     ),
   })
@@ -126,9 +136,13 @@ const renderBillingPage = async ({
     routeTree: rootRoute,
   })
   await router.load()
-  render(<RouterProvider router={router} />)
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>
+  )
   expect(document.querySelector("[data-page='app']")).toBeTruthy()
-  return { assignLocation, onClose, onUnauthorized }
+  return { assignLocation, onClose, onUnauthorized, queryClient }
 }
 
 afterEach(cleanup)
@@ -302,5 +316,80 @@ describe("BillingPageContent", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // #108 D07: the wizard underneath reads the `billingStatus` query, so the
+  // overlay hands every refreshed status to that cache and invalidates it on close.
+  it("writes the refreshed status into the billingStatus query cache after a Checkout return", async () => {
+    vi.useFakeTimers()
+    const initialStatus = { ...status("active"), credits: 0 }
+    const refreshedStatus = { ...status("active"), credits: 5 }
+    const loadStatus = vi.fn().mockResolvedValue(refreshedStatus)
+    try {
+      const { queryClient } = await renderBillingPage({
+        checkoutReturnKind: "topUp",
+        initialStatus,
+        loadStatus,
+      })
+      expect(queryClient.getQueryData(queryKeys.billingStatus())).toEqual(initialStatus)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+
+      expect(loadStatus).toHaveBeenCalledTimes(1)
+      expect(queryClient.getQueryData(queryKeys.billingStatus())).toEqual(refreshedStatus)
+      expect(screen.getByText("5")).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("invalidates the billingStatus query when the overlay closes", async () => {
+    const { onClose, queryClient } = await renderBillingPage()
+    expect(queryClient.getQueryState(queryKeys.billingStatus())?.isInvalidated).toBe(false)
+
+    fireEvent.click(screen.getByRole("button", { name: "Close billing" }))
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+    expect(queryClient.getQueryState(queryKeys.billingStatus())?.isInvalidated).toBe(true)
+  })
+})
+
+describe("loadBillingPageData (#108, T06 note)", () => {
+  const unauthorized = new TaxMaxiError({ message: "Sign in again.", status: 401 })
+  const catalogUnavailable = new TaxMaxiError({ message: "Catalog unavailable.", status: 500 })
+  const statusUnavailable = new TaxMaxiError({ message: "Status unavailable.", status: 500 })
+
+  const rejectLater = <T,>(error: unknown): Promise<T> =>
+    new Promise((_, reject) => {
+      setTimeout(() => reject(error), 0)
+    })
+
+  it("lets a status 401 win over a catalog failure that settles first", async () => {
+    await expect(
+      loadBillingPageData({
+        loadCatalog: () => Promise.reject(catalogUnavailable),
+        loadStatus: () => rejectLater(unauthorized),
+      })
+    ).rejects.toBe(unauthorized)
+  })
+
+  it("lets a catalog 401 win over a status failure that settles first", async () => {
+    await expect(
+      loadBillingPageData({
+        loadCatalog: () => rejectLater(unauthorized),
+        loadStatus: () => Promise.reject(statusUnavailable),
+      })
+    ).rejects.toBe(unauthorized)
+  })
+
+  it("throws the status failure and drops the catalog when both fail for other reasons", async () => {
+    await expect(
+      loadBillingPageData({
+        loadCatalog: () => Promise.reject(catalogUnavailable),
+        loadStatus: () => rejectLater(statusUnavailable),
+      })
+    ).rejects.toBe(statusUnavailable)
   })
 })

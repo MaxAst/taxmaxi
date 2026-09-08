@@ -235,6 +235,76 @@ describe("useSourceSyncs", () => {
       additionalCreditsRequired: null,
     })
   })
+
+  // #108 T06 (D06): Continue after a credit stop is the same start call. The
+  // island's credit_required item is replaced by the new queued job, and the
+  // poll loop follows that job.
+  it("replaces a credit-required item with the new queued job when the sync continues", async () => {
+    vi.useFakeTimers()
+    const creditOutcome = {
+      reasonCode: "no_usable_credits" as const,
+      availableCredits: 0,
+      creditsConsumed: 3,
+      additionalCreditsRequired: 2,
+    }
+    let starts = 0
+    const startSourceSync = vi.fn(async () => {
+      starts += 1
+      return {
+        sourceId: source.id,
+        jobId: `job-${starts}`,
+        status: "queued" as const,
+        message: null,
+        resumable: false,
+        creditOutcome: null,
+      }
+    })
+    const getSourceSyncJob = vi.fn(
+      async ({ jobId }: { readonly jobId: string; readonly sourceId: string }) =>
+        jobId === "job-1"
+          ? { ...makeJob("credit_required"), resumable: true, creditOutcome }
+          : { ...makeJob("running"), jobId }
+    )
+
+    const { result } = renderHook(() =>
+      useSourceSyncs({
+        accountsById: new Map([[source.id, source]]),
+        getSourceSyncJob,
+        startSourceSync,
+      })
+    )
+
+    await act(async () => {
+      await result.current.onSourceSync(source)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(result.current.activeSyncs).toHaveLength(1)
+    expect(result.current.activeSyncs[0]).toMatchObject({
+      creditOutcome,
+      jobId: "job-1",
+      status: "credit_required",
+    })
+
+    // Continue: the same start call for the same source.
+    await act(async () => {
+      await result.current.onSourceSync(source)
+    })
+
+    expect(startSourceSync).toHaveBeenCalledTimes(2)
+    expect(startSourceSync).toHaveBeenLastCalledWith(source.id)
+    expect(result.current.activeSyncs).toHaveLength(1)
+    expect(result.current.activeSyncs[0]).toMatchObject({ jobId: "job-2", status: "queued" })
+    expect(result.current.activeSyncs[0]?.creditOutcome).toBeUndefined()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(getSourceSyncJob).toHaveBeenLastCalledWith({ jobId: "job-2", sourceId: source.id })
+    expect(result.current.activeSyncs).toHaveLength(1)
+    expect(result.current.activeSyncs[0]).toMatchObject({ jobId: "job-2", status: "running" })
+  })
 })
 
 describe("useSourceSyncs reload reconnect", () => {

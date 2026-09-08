@@ -1,6 +1,7 @@
+import { useQueryClient } from "@tanstack/react-query"
 import { createFileRoute, redirect } from "@tanstack/react-router"
 import { CreditCard, Plus } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import {
   isTaxMaxiUnauthorizedError,
   type BillingCatalog,
@@ -16,7 +17,7 @@ import { Text } from "#/components/ui/typography"
 import { cn } from "#/lib/utils"
 import { m } from "#/paraglide/messages"
 import { getLocale, type Locale } from "#/paraglide/runtime"
-import { queries } from "#/integrations/taxmaxi/queries"
+import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 import { clearAuthSessionCookie } from "#/server-functions/auth"
 
 const billingSearchSchema = z.object({
@@ -30,6 +31,25 @@ const CHECKOUT_STATUS_POLL_ATTEMPTS = 15
 
 const checkoutStatusPollDelayMs = (attempt: number): number => Math.min(500 * 2 ** attempt, 30_000)
 
+// Twin of `settleReads` in `app.tsx`: every read settles, then a 401 from any of them wins.
+const settleReads = async <T extends readonly unknown[] | []>(reads: T) => {
+  const results = await Promise.allSettled(reads)
+
+  const unauthorized = results.find(
+    (result) => result.status === "rejected" && isTaxMaxiUnauthorizedError(result.reason)
+  )
+  if (unauthorized?.status === "rejected") throw unauthorized.reason
+
+  return results
+}
+
+/**
+ * Loads the catalog and the billing status for the overlay. A 401 from either
+ * read is rethrown even when the other read failed first for another reason,
+ * so the route redirects to login instead of rendering an error (#108, T06
+ * note). A status failure is rethrown; a catalog failure only leaves the
+ * catalog `null`, and the overlay shows its prices as unavailable.
+ */
 export const loadBillingPageData = async ({
   loadCatalog,
   loadStatus,
@@ -37,13 +57,14 @@ export const loadBillingPageData = async ({
   readonly loadCatalog: () => Promise<BillingCatalog>
   readonly loadStatus: () => Promise<BillingStatus>
 }): Promise<{ readonly catalog: BillingCatalog | null; readonly status: BillingStatus }> => {
-  const catalogPromise = loadCatalog().catch((error: unknown) => {
-    if (isTaxMaxiUnauthorizedError(error)) throw error
-    return null
-  })
-  const statusPromise = loadStatus()
-  const [catalog, status] = await Promise.all([catalogPromise, statusPromise])
-  return { catalog, status }
+  const [catalog, status] = await settleReads([loadCatalog(), loadStatus()])
+
+  if (status.status === "rejected") throw status.reason
+
+  return {
+    catalog: catalog.status === "fulfilled" ? catalog.value : null,
+    status: status.value,
+  }
 }
 
 export const isTopUpActionDisabled = ({
@@ -166,6 +187,7 @@ export function BillingPageContent({
   readonly status: BillingStatus
 }) {
   const locale = getLocale()
+  const queryClient = useQueryClient()
   const [liveStatus, setLiveStatus] = useState(status)
   const [pendingAction, setPendingAction] = useState<"annual" | "portal" | "topUp" | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -175,6 +197,29 @@ export function BillingPageContent({
     liveStatus.subscriptionStatus !== "incomplete_expired"
   const topUpEligible =
     liveStatus.subscriptionStatus === "active" || liveStatus.subscriptionStatus === "trialing"
+
+  // The overlay renders above the mounted dashboard, whose first-sync wizard
+  // reads billing through the `billingStatus` query. Every refreshed status is
+  // written into that cache, so the wizard moves from `needs_credits` to
+  // `ready`, or from `paused` to `resumable`, while the overlay is still open
+  // (#108 D07).
+  const applyRefreshedStatus = useCallback(
+    (refreshed: BillingStatus) => {
+      setLiveStatus(refreshed)
+      queryClient.setQueryData(queryKeys.billingStatus(), refreshed)
+    },
+    [queryClient]
+  )
+
+  // Closing invalidates the same query, so whatever changed behind Stripe's
+  // portal, or a Checkout the poll gave up on, is re-read by the dashboard
+  // underneath (#108 D07). Stable on purpose: the overlay's exit effect lists
+  // `onClose` as a dependency, and a new function per render would restart
+  // its exit timer.
+  const closeOverlay = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.billingStatus() })
+    onClose()
+  }, [onClose, queryClient])
 
   useEffect(() => {
     if (checkoutReturnKind === null) return
@@ -188,7 +233,7 @@ export function BillingPageContent({
     const refreshOnce = async () => {
       try {
         const refreshed = await billing.status()
-        if (active) setLiveStatus(refreshed)
+        if (active) applyRefreshedStatus(refreshed)
       } catch (cause) {
         await handleRefreshError(cause)
       }
@@ -209,7 +254,10 @@ export function BillingPageContent({
       wait: (delayMs) => new Promise((resolve) => window.setTimeout(resolve, delayMs)),
     })
       .then((refreshed) => {
-        if (active) setLiveStatus(refreshed)
+        // When every poll failed, `refreshed` is the loader-time `status`
+        // itself, not a read; writing it would put a stale snapshot over a
+        // fresher value the focus refresh or the dashboard may have cached.
+        if (active && refreshed !== status) applyRefreshedStatus(refreshed)
       })
       .catch(handleRefreshError)
     return () => {
@@ -217,7 +265,7 @@ export function BillingPageContent({
       window.removeEventListener("focus", refreshOnce)
       document.removeEventListener("visibilitychange", refreshWhenVisible)
     }
-  }, [billing, checkoutReturnKind, onUnauthorized, status])
+  }, [applyRefreshedStatus, billing, checkoutReturnKind, onUnauthorized, status])
 
   const redirectToStripe = async (action: "annual" | "portal" | "topUp") => {
     setPendingAction(action)
@@ -244,7 +292,7 @@ export function BillingPageContent({
     <AppOverlay
       closeLabel={m["app.billing.close"]()}
       icon={<CreditCard aria-hidden="true" className="size-4" />}
-      onClose={onClose}
+      onClose={closeOverlay}
       subtitle={m["app.billing.title"]()}
       title={m["app.billing.eyebrow"]()}
     >
