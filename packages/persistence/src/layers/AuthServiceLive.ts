@@ -736,7 +736,25 @@ const make = Effect.gen(function* () {
       cause,
     })
 
-  const createEmailVerificationRequest = ({
+  /**
+   * A fresh id and one-time code for a verification request.
+   */
+  const generateEmailVerificationIdAndCode = Effect.gen(function* () {
+    const id = EmailVerificationRequestId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie))
+    const codeBytes = yield* crypto.randomBytes(8).pipe(Effect.orDie)
+
+    return { id, code: generateEmailVerificationCode(codeBytes) }
+  })
+
+  /**
+   * Reuse the user's active request or start a fresh one. The repository does
+   * both under the user's write lock and takes the send time inside it: an
+   * active request gets `lastSentAt` set to that time and keeps its
+   * `sendCount`; otherwise a fresh request is written with `sendCount` 1 and
+   * an expiry counted from that same time. The caller hands the returned code
+   * to delivery.
+   */
+  const startOrReuseEmailVerificationRequest = ({
     userId,
     email,
   }: {
@@ -744,21 +762,40 @@ const make = Effect.gen(function* () {
     readonly email: AuthUser["email"]
   }): Effect.Effect<EmailVerificationRequest, AuthProcessingError> =>
     Effect.gen(function* () {
-      const now = Timestamp.now()
-      const requestId = EmailVerificationRequestId.make(
-        yield* crypto.randomUUIDv4.pipe(Effect.orDie)
-      )
-      const verificationCodeBytes = yield* crypto.randomBytes(8).pipe(Effect.orDie)
+      const { id, code } = yield* generateEmailVerificationIdAndCode
 
       return yield* emailVerificationRequestRepo
-        .create({
-          id: requestId,
+        .startOrReuse({
+          id,
           userId,
           email: sanitizeEmail(email),
-          code: generateEmailVerificationCode(verificationCodeBytes),
-          expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
+          code,
+          lifetimeMillis: EMAIL_VERIFICATION_TTL_MILLIS,
         })
-        .pipe(Effect.mapError((cause) => authProcessingError("create-email-verification", cause)))
+        .pipe(Effect.mapError((cause) => authProcessingError("start-email-verification", cause)))
+    })
+
+  /**
+   * Replace a request with a fresh code. The repository advances `sendCount`
+   * under the user's write lock, so concurrent writers cannot undercount. None means the
+   * request is gone (verified, expired and cleaned, or already replaced).
+   */
+  const renewEmailVerificationRequest = ({
+    requestId,
+  }: {
+    readonly requestId: EmailVerificationRequestId
+  }): Effect.Effect<Option.Option<EmailVerificationRequest>, AuthProcessingError> =>
+    Effect.gen(function* () {
+      const { id, code } = yield* generateEmailVerificationIdAndCode
+
+      return yield* emailVerificationRequestRepo
+        .renew({
+          id: requestId,
+          replacementId: id,
+          code,
+          lifetimeMillis: EMAIL_VERIFICATION_TTL_MILLIS,
+        })
+        .pipe(Effect.mapError((cause) => authProcessingError("renew-email-verification", cause)))
     })
 
   const sendEmailVerificationRequest = ({
@@ -913,20 +950,10 @@ const make = Effect.gen(function* () {
      */
     startEmailVerification: (user) =>
       Effect.gen(function* () {
-        const maybeExistingRequest = yield* emailVerificationRequestRepo
-          .findByUserId(user.id)
-          .pipe(Effect.mapError((cause) => authProcessingError("find-email-verification", cause)))
-
-        const verificationRequest = yield* Option.isSome(maybeExistingRequest) &&
-        !isEmailVerificationRequestExpired({
-          request: maybeExistingRequest.value,
-          now: Timestamp.now(),
+        const verificationRequest = yield* startOrReuseEmailVerificationRequest({
+          userId: user.id,
+          email: user.email,
         })
-          ? Effect.succeed(maybeExistingRequest.value)
-          : createEmailVerificationRequest({
-              userId: user.id,
-              email: user.email,
-            })
 
         yield* sendEmailVerificationRequest({
           request: verificationRequest,
@@ -941,25 +968,18 @@ const make = Effect.gen(function* () {
      */
     resendEmailVerification: (requestId) =>
       Effect.gen(function* () {
-        const maybeExistingRequest = yield* emailVerificationRequestRepo
-          .findById(requestId)
-          .pipe(Effect.mapError((cause) => authProcessingError("find-email-verification", cause)))
+        const renewedRequest = yield* renewEmailVerificationRequest({ requestId })
 
-        if (Option.isNone(maybeExistingRequest)) {
+        if (Option.isNone(renewedRequest)) {
           return yield* new EmailVerificationRequestNotFoundError({ requestId })
         }
 
-        const verificationRequest = yield* createEmailVerificationRequest({
-          userId: maybeExistingRequest.value.userId,
-          email: maybeExistingRequest.value.email,
-        })
-
         yield* sendEmailVerificationRequest({
-          request: verificationRequest,
+          request: renewedRequest.value,
           operation: "resend-email-verification",
         })
 
-        return verificationRequest
+        return renewedRequest.value
       }),
 
     /**

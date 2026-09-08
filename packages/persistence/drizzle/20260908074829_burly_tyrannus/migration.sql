@@ -1,0 +1,2 @@
+ALTER TABLE "email_verification_requests" ADD COLUMN "send_count" integer NOT NULL;--> statement-breakpoint
+ALTER TABLE "email_verification_requests" ADD COLUMN "last_sent_at" timestamp with time zone NOT NULL;

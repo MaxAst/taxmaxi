@@ -22,6 +22,10 @@ import type { PersistenceError } from "../errors/RepositoryError.ts"
 
 /**
  * EmailVerificationRequestInsert - Input required to create a verification request.
+ *
+ * The writer states the send facts: `sendCount` is 1 for a first request and
+ * the replaced request's count plus one for a resend; `lastSentAt` is when the
+ * code is handed to delivery.
  */
 export interface EmailVerificationRequestInsert {
   readonly id: EmailVerificationRequestId
@@ -29,6 +33,41 @@ export interface EmailVerificationRequestInsert {
   readonly email: Email
   readonly code: EmailVerificationCode
   readonly expiresAt: Timestamp
+  readonly sendCount: EmailVerificationRequest["sendCount"]
+  readonly lastSentAt: Timestamp
+}
+
+/**
+ * EmailVerificationRequestStart - Input to send a code to a user who may
+ * already have an active request.
+ *
+ * `id`, `code`, and `lifetimeMillis` are used only when no active request
+ * exists and a fresh one is inserted. The send time is taken by the repository
+ * inside the user's write lock; it decides which existing request still counts
+ * as active, and the fresh request expires `lifetimeMillis` after it, so a
+ * wait on the lock does not shorten the code's life.
+ */
+export interface EmailVerificationRequestStart {
+  readonly id: EmailVerificationRequestId
+  readonly userId: AuthUserId
+  readonly email: Email
+  readonly code: EmailVerificationCode
+  readonly lifetimeMillis: number
+}
+
+/**
+ * EmailVerificationRequestRenewal - Input to replace a request with a fresh code.
+ *
+ * `id` names the request being replaced. The replacement keeps its user and
+ * email, takes the replaced request's `sendCount` plus one, records the send
+ * time taken by the repository inside the user's write lock, and expires
+ * `lifetimeMillis` after that time.
+ */
+export interface EmailVerificationRequestRenewal {
+  readonly id: EmailVerificationRequestId
+  readonly replacementId: EmailVerificationRequestId
+  readonly code: EmailVerificationCode
+  readonly lifetimeMillis: number
 }
 
 /**
@@ -38,12 +77,43 @@ export interface EmailVerificationRequestRepositoryService {
   /**
    * Create a new verification request.
    *
-   * Implementations may replace any existing request for the same user so that
-   * only the most recent verification code remains active.
+   * Replaces any existing request for the same user so that only the most
+   * recent verification code remains active. Runs under the user's write lock.
    */
   readonly create: (
     request: EmailVerificationRequestInsert
   ) => Effect.Effect<EmailVerificationRequest, PersistenceError>
+
+  /**
+   * Reuse the user's active request or start a fresh one, in one transaction
+   * under the user's write lock.
+   *
+   * The send time is taken once inside the lock and decides which request is
+   * still active, the written `lastSentAt`, and the fresh request's
+   * `expiresAt`. When an unexpired request exists, its `lastSentAt` moves to
+   * that time and `sendCount` and `expiresAt` stay; the returned request
+   * carries the existing id and code. Otherwise the user's expired rows are
+   * deleted and a fresh request is inserted with `sendCount` 1 and
+   * `expiresAt` set to the send time plus `lifetimeMillis`. The caller sends
+   * the returned request's code.
+   */
+  readonly startOrReuse: (
+    start: EmailVerificationRequestStart
+  ) => Effect.Effect<EmailVerificationRequest, PersistenceError>
+
+  /**
+   * Replace a request with a fresh code in one transaction under the user's
+   * write lock.
+   *
+   * Inserts the replacement with the replaced row's `sendCount` plus one, the
+   * send time taken inside the lock as `lastSentAt`, and that time plus
+   * `lifetimeMillis` as `expiresAt`, then deletes the replaced row. Returns
+   * none when the request is gone, which is also what the second of two
+   * concurrent renewals sees.
+   */
+  readonly renew: (
+    renewal: EmailVerificationRequestRenewal
+  ) => Effect.Effect<Option.Option<EmailVerificationRequest>, PersistenceError>
 
   /**
    * Find a verification request by its unique identifier.
@@ -60,7 +130,9 @@ export interface EmailVerificationRequestRepositoryService {
   ) => Effect.Effect<Option.Option<EmailVerificationRequest>, PersistenceError>
 
   /**
-   * Atomically read and delete a verification request.
+   * Atomically read and delete a verification request, in one transaction
+   * under the owning user's write lock, so no other writer of that user's
+   * rows loses a row it has already selected.
    */
   readonly consume: (
     id: EmailVerificationRequestId

@@ -265,6 +265,65 @@ const makeEmailVerificationRequestRepo = (
     state.verificationRequests.set(verificationRequest.id, verificationRequest)
     return Effect.succeed(verificationRequest)
   },
+  startOrReuse: ({ id, userId, email, code, lifetimeMillis }) => {
+    const now = Timestamp.now()
+    const active = Array.from(state.verificationRequests.values()).find(
+      (request) => request.userId === userId && request.expiresAt.epochMillis > now.epochMillis
+    )
+
+    if (active !== undefined) {
+      const reused = EmailVerificationRequest.make({
+        ...active,
+        lastSentAt: now,
+        updatedAt: now,
+      })
+      state.verificationRequests.set(active.id, reused)
+      return Effect.succeed(reused)
+    }
+
+    for (const [existingId, existingRequest] of state.verificationRequests) {
+      if (existingRequest.userId === userId) {
+        state.verificationRequests.delete(existingId)
+      }
+    }
+
+    const fresh = EmailVerificationRequest.make({
+      id,
+      userId,
+      email,
+      code,
+      expiresAt: Timestamp.addMillis(now, lifetimeMillis),
+      sendCount: 1,
+      lastSentAt: now,
+      createdAt: now,
+      updatedAt: now,
+    })
+    state.verificationRequests.set(id, fresh)
+    return Effect.succeed(fresh)
+  },
+  renew: ({ id, replacementId, code, lifetimeMillis }) => {
+    const existing = state.verificationRequests.get(id)
+    if (existing === undefined) {
+      return Effect.succeed(Option.none())
+    }
+
+    const now = Timestamp.now()
+    const replacement = EmailVerificationRequest.make({
+      id: replacementId,
+      userId: existing.userId,
+      email: existing.email,
+      code,
+      expiresAt: Timestamp.addMillis(now, lifetimeMillis),
+      sendCount: existing.sendCount + 1,
+      lastSentAt: now,
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    state.verificationRequests.delete(id)
+    state.verificationRequests.set(replacementId, replacement)
+    return Effect.succeed(Option.some(replacement))
+  },
   findById: (id) => Effect.succeed(Option.fromNullishOr(state.verificationRequests.get(id))),
   findByUserId: (userId) =>
     Effect.succeed(
