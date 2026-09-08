@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useRouteContext } from "@tanstack/react-router"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
@@ -334,6 +334,23 @@ export function Dashboard({
       ? undefined
       : getFirstSyncPrototypeMock(prototypeState, prototypeTarget)
 
+  // PROTOTYPE (#108 T04): the source cards plus a sheet body. Passed to the
+  // prototype so variants can render inside the sheet, replace it, or dim it.
+  const renderSourceSheet = (sheet: ReactNode) => (
+    <SourceCards
+      contentClassName={appSurfaceClassName}
+      onAddWallet={createWalletSource === undefined ? undefined : handleAddWallet}
+      onResolveName={resolveName}
+      onSelectedSourceIdChange={(sourceId) => onAccountScopeChange(sourceId ?? ALL_ACCOUNTS)}
+      onSourceSync={onSourceSync}
+      selectedSourceId={accountScope === ALL_ACCOUNTS ? undefined : accountScope}
+      syncingSourceIds={prototypeMock?.syncingSourceIds ?? syncingSourceIds}
+      sources={accounts}
+    >
+      {sheet}
+    </SourceCards>
+  )
+
   return (
     <div className="text-marketing-foreground flex min-h-screen flex-col pt-28 pb-8 sm:pt-32">
       <SourceSyncIsland
@@ -341,23 +358,15 @@ export function Dashboard({
         onDismiss={prototypeMock ? undefined : onDismissSync}
         onRetry={prototypeMock ? undefined : onRetrySync}
       />
-      <SourceCards
-        contentClassName={appSurfaceClassName}
-        onAddWallet={createWalletSource === undefined ? undefined : handleAddWallet}
-        onResolveName={resolveName}
-        onSelectedSourceIdChange={(sourceId) => onAccountScopeChange(sourceId ?? ALL_ACCOUNTS)}
-        onSourceSync={onSourceSync}
-        selectedSourceId={accountScope === ALL_ACCOUNTS ? undefined : accountScope}
-        syncingSourceIds={prototypeMock?.syncingSourceIds ?? syncingSourceIds}
-        sources={accounts}
-      >
-        {prototypeVariant !== undefined ? (
-          <FirstSyncBodyPrototype
-            state={prototypeState}
-            targetSource={prototypeTarget}
-            variant={prototypeVariant}
-          />
-        ) : (
+      {prototypeVariant !== undefined ? (
+        <FirstSyncBodyPrototype
+          renderDashboard={renderSourceSheet}
+          state={prototypeState}
+          targetSource={prototypeTarget}
+          variant={prototypeVariant}
+        />
+      ) : (
+        renderSourceSheet(
           <div
             aria-busy={isSwitchingPortfolio}
             className="flex min-w-0 flex-col gap-8 py-6 sm:py-8"
@@ -424,8 +433,8 @@ export function Dashboard({
               <TabsContent value="taxes"></TabsContent>
             </Tabs>
           </div>
-        )}
-      </SourceCards>
+        )
+      )}
     </div>
   )
 }
