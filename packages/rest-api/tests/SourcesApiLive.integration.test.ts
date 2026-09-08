@@ -1054,6 +1054,7 @@ const startClaimRaceRun = ({
 }) =>
   Effect.flatMap(CalculationRunRepository, (repository) =>
     repository.start({
+      syncCapture: { requestIds: [] },
       correctionInputs: [],
       id: CalculationRunId.make(runId),
       principalId: PrincipalId.make(principalId),
@@ -1081,14 +1082,18 @@ const persistClaimRaceRun = ({
   principalId,
   runId,
   taxYear,
+  writeMode = "finalize_started",
 }: {
   readonly inputLedgerRevision: InputLedgerRevision
   readonly principalId: string
   readonly runId: string
   readonly taxYear: number
+  readonly writeMode?: "finalize_started" | "atomic"
 }) =>
   Effect.flatMap(CalculationRunRepository, (repository) =>
     repository.persist({
+      writeMode,
+      syncCapture: { requestIds: [] },
       correctionInputs: [],
       id: CalculationRunId.make(runId),
       principalId: PrincipalId.make(principalId),
@@ -1105,15 +1110,18 @@ const assertClaimActivationFence = ({
   inputLedgerRevision,
   runId,
   taxYear,
+  writeMode = "finalize_started",
 }: {
   readonly anonymousPrincipalId: string
   readonly fenceAtOrBelowInput?: boolean
   readonly inputLedgerRevision: InputLedgerRevision
   readonly runId: string
   readonly taxYear: number
+  readonly writeMode?: "finalize_started" | "atomic"
 }) =>
   Effect.gen(function* () {
     const write = yield* persistClaimRaceRun({
+      writeMode,
       inputLedgerRevision,
       principalId: anonymousPrincipalId,
       runId,
@@ -1156,6 +1164,7 @@ const assertClaimActivationFence = ({
     })
     const freshRunId = nextTestUuid()
     const freshWrite = yield* persistClaimRaceRun({
+      writeMode: "atomic",
       inputLedgerRevision: postFenceRevision,
       principalId: anonymousPrincipalId,
       runId: freshRunId,
@@ -4558,7 +4567,7 @@ describe("SourcesApiLive", () => {
               principalId: created.source.principalId,
               runId: lateRunId,
               taxYear: calculationGraph.taxYear,
-            })
+            }).pipe(Effect.result)
           )
           yield* Effect.promise(() =>
             context.waitForQueryBlockedOnLock({
@@ -4604,11 +4613,15 @@ describe("SourcesApiLive", () => {
         .select({ status: schema.calculationRuns.status })
         .from(schema.calculationRuns)
         .where(eq(schema.calculationRuns.id, lateRunId))
-      expect(staleWrite.activated).toBe(false)
-      expect(lateRun).toEqual({ status: "complete" })
+      expect(staleWrite).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "CalculationRunAlreadyStoredError" },
+      })
+      expect(lateRun).toBeUndefined()
       yield* assertClaimActivationFence({
         anonymousPrincipalId: created.source.principalId,
         fenceAtOrBelowInput: true,
+        writeMode: "atomic",
         inputLedgerRevision: overlappingRevision,
         runId: overlappingRunId,
         taxYear: calculationGraph.taxYear,

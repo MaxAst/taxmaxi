@@ -86,6 +86,7 @@ const unavailableHistoricalPriceClient = CoinGeckoHistoricalPriceClient.of({
 const emptyCalculationRunRepository = CalculationRunRepository.of({
   fail: () => Effect.die("unused fail"),
   getLatestStatus: () => Effect.die("unused getLatestStatus"),
+  getSyncStatus: () => Effect.die("unused getSyncStatus"),
   listActiveTaxYears: () => Effect.succeed([]),
   persist: () => Effect.die("unused persist"),
   settleStaleAndFindRecomputePrincipals: () => Effect.die("unused maintenance"),
@@ -144,6 +145,7 @@ const makeMaintenanceRepository = (
   CalculationRunRepository.of({
     fail: () => Effect.die("unused fail"),
     getLatestStatus: () => Effect.die("unused getLatestStatus"),
+    getSyncStatus: () => Effect.die("unused getSyncStatus"),
     listActiveTaxYears: () => Effect.die("unused listActiveTaxYears"),
     settleStaleAndFindRecomputePrincipals,
     persist: () => Effect.die("unused persist"),
@@ -430,6 +432,7 @@ describe("WorkerBullMqCalculationConsumerLive", () => {
       const repository = CalculationRunRepository.of({
         fail: () => Effect.die("unused fail"),
         getLatestStatus: () => Effect.die("unused getLatestStatus"),
+        getSyncStatus: () => Effect.die("unused getSyncStatus"),
         listActiveTaxYears: () =>
           Effect.succeed([TaxYear.make(2022), TaxYear.make(2024), TaxYear.make(2026)]),
         persist: () => Effect.die("unused persist"),

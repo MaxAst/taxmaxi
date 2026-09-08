@@ -31,6 +31,12 @@ import {
   CalculationRunAlreadyStoredError,
   CalculationRunCurrencyMismatchError,
   CalculationRunId,
+  CalculationSyncRequestId,
+  CalculationSyncAttemptId,
+  CalculationSyncJobNotFoundError,
+  type CalculationSyncWork,
+  type CalculationSyncStatus,
+  type CalculationSyncCoveringRun,
   CalculationRunRepository,
   type CalculationRunRepositoryShape,
   type CalculationRunResult,
@@ -167,6 +173,211 @@ const make = Effect.gen(function* () {
               operation: "calculationRunRepository.getLatestStatus",
               cause,
             })
+        )
+      )
+
+  const getSyncStatus: CalculationRunRepositoryShape["getSyncStatus"] = (params) =>
+    db
+      .transaction((tx) =>
+        Effect.gen(function* () {
+          yield* tx.execute(sql`set transaction isolation level repeatable read, read only`)
+          const scope = {
+            principalId: params.principalId,
+            jurisdiction: params.jurisdiction,
+            taxYear: params.taxYear,
+            reportingCurrency: params.reportingCurrency,
+          }
+          const [active] = yield* tx
+            .select({
+              runId: schema.calculationRuns.id,
+              status: schema.calculationRuns.status,
+              captureRunId: schema.calculationRunSyncCaptures.runId,
+            })
+            .from(schema.activeCalculationRuns)
+            .innerJoin(
+              schema.calculationRuns,
+              eq(schema.calculationRuns.id, schema.activeCalculationRuns.runId)
+            )
+            .leftJoin(
+              schema.calculationRunSyncCaptures,
+              eq(schema.calculationRunSyncCaptures.runId, schema.calculationRuns.id)
+            )
+            .where(
+              and(
+                eq(schema.activeCalculationRuns.principalId, params.principalId),
+                eq(schema.activeCalculationRuns.jurisdiction, params.jurisdiction),
+                eq(schema.activeCalculationRuns.taxYear, params.taxYear),
+                eq(schema.activeCalculationRuns.reportingCurrency, params.reportingCurrency)
+              )
+            )
+          const activeRun: CalculationSyncCoveringRun | null =
+            active !== undefined && (active.status === "complete" || active.status === "partial")
+              ? { runId: CalculationRunId.make(active.runId), status: active.status }
+              : null
+          const requests = yield* tx
+            .select({
+              id: schema.calculationSyncRequests.id,
+              sourceId: schema.calculationSyncRequests.sourceId,
+              sourceJobId: schema.calculationSyncRequests.sourceJobId,
+              status: schema.calculationSyncRequests.status,
+            })
+            .from(schema.calculationSyncRequests)
+            .where(
+              and(
+                eq(schema.calculationSyncRequests.principalId, params.principalId),
+                eq(schema.calculationSyncRequests.jurisdiction, params.jurisdiction),
+                eq(schema.calculationSyncRequests.taxYear, params.taxYear),
+                eq(schema.calculationSyncRequests.reportingCurrency, params.reportingCurrency)
+              )
+            )
+            .orderBy(asc(schema.calculationSyncRequests.id))
+          const attempts = yield* tx
+            .select({
+              requestId: schema.calculationSyncAttempts.requestId,
+              id: schema.calculationSyncAttempts.id,
+              runId: schema.calculationSyncAttempts.runId,
+              status: schema.calculationSyncAttempts.status,
+              failureCode: schema.calculationSyncAttempts.failureCode,
+            })
+            .from(schema.calculationSyncAttempts)
+            .where(
+              and(
+                eq(schema.calculationSyncAttempts.principalId, params.principalId),
+                eq(schema.calculationSyncAttempts.jurisdiction, params.jurisdiction),
+                eq(schema.calculationSyncAttempts.taxYear, params.taxYear),
+                eq(schema.calculationSyncAttempts.reportingCurrency, params.reportingCurrency)
+              )
+            )
+            .orderBy(
+              asc(schema.calculationSyncAttempts.startedAt),
+              asc(schema.calculationSyncAttempts.id)
+            )
+          const attemptsByRequest = new Map<string, CalculationSyncWork["attempts"][number][]>()
+          for (const attempt of attempts) {
+            const entries = attemptsByRequest.get(attempt.requestId) ?? []
+            entries.push({
+              attemptId: CalculationSyncAttemptId.make(attempt.id),
+              runId: attempt.runId === null ? null : CalculationRunId.make(attempt.runId),
+              status: attempt.status,
+              failureCode: attempt.failureCode,
+            })
+            attemptsByRequest.set(attempt.requestId, entries)
+          }
+          const work: CalculationSyncWork[] = requests.map((request) => ({
+            requestId: CalculationSyncRequestId.make(request.id),
+            sourceId: request.sourceId,
+            sourceJobId: request.sourceJobId,
+            status: request.status,
+            attempts: attemptsByRequest.get(request.id) ?? [],
+          }))
+          // Ordering chooses which proven covering run to display; only the stored link proves coverage.
+          const covers = yield* tx
+            .select({
+              requestId: schema.calculationRunSyncRequests.requestId,
+              runId: schema.calculationRuns.id,
+              status: schema.calculationRuns.status,
+            })
+            .from(schema.calculationRunSyncRequests)
+            .innerJoin(
+              schema.calculationRuns,
+              eq(schema.calculationRuns.id, schema.calculationRunSyncRequests.runId)
+            )
+            .where(
+              and(
+                eq(schema.calculationRunSyncRequests.principalId, params.principalId),
+                eq(schema.calculationRunSyncRequests.jurisdiction, params.jurisdiction),
+                eq(schema.calculationRunSyncRequests.taxYear, params.taxYear),
+                eq(schema.calculationRunSyncRequests.reportingCurrency, params.reportingCurrency),
+                inArray(schema.calculationRuns.status, ["complete", "partial"])
+              )
+            )
+            .orderBy(desc(schema.calculationRuns.completedAt), desc(schema.calculationRuns.id))
+          const coveringByRequest = new Map<string, CalculationSyncCoveringRun>()
+          const activeRequests = new Set<string>()
+          for (const cover of covers) {
+            if (cover.runId === activeRun?.runId) activeRequests.add(cover.requestId)
+            if (
+              !coveringByRequest.has(cover.requestId) &&
+              (cover.status === "complete" || cover.status === "partial")
+            )
+              coveringByRequest.set(cover.requestId, {
+                runId: CalculationRunId.make(cover.runId),
+                status: cover.status,
+              })
+          }
+          const jobFields = {
+            id: schema.processingJobs.id,
+            sourceId: schema.processingJobs.sourceId,
+            status: schema.processingJobs.status,
+          }
+          const jobs =
+            params.sourceJobId === undefined
+              ? yield* tx
+                  .selectDistinctOn([schema.processingJobs.sourceId], jobFields)
+                  .from(schema.processingJobs)
+                  .where(
+                    and(
+                      eq(schema.processingJobs.principalId, params.principalId),
+                      eq(schema.processingJobs.status, "completed")
+                    )
+                  )
+                  .orderBy(
+                    asc(schema.processingJobs.sourceId),
+                    desc(schema.processingJobs.completedAt),
+                    desc(schema.processingJobs.id)
+                  )
+              : yield* tx
+                  .select(jobFields)
+                  .from(schema.processingJobs)
+                  .where(
+                    and(
+                      eq(schema.processingJobs.principalId, params.principalId),
+                      eq(schema.processingJobs.id, params.sourceJobId)
+                    )
+                  )
+          if (params.sourceJobId !== undefined && jobs.length === 0)
+            return yield* new CalculationSyncJobNotFoundError({ sourceJobId: params.sourceJobId })
+          const workByJob = new Map(work.map((request) => [request.sourceJobId, request]))
+          const status: CalculationSyncStatus["work"]["status"] = work.some(
+            (request) => request.status === "running"
+          )
+            ? "running"
+            : work.some((request) => request.status === "queued")
+              ? "queued"
+              : work.some((request) => request.status === "failed")
+                ? "failed"
+                : work.length > 0
+                  ? "succeeded"
+                  : "not_requested"
+          return {
+            scope,
+            activeRun,
+            work: { status, requests: work.filter((request) => request.status !== "succeeded") },
+            jobs: jobs.map((job) => {
+              const request = workByJob.get(job.id) ?? null
+              return {
+                sourceJobId: job.id,
+                sourceId: job.sourceId,
+                sourceJobStatus: job.status,
+                work: request,
+                coveringRun:
+                  request === null ? null : (coveringByRequest.get(request.requestId) ?? null),
+                activeCoverage:
+                  job.status !== "completed" || activeRun === null || active?.captureRunId == null
+                    ? ("unknown" as const)
+                    : request !== null && activeRequests.has(request.requestId)
+                      ? ("covered" as const)
+                      : ("not_covered" as const),
+              }
+            }),
+          }
+        })
+      )
+      .pipe(
+        Effect.mapError((cause) =>
+          Schema.is(CalculationSyncJobNotFoundError)(cause)
+            ? cause
+            : new PersistenceError({ operation: "calculationRunRepository.getSyncStatus", cause })
         )
       )
 
@@ -386,37 +597,43 @@ const make = Effect.gen(function* () {
 
   const claimRun = ({ tx, params, result, startedAt }: WriteContext) =>
     Effect.gen(function* () {
-      const claimedRuns = yield* tx
-        .insert(schema.calculationRuns)
-        .values({
-          id: params.id,
-          principalId: params.principalId,
-          jurisdiction: result.jurisdiction,
-          taxYear: result.taxYear,
-          reportingCurrency: params.reportingCurrency,
-          engineVersion: result.engineVersion,
-          ruleSetVersion: result.ruleSetVersion,
-          inputLedgerRevision: params.inputLedgerRevision,
-          valuationRevision: params.valuationRevision,
-          status: "pending",
-          accountingMethod: null,
-          inventoryScope: null,
-          appliedChoiceIds: [],
-          appliedRules: [],
-          processedEventIds: [],
-          startedAt,
-          completedAt: null,
-          createdAt: startedAt,
-          updatedAt: startedAt,
-        })
-        .onConflictDoNothing({ target: schema.calculationRuns.id })
-        .returning({ id: schema.calculationRuns.id })
+      const claimedRuns =
+        params.writeMode === "finalize_started"
+          ? []
+          : yield* tx
+              .insert(schema.calculationRuns)
+              .values({
+                id: params.id,
+                principalId: params.principalId,
+                jurisdiction: result.jurisdiction,
+                taxYear: result.taxYear,
+                reportingCurrency: params.reportingCurrency,
+                engineVersion: result.engineVersion,
+                ruleSetVersion: result.ruleSetVersion,
+                inputLedgerRevision: params.inputLedgerRevision,
+                valuationRevision: params.valuationRevision,
+                status: "pending",
+                accountingMethod: null,
+                inventoryScope: null,
+                appliedChoiceIds: [],
+                appliedRules: [],
+                processedEventIds: [],
+                startedAt,
+                completedAt: null,
+                createdAt: startedAt,
+                updatedAt: startedAt,
+              })
+              .onConflictDoNothing({ target: schema.calculationRuns.id })
+              .returning({ id: schema.calculationRuns.id })
 
       if (claimedRuns.length === 1) {
         yield* validateReportingCurrency(params)
         return true
       }
 
+      if (params.writeMode === "atomic") {
+        return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
+      }
       const [runningRun] = yield* tx
         .select({
           principalId: schema.calculationRuns.principalId,
@@ -450,6 +667,144 @@ const make = Effect.gen(function* () {
 
       yield* validateReportingCurrency(params)
       return false
+    })
+
+  const writeSyncCapture = ({
+    tx,
+    params,
+    jurisdiction,
+    taxYear,
+  }: {
+    readonly tx: CalculationTransaction
+    readonly params: Pick<
+      StartCalculationRunParams,
+      "id" | "principalId" | "reportingCurrency" | "syncCapture"
+    >
+    readonly jurisdiction: string
+    readonly taxYear: number
+  }) =>
+    Effect.gen(function* () {
+      const scope = {
+        principalId: params.principalId,
+        jurisdiction,
+        taxYear,
+        reportingCurrency: params.reportingCurrency,
+      }
+      const ids = params.syncCapture.requestIds
+      // Lock only the recorded snapshot members. Ownership changes must reject the
+      // entire start instead of silently dropping a transferred request.
+      const requests =
+        ids.length === 0
+          ? []
+          : yield* tx
+              .select({
+                id: schema.calculationSyncRequests.id,
+                status: schema.calculationSyncRequests.status,
+              })
+              .from(schema.calculationSyncRequests)
+              .where(
+                and(
+                  inArray(schema.calculationSyncRequests.id, [...ids]),
+                  eq(schema.calculationSyncRequests.principalId, scope.principalId),
+                  eq(schema.calculationSyncRequests.jurisdiction, scope.jurisdiction),
+                  eq(schema.calculationSyncRequests.taxYear, scope.taxYear),
+                  eq(schema.calculationSyncRequests.reportingCurrency, scope.reportingCurrency)
+                )
+              )
+              .orderBy(asc(schema.calculationSyncRequests.id))
+              .for("update")
+      if (requests.length !== ids.length) {
+        return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
+      }
+      yield* tx.insert(schema.calculationRunSyncCaptures).values({ runId: params.id, ...scope })
+      yield* writeBatches(
+        ids.map((requestId) => ({ runId: params.id, requestId, ...scope })),
+        (batch) => tx.insert(schema.calculationRunSyncRequests).values(batch)
+      )
+      const claimed = requests.filter(({ status }) => status === "queued" || status === "failed")
+      if (claimed.length === 0) return
+      const startedAt = yield* DateTime.nowAsDate
+      yield* writeBatches(
+        claimed.map(({ id }) => ({
+          requestId: id,
+          runId: params.id,
+          ...scope,
+          status: "running" as const,
+          startedAt,
+        })),
+        (batch) => tx.insert(schema.calculationSyncAttempts).values(batch)
+      )
+      yield* tx
+        .update(schema.calculationSyncRequests)
+        .set({ status: "running" })
+        .where(
+          inArray(
+            schema.calculationSyncRequests.id,
+            claimed.map(({ id }) => id)
+          )
+        )
+    })
+
+  const verifySyncCapture = ({ tx, params }: WriteContext) =>
+    Effect.gen(function* () {
+      const [capture] = yield* tx
+        .select({ runId: schema.calculationRunSyncCaptures.runId })
+        .from(schema.calculationRunSyncCaptures)
+        .where(eq(schema.calculationRunSyncCaptures.runId, params.id))
+      const links = yield* tx
+        .select({ requestId: schema.calculationRunSyncRequests.requestId })
+        .from(schema.calculationRunSyncRequests)
+        .where(eq(schema.calculationRunSyncRequests.runId, params.id))
+      const ids = new Set(params.syncCapture.requestIds)
+      if (
+        capture === undefined ||
+        ids.size !== params.syncCapture.requestIds.length ||
+        links.length !== ids.size ||
+        links.some(({ requestId }) => !ids.has(CalculationSyncRequestId.make(requestId)))
+      ) {
+        return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
+      }
+    })
+
+  const settleSyncAttempts = ({
+    tx,
+    params,
+    status,
+    failureCode,
+    completedAt,
+  }: {
+    readonly tx: CalculationTransaction
+    readonly params: Pick<FailCalculationRunParams, "id" | "principalId">
+    readonly status: "succeeded" | "failed"
+    readonly failureCode: string | null
+    readonly completedAt: Date
+  }) =>
+    Effect.gen(function* () {
+      const attempts = yield* tx
+        .update(schema.calculationSyncAttempts)
+        .set({ status, failureCode, completedAt })
+        .where(
+          and(
+            eq(schema.calculationSyncAttempts.runId, params.id),
+            eq(schema.calculationSyncAttempts.principalId, params.principalId),
+            eq(schema.calculationSyncAttempts.status, "running")
+          )
+        )
+        .returning({ requestId: schema.calculationSyncAttempts.requestId })
+      if (attempts.length > 0)
+        yield* tx
+          .update(schema.calculationSyncRequests)
+          .set({ status })
+          .where(
+            and(
+              inArray(
+                schema.calculationSyncRequests.id,
+                attempts.map(({ requestId }) => requestId)
+              ),
+              eq(schema.calculationSyncRequests.principalId, params.principalId),
+              eq(schema.calculationSyncRequests.status, "running")
+            )
+          )
     })
 
   const writeCorrectionInputs = ({
@@ -742,6 +1097,12 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const isNewRun = yield* claimRun(context)
       if (isNewRun) {
+        yield* writeSyncCapture({
+          tx: context.tx,
+          params: context.params,
+          jurisdiction: context.result.jurisdiction,
+          taxYear: context.result.taxYear,
+        })
         yield* snapshotCustodyMembership(context)
         yield* writeCorrectionInputs({
           tx: context.tx,
@@ -749,7 +1110,10 @@ const make = Effect.gen(function* () {
           jurisdiction: context.result.jurisdiction,
           taxYear: context.result.taxYear,
         })
-      } else yield* verifyCorrectionInputs(context)
+      } else {
+        yield* verifyCorrectionInputs(context)
+        yield* verifySyncCapture(context)
+      }
       yield* writeAllocations(context)
       yield* writeRealizedResults(context)
       yield* writeIncomeResults(context)
@@ -757,6 +1121,13 @@ const make = Effect.gen(function* () {
       yield* writeBlockers(context)
       yield* writeExplanations(context)
       const completedAt = yield* finalizeRun(context)
+      yield* settleSyncAttempts({
+        tx: context.tx,
+        params: { id: context.params.id, principalId: context.params.principalId },
+        status: "succeeded",
+        failureCode: null,
+        completedAt,
+      })
       const activatedRows = yield* activateRun({ ...context, completedAt })
 
       return {
@@ -825,6 +1196,12 @@ const make = Effect.gen(function* () {
             return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
           }
 
+          yield* writeSyncCapture({
+            tx,
+            params,
+            jurisdiction: params.jurisdiction,
+            taxYear: params.taxYear,
+          })
           yield* writeCorrectionInputs({
             tx,
             params,
@@ -854,43 +1231,55 @@ const make = Effect.gen(function* () {
       )
 
   const fail: CalculationRunRepositoryShape["fail"] = (params: FailCalculationRunParams) =>
-    Effect.gen(function* () {
-      const completedAt = yield* DateTime.nowAsDate
-      const failedRuns = yield* db
-        .update(schema.calculationRuns)
-        .set({
-          status: "failed",
-          failureCode: params.failureCode,
-          failureMessage: null,
-          completedAt,
-          updatedAt: completedAt,
-        })
-        .where(
-          and(
-            eq(schema.calculationRuns.id, params.id),
-            eq(schema.calculationRuns.principalId, params.principalId),
-            eq(schema.calculationRuns.status, "running")
-          )
-        )
-        .returning({ id: schema.calculationRuns.id })
-
-      if (failedRuns.length === 0) {
-        return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
-      }
-    }).pipe(
-      Effect.mapError((error) =>
-        Schema.is(CalculationRunAlreadyStoredError)(error)
-          ? error
-          : new PersistenceError({
-              operation: "calculationRunRepository.fail",
-              cause: error,
+    db
+      .transaction((tx) =>
+        Effect.gen(function* () {
+          const completedAt = yield* DateTime.nowAsDate
+          const failedRuns = yield* tx
+            .update(schema.calculationRuns)
+            .set({
+              status: "failed",
+              failureCode: params.failureCode,
+              failureMessage: null,
+              completedAt,
+              updatedAt: completedAt,
             })
+            .where(
+              and(
+                eq(schema.calculationRuns.id, params.id),
+                eq(schema.calculationRuns.principalId, params.principalId),
+                eq(schema.calculationRuns.status, "running")
+              )
+            )
+            .returning({ id: schema.calculationRuns.id })
+
+          if (failedRuns.length === 0) {
+            return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
+          }
+          yield* settleSyncAttempts({
+            tx,
+            params,
+            status: "failed",
+            failureCode: params.failureCode,
+            completedAt,
+          })
+        })
       )
-    )
+      .pipe(
+        Effect.mapError((error) =>
+          Schema.is(CalculationRunAlreadyStoredError)(error)
+            ? error
+            : new PersistenceError({
+                operation: "calculationRunRepository.fail",
+                cause: error,
+              })
+        )
+      )
 
   return CalculationRunRepository.of({
     fail,
     getLatestStatus,
+    getSyncStatus,
     listActiveTaxYears,
     persist,
     settleStaleAndFindRecomputePrincipals,

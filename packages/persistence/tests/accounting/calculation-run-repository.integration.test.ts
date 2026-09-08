@@ -35,6 +35,7 @@ import {
   CalculationRunCurrencyMismatchError,
   CalculationRunId,
   CalculationRunRepository,
+  CalculationSyncRequestId,
   type CalculationRunRepositoryShape,
   InputLedgerRevision,
   ValuationRevision,
@@ -96,6 +97,7 @@ const calculationRunServiceWithPersist = (
       CalculationRunRepository.of({
         fail: repository.fail,
         getLatestStatus: repository.getLatestStatus,
+        getSyncStatus: repository.getSyncStatus,
         listActiveTaxYears: repository.listActiveTaxYears,
         settleStaleAndFindRecomputePrincipals: repository.settleStaleAndFindRecomputePrincipals,
         persist: makePersist(repository),
@@ -279,6 +281,8 @@ const persistResult = ({
     const sequence = inputSequence ?? (id.slice(-12).replace(/^0+/, "") || "0")
 
     return repository.persist({
+      writeMode: "atomic",
+      syncCapture: { requestIds: [] },
       correctionInputs: [],
       id,
       principalId,
@@ -587,6 +591,64 @@ beforeEach(() =>
 )
 
 describe("CalculationRunRepositoryLive", () => {
+  it.effect("rejects stale snapshot membership atomically and preserves a started capture", () =>
+    Effect.gen(function* () {
+      yield* runPgEffect(seedCalculationRunFixture())
+      const result = completeResult()
+      const params = {
+        id: RUN_ID,
+        principalId: TEST_PRINCIPAL_ID,
+        reportingCurrency: EUR,
+        jurisdiction: result.jurisdiction,
+        taxYear: result.taxYear,
+        engineVersion: result.engineVersion,
+        ruleSetVersion: result.ruleSetVersion,
+        inputLedgerRevision: InputLedgerRevision.make(`v2:801:1.2.:${"a".repeat(64)}`),
+        valuationRevision: ValuationRevision.make(`sha256:${"b".repeat(64)}`),
+        custodyUnitMembership: [
+          { custodyUnitId: TEST_CUSTODY_UNIT_ID, sourceId: SourceId.make(TEST_SOURCE_ID) },
+        ],
+        correctionInputs: [],
+        syncCapture: { requestIds: [] },
+      }
+      const missingRequest = CalculationSyncRequestId.make("00000000-0000-4000-8000-000000000899")
+      const stale = yield* runRepository(
+        Effect.flatMap(CalculationRunRepository, (repository) =>
+          repository.start({ ...params, syncCapture: { requestIds: [missingRequest] } })
+        )
+      ).pipe(Effect.result)
+      expect(stale).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "CalculationRunAlreadyStoredError" },
+      })
+      expect((yield* readRunSettlement(RUN_ID)).run).toBeUndefined()
+      yield* runRepository(
+        Effect.flatMap(CalculationRunRepository, (repository) => repository.start(params))
+      )
+      const changed = yield* runRepository(
+        Effect.flatMap(CalculationRunRepository, (repository) =>
+          repository.persist({
+            writeMode: "finalize_started",
+            ...params,
+            result,
+            syncCapture: { requestIds: [missingRequest] },
+          })
+        )
+      ).pipe(Effect.result)
+      expect(changed).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "CalculationRunAlreadyStoredError" },
+      })
+      expect((yield* readRunSettlement(RUN_ID)).run).toMatchObject({ status: "running" })
+      yield* runRepository(
+        Effect.flatMap(CalculationRunRepository, (repository) =>
+          repository.persist({ writeMode: "finalize_started", ...params, result })
+        )
+      )
+      expect((yield* readRunSettlement(RUN_ID)).run).toMatchObject({ status: "complete" })
+    })
+  )
+
   it.effect(
     "writes supplied correction inputs atomically and rejects a different snapshot on completion",
     () =>
@@ -600,6 +662,7 @@ describe("CalculationRunRepositoryLive", () => {
           reportingCurrency: EUR,
           inputLedgerRevision: InputLedgerRevision.make(`v2:801:1.2.:${"a".repeat(64)}`),
           valuationRevision: ValuationRevision.make(`sha256:${"b".repeat(64)}`),
+          syncCapture: { requestIds: [] },
           correctionInputs,
         }
         yield* runRepository(
@@ -628,7 +691,12 @@ describe("CalculationRunRepositoryLive", () => {
         expect(storedBefore).toEqual(correctionInputs.map((captured) => ({ captured })))
         const rejected = yield* runRepository(
           Effect.flatMap(CalculationRunRepository, (repository) =>
-            repository.persist({ ...params, correctionInputs: [], result })
+            repository.persist({
+              writeMode: "finalize_started",
+              ...params,
+              correctionInputs: [],
+              result,
+            })
           )
         ).pipe(Effect.result)
         expect(rejected).toMatchObject({
@@ -641,7 +709,7 @@ describe("CalculationRunRepositoryLive", () => {
         })
         yield* runRepository(
           Effect.flatMap(CalculationRunRepository, (repository) =>
-            repository.persist({ ...params, result })
+            repository.persist({ writeMode: "finalize_started", ...params, result })
           )
         )
         expect((yield* readRunSettlement(RUN_ID)).run).toEqual({
@@ -700,6 +768,7 @@ describe("CalculationRunRepositoryLive", () => {
           inputLedgerRevision: InputLedgerRevision.make(`v2:801:1.2.:${"a".repeat(64)}`),
           valuationRevision: ValuationRevision.make(`sha256:${"b".repeat(64)}`),
           custodyUnitMembership: [],
+          syncCapture: { requestIds: [] },
           correctionInputs,
         }
         for (const invalid of [
@@ -799,11 +868,13 @@ describe("CalculationRunRepositoryLive", () => {
         yield* runRepository(
           Effect.flatMap(CalculationRunRepository, (repository) =>
             repository.persist({
+              writeMode: "atomic",
               id: RUN_ID,
               principalId: TEST_PRINCIPAL_ID,
               reportingCurrency: EUR,
               inputLedgerRevision: InputLedgerRevision.make(`v2:801:1.2.:${"a".repeat(64)}`),
               valuationRevision: ValuationRevision.make(`sha256:${"b".repeat(64)}`),
+              syncCapture: { requestIds: [] },
               correctionInputs,
               result,
             })
@@ -853,6 +924,7 @@ describe("CalculationRunRepositoryLive", () => {
         Effect.flatMap(CalculationRunRepository, (repository) =>
           Effect.gen(function* () {
             yield* repository.start({
+              syncCapture: { requestIds: [] },
               correctionInputs: [],
               id: RECOMPUTE_RUN_ID,
               principalId: TEST_PRINCIPAL_ID,
@@ -871,6 +943,7 @@ describe("CalculationRunRepositoryLive", () => {
               ],
             })
             yield* repository.start({
+              syncCapture: { requestIds: [] },
               correctionInputs: [],
               id: OTHER_MAINTENANCE_RUN_ID,
               principalId: OTHER_PRINCIPAL_ID,
@@ -924,6 +997,7 @@ describe("CalculationRunRepositoryLive", () => {
       yield* runRepository(
         Effect.flatMap(CalculationRunRepository, (repository) =>
           repository.start({
+            syncCapture: { requestIds: [] },
             correctionInputs: [],
             id: FIFTH_RUN_ID,
             principalId: TEST_PRINCIPAL_ID,
@@ -1139,6 +1213,7 @@ describe("CalculationRunRepositoryLive", () => {
         Effect.flatMap(CalculationRunRepository, (repository) =>
           Effect.gen(function* () {
             yield* repository.start({
+              syncCapture: { requestIds: [] },
               correctionInputs: [],
               id: RECOMPUTE_RUN_ID,
               principalId: TEST_PRINCIPAL_ID,
@@ -2029,6 +2104,8 @@ describe("CalculationRunRepositoryLive", () => {
           const write = () =>
             Effect.match(
               repository.persist({
+                writeMode: "atomic",
+                syncCapture: { requestIds: [] },
                 correctionInputs: [],
                 id: RUN_ID,
                 principalId: TEST_PRINCIPAL_ID,

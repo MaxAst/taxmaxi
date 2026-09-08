@@ -19,7 +19,7 @@ import {
   type ValuationFact,
 } from "@my/core/accounting"
 import { createHash } from "node:crypto"
-import { eq, sql } from "drizzle-orm"
+import { and, eq, sql } from "drizzle-orm"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
@@ -32,6 +32,7 @@ import {
   type CalculationRunResult,
   InputLedgerRevision,
   CalculationRunRepository,
+  CalculationSyncRequestId,
   ValuationRevision,
 } from "../services/CalculationRunRepository.ts"
 import {
@@ -185,6 +186,20 @@ const make = Effect.gen(function* () {
             reportingCurrency: params.reportingCurrency,
             occurredBefore: germanTaxYearEndExclusive(params.taxYear).toDate(),
           })
+          const requests = yield* tx
+            .select({ id: schema.calculationSyncRequests.id })
+            .from(schema.calculationSyncRequests)
+            .where(
+              and(
+                eq(schema.calculationSyncRequests.principalId, params.principalId),
+                eq(schema.calculationSyncRequests.jurisdiction, params.jurisdiction),
+                eq(schema.calculationSyncRequests.taxYear, params.taxYear),
+                eq(schema.calculationSyncRequests.reportingCurrency, params.reportingCurrency)
+              )
+            )
+          const syncCapture = {
+            requestIds: requests.map(({ id }) => CalculationSyncRequestId.make(id)),
+          }
           const inputLedgerRevision = makeLedgerRevision({
             snapshotTransactionId,
             snapshotVisibility,
@@ -195,7 +210,7 @@ const make = Effect.gen(function* () {
             correctionInputs: factualLedger.correctionInputs,
           })
           const valuationRevision = makeValuationRevision(factualLedger.valuationFacts)
-          return { factualLedger, inputLedgerRevision, valuationRevision }
+          return { factualLedger, inputLedgerRevision, valuationRevision, syncCapture }
         })
       )
       .pipe(
@@ -228,6 +243,7 @@ const make = Effect.gen(function* () {
         valuationRevision: snapshot.valuationRevision,
         custodyUnitMembership: snapshot.factualLedger.custodyUnitMembership,
         correctionInputs: snapshot.factualLedger.correctionInputs,
+        syncCapture: snapshot.syncCapture,
       })
 
       return yield* calculate({
@@ -249,6 +265,7 @@ const make = Effect.gen(function* () {
                 }
 
           return calculationRunRepository.persist({
+            writeMode: "finalize_started",
             id: params.id,
             principalId: params.principalId,
             reportingCurrency: params.reportingCurrency,
@@ -256,6 +273,7 @@ const make = Effect.gen(function* () {
             valuationRevision: snapshot.valuationRevision,
             result: combinedResult,
             correctionInputs: snapshot.factualLedger.correctionInputs,
+            syncCapture: snapshot.syncCapture,
           })
         }),
         Effect.onError((originalCause) =>

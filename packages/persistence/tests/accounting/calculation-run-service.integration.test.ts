@@ -204,6 +204,29 @@ beforeEach(() =>
 )
 
 describe("CalculationRunServiceLive", () => {
+  it.effect("records explicit empty sync capture for a new accounting snapshot", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => recompute(FIRST_RUN_ID))
+      const stored = yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const markers = yield* db
+              .select({ runId: schema.calculationRunSyncCaptures.runId })
+              .from(schema.calculationRunSyncCaptures)
+              .where(eq(schema.calculationRunSyncCaptures.runId, FIRST_RUN_ID))
+            const links = yield* db
+              .select({ requestId: schema.calculationRunSyncRequests.requestId })
+              .from(schema.calculationRunSyncRequests)
+              .where(eq(schema.calculationRunSyncRequests.runId, FIRST_RUN_ID))
+            return { markers, links }
+          })
+        )
+      )
+      expect(stored).toEqual({ markers: [{ runId: FIRST_RUN_ID }], links: [] })
+    })
+  )
+
   it.effect("retains post-cutoff replace and withdrawal records in a relevant audited stream", () =>
     Effect.gen(function* () {
       const fixture = yield* Effect.promise(() => runPg(seedCorrectionMovement))
