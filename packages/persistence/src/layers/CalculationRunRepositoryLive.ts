@@ -21,6 +21,7 @@ import {
   ne,
   notExists,
   sql,
+  type SQLWrapper,
 } from "drizzle-orm"
 import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
@@ -37,6 +38,7 @@ import {
   CalculationSyncAttemptId,
   CalculationSyncJobNotFoundError,
   type CalculationSyncWork,
+  type CalculationSyncClaim,
   type CalculationSyncStatus,
   type CalculationSyncCoveringRun,
   CalculationRunRepository,
@@ -66,6 +68,17 @@ const writeBatches = <Row, Error, Requirements>(
       }
     }
   })
+
+// Bind large ID sets as one JSON value so PostgreSQL's parameter limit does not
+// depend on the number of accepted requests. Callers still order row locks globally.
+const uuidIn = (column: SQLWrapper, ids: ReadonlyArray<string>) =>
+  sql`${column} in (select value::uuid from jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb))`
+
+const exactSyncClaims = (claims: ReadonlyArray<CalculationSyncClaim>) =>
+  sql`exists (select 1 from jsonb_to_recordset(${JSON.stringify(claims)}::jsonb)
+    as owned("requestId" uuid, "attemptId" uuid)
+    where owned."requestId" = ${schema.calculationSyncAttempts.requestId}
+      and owned."attemptId" = ${schema.calculationSyncAttempts.id})`
 
 const resultCurrencies = (result: CalculationRunResult): ReadonlyArray<CurrencyCode> => [
   ...result.allocations.flatMap(({ costBasis }) =>
@@ -413,26 +426,36 @@ const make = Effect.gen(function* () {
             .for("update")
           if (requests.length === 0) return []
           const startedAt = yield* DateTime.nowAsDate
-          const attempts = yield* tx
-            .insert(schema.calculationSyncAttempts)
-            .values(
-              requests.map(({ id }) => ({
-                ...params,
-                requestId: id,
-                runId: null,
-                status: "running" as const,
-                startedAt,
-              }))
-            )
-            .returning({
-              requestId: schema.calculationSyncAttempts.requestId,
-              attemptId: schema.calculationSyncAttempts.id,
-            })
+          const attempts: Array<{ requestId: string; attemptId: string }> = []
+          yield* writeBatches(requests, (batch) =>
+            tx
+              .insert(schema.calculationSyncAttempts)
+              .values(
+                batch.map(({ id }) => ({
+                  ...params,
+                  requestId: id,
+                  runId: null,
+                  status: "running" as const,
+                  startedAt,
+                }))
+              )
+              .returning({
+                requestId: schema.calculationSyncAttempts.requestId,
+                attemptId: schema.calculationSyncAttempts.id,
+              })
+              .pipe(
+                Effect.tap((rows) =>
+                  Effect.sync(() => {
+                    attempts.push(...rows)
+                  })
+                )
+              )
+          )
           yield* tx
             .update(schema.calculationSyncRequests)
             .set({ status: "running" })
             .where(
-              inArray(
+              uuidIn(
                 schema.calculationSyncRequests.id,
                 requests.map(({ id }) => id)
               )
@@ -461,7 +484,7 @@ const make = Effect.gen(function* () {
             .where(
               and(
                 requestScope(params),
-                inArray(
+                uuidIn(
                   schema.calculationSyncRequests.id,
                   params.claims.map(({ requestId }) => requestId)
                 )
@@ -471,32 +494,33 @@ const make = Effect.gen(function* () {
             .for("update")
           const ownedIds = new Set(requests.map(({ id }) => id))
           const completedAt = yield* DateTime.nowAsDate
-          for (const claim of params.claims) {
-            if (!ownedIds.has(claim.requestId)) continue
-            const settled = yield* tx
-              .update(schema.calculationSyncAttempts)
-              .set({ status: "failed", failureCode: params.failureCode, completedAt })
+          const claims = params.claims.filter(({ requestId }) => ownedIds.has(requestId))
+          if (claims.length === 0) return
+          const settled = yield* tx
+            .update(schema.calculationSyncAttempts)
+            .set({ status: "failed", failureCode: params.failureCode, completedAt })
+            .where(
+              and(
+                exactSyncClaims(claims),
+                eq(schema.calculationSyncAttempts.principalId, params.principalId),
+                isNull(schema.calculationSyncAttempts.runId),
+                eq(schema.calculationSyncAttempts.status, "running")
+              )
+            )
+            .returning({ requestId: schema.calculationSyncAttempts.requestId })
+          if (settled.length > 0)
+            yield* tx
+              .update(schema.calculationSyncRequests)
+              .set({ status: "failed" })
               .where(
                 and(
-                  eq(schema.calculationSyncAttempts.id, claim.attemptId),
-                  eq(schema.calculationSyncAttempts.requestId, claim.requestId),
-                  eq(schema.calculationSyncAttempts.principalId, params.principalId),
-                  isNull(schema.calculationSyncAttempts.runId),
-                  eq(schema.calculationSyncAttempts.status, "running")
+                  uuidIn(
+                    schema.calculationSyncRequests.id,
+                    settled.map(({ requestId }) => requestId)
+                  ),
+                  eq(schema.calculationSyncRequests.status, "running")
                 )
               )
-              .returning({ id: schema.calculationSyncAttempts.id })
-            if (settled.length > 0)
-              yield* tx
-                .update(schema.calculationSyncRequests)
-                .set({ status: "failed" })
-                .where(
-                  and(
-                    eq(schema.calculationSyncRequests.id, claim.requestId),
-                    eq(schema.calculationSyncRequests.status, "running")
-                  )
-                )
-          }
         })
       )
       .pipe(
@@ -583,7 +607,7 @@ const make = Effect.gen(function* () {
         .select({ id: schema.principals.id })
         .from(schema.principals)
         .where(
-          inArray(schema.principals.id, [
+          uuidIn(schema.principals.id, [
             ...new Set(staleRuns.map(({ principalId }) => principalId)),
           ])
         )
@@ -601,7 +625,7 @@ const make = Effect.gen(function* () {
         })
         .where(
           and(
-            inArray(
+            uuidIn(
               schema.calculationRuns.id,
               staleRuns.map(({ id }) => id)
             ),
@@ -777,7 +801,7 @@ const make = Effect.gen(function* () {
         .set({ status: "failed", failureCode: CALCULATION_STALE_RECOMPUTED_CODE, completedAt })
         .where(
           and(
-            inArray(
+            uuidIn(
               schema.calculationSyncAttempts.requestId,
               requests.map(({ id }) => id)
             ),
@@ -793,7 +817,7 @@ const make = Effect.gen(function* () {
           .set({ status: "failed" })
           .where(
             and(
-              inArray(
+              uuidIn(
                 schema.calculationSyncRequests.id,
                 attempts.map(({ requestId }) => requestId)
               ),
@@ -976,7 +1000,7 @@ const make = Effect.gen(function* () {
               .from(schema.calculationSyncRequests)
               .where(
                 and(
-                  inArray(schema.calculationSyncRequests.id, [...ids]),
+                  uuidIn(schema.calculationSyncRequests.id, [...ids]),
                   eq(schema.calculationSyncRequests.principalId, scope.principalId),
                   eq(schema.calculationSyncRequests.jurisdiction, scope.jurisdiction),
                   eq(schema.calculationSyncRequests.taxYear, scope.taxYear),
@@ -997,24 +1021,26 @@ const make = Effect.gen(function* () {
       if (new Set(claims.map(({ requestId }) => requestId)).size !== claims.length) {
         return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
       }
-      for (const claim of claims) {
-        if (!requests.some(({ id, status }) => id === claim.requestId && status === "running")) {
-          return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
-        }
+      const runningRequestIds = new Set(
+        requests.filter(({ status }) => status === "running").map(({ id }) => id)
+      )
+      if (claims.some(({ requestId }) => !runningRequestIds.has(requestId))) {
+        return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
+      }
+      if (claims.length > 0) {
         const attached = yield* tx
           .update(schema.calculationSyncAttempts)
           .set({ runId: params.id })
           .where(
             and(
-              eq(schema.calculationSyncAttempts.id, claim.attemptId),
-              eq(schema.calculationSyncAttempts.requestId, claim.requestId),
+              exactSyncClaims(claims),
               eq(schema.calculationSyncAttempts.principalId, params.principalId),
               isNull(schema.calculationSyncAttempts.runId),
               eq(schema.calculationSyncAttempts.status, "running")
             )
           )
           .returning({ id: schema.calculationSyncAttempts.id })
-        if (attached.length !== 1)
+        if (attached.length !== claims.length)
           return yield* new CalculationRunAlreadyStoredError({ runId: params.id })
       }
       const claimed = requests.filter(({ status }) => status === "queued" || status === "failed")
@@ -1034,7 +1060,7 @@ const make = Effect.gen(function* () {
         .update(schema.calculationSyncRequests)
         .set({ status: "running" })
         .where(
-          inArray(
+          uuidIn(
             schema.calculationSyncRequests.id,
             claimed.map(({ id }) => id)
           )
@@ -1114,7 +1140,7 @@ const make = Effect.gen(function* () {
           .set({ status })
           .where(
             and(
-              inArray(
+              uuidIn(
                 schema.calculationSyncRequests.id,
                 attempts.map(({ requestId }) => requestId)
               ),

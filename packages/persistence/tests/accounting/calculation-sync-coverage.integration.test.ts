@@ -38,6 +38,7 @@ import { drizzle } from "../../src/layers/PgClientLive.ts"
 import { schema } from "../../src/schema/index.ts"
 import {
   CalculationRunId,
+  CalculationSyncRequestId,
   CalculationRunRepository,
   type CalculationRunRepositoryShape,
 } from "../../src/services/CalculationRunRepository.ts"
@@ -224,6 +225,47 @@ const repositoryEffect = <A, E>(
 const statusForYear = (taxYear: number, sourceJobId: string) =>
   repositoryEffect((repository) =>
     repository.getSyncStatus({ ...scope, taxYear: TaxYear.make(taxYear), sourceJobId })
+  )
+
+// Size-limit fixture: each queued request explicitly belongs to its own completed job.
+// Joined acceptance tests use completeJob; this isolates repository bulk I/O.
+const seedManyAcceptedRequests = () =>
+  runPg(
+    Effect.gen(function* () {
+      const db = yield* drizzle
+      const acceptedAt = DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z"))
+      const pairs = Array.from({ length: 8200 }, (_, index) => ({
+        jobId: `00000000-0000-4000-8001-${index.toString(16).padStart(12, "0")}`,
+        requestId: `00000000-0000-4000-9001-${index.toString(16).padStart(12, "0")}`,
+      }))
+      yield* db.transaction((tx) =>
+        Effect.gen(function* () {
+          for (let offset = 0; offset < pairs.length; offset += 500) {
+            const chunk = pairs.slice(offset, offset + 500)
+            yield* tx.insert(schema.processingJobs).values(
+              chunk.map((pair) => ({
+                id: pair.jobId,
+                sourceId: TEST_SOURCE_ID,
+                principalId: scope.principalId,
+                status: "completed" as const,
+                completedAt: acceptedAt,
+              }))
+            )
+            yield* tx.insert(schema.calculationSyncRequests).values(
+              chunk.map((pair) => ({
+                ...scope,
+                id: pair.requestId,
+                sourceId: TEST_SOURCE_ID,
+                sourceJobId: pair.jobId,
+                status: "queued" as const,
+                requestedAt: acceptedAt,
+              }))
+            )
+          }
+        })
+      )
+      return pairs.map((pair) => pair.requestId)
+    })
   )
 
 // Clone the migrated template once; beforeEach then clears its seeded assets before our fixtures.
@@ -1000,6 +1042,86 @@ describe("completed sync through worker and durable recovery", () => {
     })
   )
 
+  it.effect("a slow expired 2024 calculation does not age the later 2026 claim", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+      yield* context.runWithLayer({
+        layer: serviceLayer,
+        effect: Effect.flatMap(CalculationRunService, (service) =>
+          service.recompute({
+            ...scope,
+            taxYear: TaxYear.make(2024),
+            id: R0,
+            accountingChoices: [],
+          })
+        ),
+      })
+      const job = yield* Effect.promise(() => completeJob())
+      const reached = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      yield* withWorker(
+        (processor) =>
+          Effect.gen(function* () {
+            const running = yield* Effect.forkChild(Effect.exit(deliver(processor)))
+            yield* Deferred.await(reached)
+            expect((yield* statusForYear(2024, job)).jobs[0]?.work?.status).toBe("running")
+            expect((yield* statusForYear(2026, job)).jobs[0]?.work).toMatchObject({
+              status: "queued",
+              attempts: [],
+            })
+            yield* TestClock.setTime(Date.parse("2026-02-01T00:06:00Z"))
+            const repaired = yield* maintenance(
+              CalculationRecomputeQueue.of({ enqueuePrincipalRecompute: () => Effect.void }),
+              DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:01:00Z"))
+            )
+            expect(repaired.failedStaleRuns).toBe(1)
+            expect((yield* statusForYear(2026, job)).jobs[0]?.work).toMatchObject({
+              status: "queued",
+              attempts: [],
+            })
+            yield* Deferred.succeed(release, undefined)
+            expect(Exit.isFailure(yield* Fiber.join(running))).toBe(true)
+            expect((yield* statusForYear(2024, job)).jobs[0]?.work).toMatchObject({
+              status: "failed",
+              attempts: [{ failureCode: "calculation_stale_recomputed" }],
+            })
+            const later = (yield* statusForYear(2026, job)).jobs[0]
+            expect(later).toMatchObject({
+              activeCoverage: "covered",
+              work: { status: "succeeded", attempts: [{ status: "succeeded" }] },
+            })
+            expect(later?.work?.attempts).toHaveLength(1)
+            const started = yield* Effect.promise(() =>
+              runPg(
+                Effect.flatMap(drizzle, (db) =>
+                  db
+                    .select({ startedAt: schema.calculationSyncAttempts.startedAt })
+                    .from(schema.calculationSyncAttempts)
+                    .where(eq(schema.calculationSyncAttempts.taxYear, 2026))
+                )
+              )
+            )
+            expect(started).toEqual([
+              { startedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:06:00Z")) },
+            ])
+          }).pipe(Effect.ensuring(Deferred.succeed(release, undefined))),
+        {
+          wrapRepository: (repository) => ({
+            ...repository,
+            persist: (params) =>
+              params.result.taxYear === 2024
+                ? Effect.gen(function* () {
+                    yield* Deferred.succeed(reached, undefined)
+                    yield* Deferred.await(release)
+                    return yield* repository.persist(params)
+                  })
+                : repository.persist(params),
+          }),
+        }
+      )
+    })
+  )
+
   it.effect(
     "two consumers and maintenance preserve jobs accepted after the accounting snapshot",
     () =>
@@ -1094,6 +1216,190 @@ describe("completed sync through worker and durable recovery", () => {
       expect(rows.links).toEqual([])
       expect(rows.captures).toHaveLength(1)
     })
+  )
+
+  it.effect("65536 absent captured IDs reject atomically without exceeding SQL bind limits", () =>
+    Effect.gen(function* () {
+      const requestIds = Array.from({ length: 65536 }, (_, index) =>
+        CalculationSyncRequestId.make(
+          `00000000-0000-4000-9002-${index.toString(16).padStart(12, "0")}`
+        )
+      )
+      const repositoryLayer = Layer.effect(
+        CalculationRunRepository,
+        Effect.map(CalculationRunRepository, (repository) =>
+          CalculationRunRepository.of({
+            ...repository,
+            start: (params) => repository.start({ ...params, syncCapture: { requestIds } }),
+          })
+        )
+      ).pipe(Layer.provide(CalculationRunRepositoryLive))
+      const outcome = yield* context
+        .runWithLayer({
+          layer: CalculationRunServiceLive.pipe(
+            Layer.provide(Layer.merge(repositoryLayer, FactualLedgerRepositoryLive))
+          ),
+          effect: recomputeEffect(R1),
+        })
+        .pipe(Effect.result)
+      expect(outcome).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "CalculationRunAlreadyStoredError" },
+      })
+      expect(yield* Effect.promise(() => capturedIds(R1))).toEqual([])
+      const runs = yield* Effect.promise(() =>
+        runPg(
+          Effect.flatMap(drizzle, (db) =>
+            db.select({ id: schema.calculationRuns.id }).from(schema.calculationRuns)
+          )
+        )
+      )
+      expect(runs).toEqual([])
+    })
+  )
+
+  it.effect(
+    "8200 accepted requests survive bulk claim, failure, expiry and snapshot settlement",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+        const requestIds = yield* Effect.promise(seedManyAcceptedRequests)
+        const firstClaims = yield* repositoryEffect((repository) =>
+          repository.claimSyncRequests(scope)
+        )
+        expect(
+          firstClaims
+            .map((claim) => claim.requestId)
+            .sort((left, right) => left.localeCompare(right))
+        ).toEqual(requestIds)
+        yield* repositoryEffect((repository) =>
+          repository.failSyncClaims({
+            ...scope,
+            claims: firstClaims,
+            failureCode: "synthetic_hydration_failure",
+          })
+        )
+        const abandoned = yield* repositoryEffect((repository) =>
+          repository.claimSyncRequests(scope)
+        )
+        expect(
+          abandoned.map((claim) => claim.requestId).sort((left, right) => left.localeCompare(right))
+        ).toEqual(requestIds)
+        yield* TestClock.setTime(Date.parse("2026-02-01T00:06:00Z"))
+        const repaired = yield* repositoryEffect((repository) =>
+          repository.settleStaleAndFindRecomputePrincipals({
+            limit: 10000,
+            staleBefore: DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:01:00Z")),
+          })
+        )
+        expect(repaired.principalIds).toEqual([scope.principalId])
+        const claims = yield* repositoryEffect((repository) => repository.claimSyncRequests(scope))
+        expect(
+          claims.map((claim) => claim.requestId).sort((left, right) => left.localeCompare(right))
+        ).toEqual(requestIds)
+        const computed = yield* context.runWithLayer({
+          layer: serviceLayer,
+          effect: Effect.flatMap(CalculationRunService, (service) =>
+            service.recompute({ ...scope, id: R1, accountingChoices: [], syncClaims: claims })
+          ),
+        })
+        expect(computed.activated).toBe(true)
+        expect(
+          (yield* Effect.promise(() => capturedIds(R1)))
+            .map((row) => row.requestId)
+            .sort((left, right) => left.localeCompare(right))
+        ).toEqual(requestIds)
+        const state = yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return {
+                requests: yield* db
+                  .select({
+                    id: schema.calculationSyncRequests.id,
+                    status: schema.calculationSyncRequests.status,
+                  })
+                  .from(schema.calculationSyncRequests),
+                attempts: yield* db
+                  .select({
+                    id: schema.calculationSyncAttempts.id,
+                    requestId: schema.calculationSyncAttempts.requestId,
+                    status: schema.calculationSyncAttempts.status,
+                    failureCode: schema.calculationSyncAttempts.failureCode,
+                    runId: schema.calculationSyncAttempts.runId,
+                  })
+                  .from(schema.calculationSyncAttempts),
+              }
+            })
+          )
+        )
+        expect(
+          state.requests.map((row) => row.id).sort((left, right) => left.localeCompare(right))
+        ).toEqual(requestIds)
+        expect(state.requests.every((row) => row.status === "succeeded")).toBe(true)
+        expect(
+          state.attempts
+            .filter((row) => row.failureCode === "synthetic_hydration_failure")
+            .map((row) => row.id)
+            .sort((left, right) => left.localeCompare(right))
+        ).toEqual(
+          firstClaims
+            .map((claim) => claim.attemptId)
+            .sort((left, right) => left.localeCompare(right))
+        )
+        expect(
+          state.attempts
+            .filter((row) => row.failureCode === "calculation_stale_recomputed")
+            .map((row) => row.id)
+            .sort((left, right) => left.localeCompare(right))
+        ).toEqual(
+          abandoned.map((claim) => claim.attemptId).sort((left, right) => left.localeCompare(right))
+        )
+        expect(
+          state.attempts
+            .filter((row) => row.status === "succeeded" && row.runId === R1)
+            .map((row) => row.id)
+            .sort((left, right) => left.localeCompare(right))
+        ).toEqual(
+          claims.map((claim) => claim.attemptId).sort((left, right) => left.localeCompare(right))
+        )
+        expect(state.attempts).toHaveLength(24600)
+        const expiredStart = yield* Effect.exit(
+          context.runWithLayer({
+            layer: serviceLayer,
+            effect: Effect.flatMap(CalculationRunService, (service) =>
+              service.recompute({ ...scope, id: R2, accountingChoices: [], syncClaims: abandoned })
+            ),
+          })
+        )
+        expect(Exit.isFailure(expiredStart)).toBe(true)
+        expect(yield* Effect.promise(() => capturedIds(R2))).toEqual([])
+        const rejectedRows = yield* Effect.promise(() =>
+          runPg(
+            Effect.flatMap(drizzle, (db) =>
+              db
+                .select({ id: schema.calculationRuns.id })
+                .from(schema.calculationRuns)
+                .where(eq(schema.calculationRuns.id, R2))
+            )
+          )
+        )
+        expect(rejectedRows).toEqual([])
+        const afterRejectedStart = yield* Effect.promise(() =>
+          runPg(
+            Effect.flatMap(drizzle, (db) =>
+              db
+                .select({
+                  total: sql<number>`count(*)::int`,
+                  succeeded: sql<number>`count(*) filter (where ${schema.calculationSyncAttempts.status} = 'succeeded')::int`,
+                  running: sql<number>`count(*) filter (where ${schema.calculationSyncAttempts.status} = 'running')::int`,
+                })
+                .from(schema.calculationSyncAttempts)
+            )
+          )
+        )
+        expect(afterRejectedStart).toEqual([{ total: 24600, succeeded: 8200, running: 0 }])
+      })
   )
 
   it.effect("bounded maintenance advances past a repeatedly failing principal", () =>

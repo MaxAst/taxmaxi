@@ -250,36 +250,51 @@ const processJob = Effect.fn("worker.calculation.process", {
     reportingCurrency: EUR,
   }
   const requestedTaxYears = yield* calculationRunRepository.listRequestedTaxYears(principalScope)
-  const claimedScopes = yield* Effect.forEach(requestedTaxYears, (taxYear) =>
-    calculationRunRepository
-      .claimSyncRequests({ ...principalScope, taxYear })
-      .pipe(Effect.map((syncClaims) => ({ taxYear, syncClaims })))
+  // Reserve only the scope about to run; later scopes must not age while waiting.
+  const firstRequestedYear = requestedTaxYears[0]
+  const firstClaims =
+    firstRequestedYear === undefined
+      ? []
+      : yield* calculationRunRepository.claimSyncRequests({
+          ...principalScope,
+          taxYear: firstRequestedYear,
+        })
+  const initialHydration = yield* hydrateCoinGeckoDailyEurPrices(payload.principalId).pipe(
+    Effect.result
   )
-  const hydration = yield* hydrateCoinGeckoDailyEurPrices(payload.principalId).pipe(Effect.result)
-  if (Result.isFailure(hydration)) {
-    yield* Effect.forEach(claimedScopes, ({ taxYear, syncClaims }) =>
-      calculationRunRepository.failSyncClaims({
-        ...principalScope,
-        taxYear,
-        claims: syncClaims,
-        failureCode: "calculation_price_hydration_failed",
-      })
-    )
-    return yield* hydration.failure
+  if (firstRequestedYear === undefined && Result.isFailure(initialHydration)) {
+    return yield* initialHydration.failure
   }
   const currentTaxYear = yield* currentGermanTaxYear
   const activeTaxYears = yield* calculationRunRepository.listActiveTaxYears(principalScope)
-  const taxYears = [...new Set([...requestedTaxYears, ...activeTaxYears, currentTaxYear])].sort(
-    (left, right) => left - right
-  )
+  const remainingYears = [...new Set([...requestedTaxYears, ...activeTaxYears, currentTaxYear])]
+    .filter((year) => year !== firstRequestedYear)
+    .sort((left, right) => left - right)
+  const taxYears =
+    firstRequestedYear === undefined ? remainingYears : [firstRequestedYear, ...remainingYears]
   const outcomes = yield* Effect.forEach(
     taxYears,
     (taxYear) =>
       Effect.gen(function* () {
         const runId = CalculationRunId.make(randomUUID())
         const syncClaims =
-          claimedScopes.find((scope) => scope.taxYear === taxYear)?.syncClaims ??
-          (yield* calculationRunRepository.claimSyncRequests({ ...principalScope, taxYear }))
+          taxYear === firstRequestedYear
+            ? firstClaims
+            : yield* calculationRunRepository.claimSyncRequests({ ...principalScope, taxYear })
+        // Stored quotes are reused; each later scope owns work only for its own hydration/run.
+        const hydration =
+          taxYear === taxYears[0]
+            ? initialHydration
+            : yield* hydrateCoinGeckoDailyEurPrices(payload.principalId).pipe(Effect.result)
+        if (Result.isFailure(hydration)) {
+          yield* calculationRunRepository.failSyncClaims({
+            ...principalScope,
+            taxYear,
+            claims: syncClaims,
+            failureCode: "calculation_price_hydration_failed",
+          })
+          return yield* hydration.failure
+        }
         return yield* calculationRunService
           .recompute({
             id: runId,
