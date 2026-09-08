@@ -257,6 +257,9 @@ const seedManyAcceptedRequests = () =>
           `)
         })
       )
+      // Give FK lookups current statistics after this synthetic bulk insert.
+      // Otherwise the empty-table estimate favors scanning every request in the scope.
+      yield* db.execute(sql`ANALYZE calculation_sync_requests`)
       return pairs.map((pair) => pair.requestId)
     })
   )
