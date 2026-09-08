@@ -23,11 +23,13 @@ import { getLocale } from "#/paraglide/runtime"
  * sentence, and at most one action.
  *
  * The wizard owns Start, Continue, and Try again, all through the sync hook's
- * start function (D06). Progress, dismissal, and the credit-recovery billing
- * action stay in the island, so `syncing` and `paused` only point at it. The
- * wizard never renders `lastErrorMessage` or a job's `message` (D05): the
- * failed step has one generic sentence, and no such text reaches this
- * component.
+ * start function (D06). Progress and dismissal stay in the island, so
+ * `syncing` only points at it. In `paused` the island owns the billing action
+ * while it shows its `credit_required` item; once that item is dismissed, or
+ * before one exists, the wizard offers Choose a plan or Buy credits itself
+ * (D03, T05 review). The wizard never renders `lastErrorMessage` or a job's
+ * `message` (D05): the failed step has one generic sentence, and no such text
+ * reaches this component.
  */
 
 export type FirstSyncWizardState = Exclude<FirstSyncState, "done">
@@ -62,6 +64,11 @@ export type FirstSyncWizardProps = {
   /** True while a billing retry is in flight; the retry button waits for it. */
   billingRefreshing?: boolean
   createWalletSource?: (walletAddress: string) => Promise<void>
+  /**
+   * True while the island shows an item for the target source. In `paused`
+   * the island then owns the billing action; otherwise the wizard offers it.
+   */
+  islandItemShown: boolean
   onRetryBilling: () => void
   /** Start, Continue, and Try again: one call to the hook's start function for the target source. */
   onStart: () => void
@@ -208,6 +215,7 @@ function StepBody({
   billing,
   billingRefreshing = false,
   createWalletSource,
+  islandItemShown,
   onRetryBilling,
   onStart,
   resolveName,
@@ -236,13 +244,7 @@ function StepBody({
               ? m["app.firstSync.needsCredits.noCredits"]()
               : m["app.firstSync.needsCredits.noPlan"]()}
           </Body>
-          <Button asChild size="sm">
-            <Link to="/app/billing">
-              {subscribed
-                ? m["app.firstSync.needsCredits.buyCredits"]()
-                : m["app.firstSync.needsCredits.choosePlan"]()}
-            </Link>
-          </Button>
+          <BillingLink billing={billing} />
         </div>
       )
     }
@@ -277,10 +279,17 @@ function StepBody({
         </Body>
       )
     case "paused":
+      // The island owns the billing action only while its item is shown. After
+      // a dismissal, or before the reconnect seed has produced an item, the
+      // wizard offers the same action itself (#108 D03, T05 review; D04).
       return (
         <div className="space-y-3">
           <Body>{m["app.firstSync.paused.body"]()}</Body>
-          <p className="text-xs text-muted-foreground">{m["app.firstSync.paused.hint"]()}</p>
+          {islandItemShown ? (
+            <p className="text-xs text-muted-foreground">{m["app.firstSync.paused.hint"]()}</p>
+          ) : (
+            <BillingLink billing={billing} />
+          )}
         </div>
       )
     case "resumable":
@@ -309,6 +318,19 @@ function StepBody({
 
 function Body({ children, className }: { children: ReactNode; className?: string }) {
   return <p className={cn("text-sm text-muted-foreground", className)}>{children}</p>
+}
+
+/** Choose a plan, or Buy credits with an active or trialing subscription (#108 D04). */
+function BillingLink({ billing }: { billing: FirstSyncBilling }) {
+  return (
+    <Button asChild size="sm">
+      <Link to="/app/billing">
+        {hasActiveSubscription(billing)
+          ? m["app.firstSync.needsCredits.buyCredits"]()
+          : m["app.firstSync.needsCredits.choosePlan"]()}
+      </Link>
+    </Button>
+  )
 }
 
 function CreditsBadge({ billing }: { billing: FirstSyncBilling }) {

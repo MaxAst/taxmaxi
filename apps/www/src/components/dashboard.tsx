@@ -79,6 +79,35 @@ function isCompletionConfirmed(queryClient: QueryClient, pending: PendingComplet
   return state?.status === "success" && state.dataUpdateCount > pending.dataUpdateCount
 }
 
+/** The sync hook's item statuses by source id, as one render saw them. */
+type ItemStatuses = ReadonlyMap<string, SourceSyncJob["status"]>
+
+const NO_ITEM_STATUSES: ItemStatuses = new Map()
+
+function toItemStatuses(items: ReadonlyArray<{ id: string; status: SourceSyncJob["status"] }>) {
+  return new Map(items.map((item) => [item.id, item.status]))
+}
+
+function sameItemStatuses(previous: ItemStatuses, next: ItemStatuses): boolean {
+  return (
+    previous.size === next.size &&
+    [...previous].every(([sourceId, status]) => next.get(sourceId) === status)
+  )
+}
+
+/**
+ * True when an item the previous render showed in another status is now
+ * `credit_required`: the sync ran out of credits, or a start was refused. A
+ * new item that arrives as `credit_required` (the reload seed) is not a move;
+ * the loader read billing right before it.
+ */
+function movedIntoCreditRequired(previous: ItemStatuses, next: ItemStatuses): boolean {
+  return [...next].some(([sourceId, status]) => {
+    const before = previous.get(sourceId)
+    return status === "credit_required" && before !== undefined && before !== "credit_required"
+  })
+}
+
 export function Dashboard({
   accounts = mockAccounts,
   createWalletSource,
@@ -305,6 +334,8 @@ export function Dashboard({
         { sourceId, dataUpdateCount: getOverviewDataUpdateCount(queryClient, sourceId) },
       ])
       void queryClient.invalidateQueries({ queryKey: ["taxmaxi", "portfolio"] })
+      // The sync spent credits; the cached balance is behind (#108 D03, T05 review).
+      void queryClient.invalidateQueries({ queryKey: queryKeys.billingStatus() })
       await onSourceSyncCompleted?.(sourceId)
     },
     [onSourceSyncCompleted, queryClient]
@@ -402,6 +433,34 @@ export function Dashboard({
     startSourceSync,
   })
 
+  // A move into `credit_required` means the sync spent the balance the cache
+  // still shows. Billing is re-read before the wizard may offer Continue, and
+  // the move is caught during render so no frame derives `resumable` from the
+  // old balance (#108 D03, T05 review). React re-runs the render right away
+  // when state is set here, before anything is shown.
+  const [seenItemStatuses, setSeenItemStatuses] = useState(NO_ITEM_STATUSES)
+  const [billingRefreshPending, setBillingRefreshPending] = useState(false)
+  const itemStatuses = useMemo(() => toItemStatuses(activeSyncs), [activeSyncs])
+  if (!sameItemStatuses(seenItemStatuses, itemStatuses)) {
+    setSeenItemStatuses(itemStatuses)
+    if (movedIntoCreditRequired(seenItemStatuses, itemStatuses)) {
+      setBillingRefreshPending(true)
+    }
+  }
+
+  useEffect(() => {
+    if (!billingRefreshPending) return
+    let subscribed = true
+    // Resolves once the refetch has settled, with a result or a failure; a
+    // failure then shows as `billing_unknown` through the error state below.
+    void queryClient.invalidateQueries({ queryKey: queryKeys.billingStatus() }).then(() => {
+      if (subscribed) setBillingRefreshPending(false)
+    })
+    return () => {
+      subscribed = false
+    }
+  }, [billingRefreshPending, queryClient])
+
   // The replay block only makes sense for a selected source that has synced
   // at least once; before that there is no cached raw data to replay.
   const replayAccount = useMemo(() => {
@@ -435,14 +494,19 @@ export function Dashboard({
     () =>
       getFirstSyncState({
         billing,
+        billingRefreshPending,
         items: activeSyncs,
         overviews: sourceOverviews,
         pendingCompletionSourceIds,
       }),
-    [activeSyncs, billing, pendingCompletionSourceIds, sourceOverviews]
+    [activeSyncs, billing, billingRefreshPending, pendingCompletionSourceIds, sourceOverviews]
   )
   const firstSyncTarget =
     firstSync.targetSourceId === null ? undefined : accountsById.get(firstSync.targetSourceId)
+  // While the island shows an item for the target, it owns the billing action
+  // in `paused`; after a dismissal the wizard offers it (#108 D06, D03 T05 review).
+  const islandShowsTarget =
+    firstSync.targetSourceId !== null && itemStatuses.has(firstSync.targetSourceId)
 
   // Start, Continue, and Try again all go through the hook's start function
   // for the target source (#108 D06); the hook ignores a second click while
@@ -470,6 +534,7 @@ export function Dashboard({
         billing={billing}
         billingRefreshing={billingQuery.isFetching}
         createWalletSource={createWalletSource === undefined ? undefined : connectWalletSource}
+        islandItemShown={islandShowsTarget}
         onRetryBilling={() => void billingQuery.refetch()}
         onStart={startFirstSync}
         resolveName={resolveName}

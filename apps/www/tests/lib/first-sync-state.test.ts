@@ -286,6 +286,60 @@ describe("getFirstSyncState precedence", () => {
   })
 })
 
+describe("getFirstSyncState while billing is re-read after a credit stop (#108 D03, T05 review)", () => {
+  it("keeps a credit_required item paused although the cached balance still shows credits", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(1, "active"),
+        billingRefreshPending: true,
+        items: [item("credit_required")],
+        overviews: [overview(SOURCE_A)],
+      }).state
+    ).toBe("paused")
+  })
+
+  it("keeps a credit_required overview job paused as well", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(1),
+        billingRefreshPending: true,
+        items: [],
+        overviews: [overview(SOURCE_A, { jobId: "job-1", status: "credit_required" })],
+      }).state
+    ).toBe("paused")
+  })
+
+  it("offers resumable again once the re-read has settled with credits", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(3, "active"),
+        billingRefreshPending: false,
+        items: [item("credit_required")],
+        overviews: [overview(SOURCE_A)],
+      }).state
+    ).toBe("resumable")
+  })
+
+  it("does not change other rows", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(3),
+        billingRefreshPending: true,
+        items: [],
+        overviews: [overview(SOURCE_A)],
+      }).state
+    ).toBe("ready")
+    expect(
+      getFirstSyncState({
+        billing: null,
+        billingRefreshPending: true,
+        items: [item("credit_required")],
+        overviews: [overview(SOURCE_A)],
+      }).state
+    ).toBe("billing_unknown")
+  })
+})
+
 describe("hasActiveSubscription (#108 D04)", () => {
   it.each([
     ["active", true],

@@ -1185,6 +1185,101 @@ describe("Dashboard first-sync body (#108 T05)", () => {
     expect(billingReads).toBe(2)
   })
 
+  // A fresh element per render, so React re-renders the dashboard and the
+  // hook mock hands over the changed items.
+  const dashboardTree = (overviews: ReadonlyArray<SourceOverview>) => (
+    <QueryClientProvider client={queryClient}>
+      <Dashboard
+        accounts={overviews.map(toAccount)}
+        createWalletSource={vi.fn()}
+        sourceOverviews={overviews}
+      />
+    </QueryClientProvider>
+  )
+
+  const billingKey = () => queries.billingStatus(testTaxMaxi).queryKey
+  const pausedHeading = () =>
+    screen.queryByRole("heading", { name: "Sync paused — more credits needed" })
+  const continueButton = () => screen.queryByRole("button", { name: "Continue my first sync" })
+
+  /** Runs a first sync that stops for credits while the cache still says `credits: 1`. */
+  const stopForCredits = async (creditsAfterStop: number) => {
+    const overviews = [sourceOverview()]
+    const view = render(dashboardTree(overviews))
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(queryClient.getQueryData(billingKey())).toMatchObject({ credits: 1 })
+
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "running", progress: 40 },
+    ]
+    view.rerender(dashboardTree(overviews))
+    expect(screen.getByRole("heading", { name: "Importing your Coinbase history" })).toBeTruthy()
+
+    // The sync spends the last credit; the server pauses the job.
+    respondBilling = async () => billingStatus(creditsAfterStop)
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "credit_required", progress: 100 },
+    ]
+    view.rerender(dashboardTree(overviews))
+
+    // The cache still says 1 credit, but the wizard does not offer Continue
+    // from it: billing is re-read first.
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+    expect(screen.getByText("Add credits from the notice at the top of the page.")).toBeTruthy()
+    await waitFor(() => expect(billingReads).toBe(2))
+    await waitFor(() =>
+      expect(queryClient.getQueryData(billingKey())).toMatchObject({ credits: creditsAfterStop })
+    )
+    return view
+  }
+
+  it("re-reads billing when the sync stops for credits and stays paused when none are left", async () => {
+    await stopForCredits(0)
+
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+  })
+
+  it("offers Continue only after the re-read billing shows credits", async () => {
+    await stopForCredits(3)
+
+    expect(await screen.findByRole("heading", { name: "Ready to continue" })).toBeTruthy()
+    expect(screen.getByText("3 credits available")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Continue my first sync" }))
+    expect(syncState.onSourceSync).toHaveBeenCalledTimes(1)
+    expect(syncState.onSourceSync.mock.calls[0]?.[0]).toMatchObject({ id: SOURCE_A })
+  })
+
+  it("offers the billing action itself once the island's credit_required item is dismissed", async () => {
+    respondBilling = async () => billingStatus(0)
+    const overviews = [sourceOverview({ jobId: "job-1", status: "credit_required" })]
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "credit_required", progress: 100 },
+    ]
+    const view = render(dashboardTree(overviews))
+
+    expect(await screen.findByRole("heading", { name: "Sync paused — more credits needed" }))
+    expect(screen.getByText("Add credits from the notice at the top of the page.")).toBeTruthy()
+    expect(screen.queryByRole("link", { name: "Choose a plan" })).toBeNull()
+
+    // The user dismisses the island's notice; the hook drops the item.
+    syncState.activeSyncs = []
+    view.rerender(dashboardTree(overviews))
+
+    expect(pausedHeading()).toBeTruthy()
+    expect(screen.getByRole("link", { name: "Choose a plan" }).getAttribute("href")).toBe(
+      "/app/billing"
+    )
+    expect(screen.queryByText("Add credits from the notice at the top of the page.")).toBeNull()
+    expect(screen.queryAllByRole("button")).toEqual([])
+    // An item that arrives as credit_required (the reload seed) is no credit
+    // stop: the loader read billing right before it, so no second read.
+    expect(billingReads).toBe(1)
+  })
+
   it("derives syncing from a processing overview job on the first render, before the hook has an item", () => {
     queryClient.setQueryData(queries.billingStatus(testTaxMaxi).queryKey, billingStatus(5))
 
@@ -1301,5 +1396,7 @@ describe("Dashboard first-sync body (#108 T05)", () => {
     expect(screen.queryByRole("status", { name: "First sync updates" })).toBeNull()
     expect(overviewReads).toBe(2)
     expect(queryClient.getQueryData(queries.billingStatus(testTaxMaxi).queryKey)).toBeDefined()
+    // The completed sync spent credits, so the completion re-reads billing.
+    await waitFor(() => expect(billingReads).toBe(2))
   })
 })

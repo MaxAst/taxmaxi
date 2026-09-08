@@ -59,12 +59,14 @@ const renderWizard = ({
   billing: billingStatus = billing(1),
   billingRefreshing = false,
   createWalletSource,
+  islandItemShown = false,
   sourceName = "Coinbase",
   state,
 }: {
   readonly billing?: FirstSyncBilling
   readonly billingRefreshing?: boolean
   readonly createWalletSource?: (walletAddress: string) => Promise<void>
+  readonly islandItemShown?: boolean
   readonly sourceName?: string | null
   readonly state: FirstSyncWizardState
 }) => {
@@ -74,6 +76,7 @@ const renderWizard = ({
     billing: billingStatus,
     billingRefreshing,
     createWalletSource,
+    islandItemShown,
     onRetryBilling,
     onStart,
     sourceName,
@@ -199,14 +202,46 @@ describe("FirstSyncWizard copy and actions per state", () => {
     expect(screen.queryAllByRole("link")).toEqual([])
   })
 
-  it("paused explains safely, points at the island, and offers no Start", () => {
-    renderWizard({ billing: billing(0, "active"), state: "paused" })
+  it("paused with the island's item shown explains safely, points at the island, and offers no Start", () => {
+    renderWizard({ billing: billing(0, "active"), islandItemShown: true, state: "paused" })
 
     expect(screen.getByRole("heading", { name: "Sync paused — more credits needed" })).toBeTruthy()
     expect(screen.getByText("Add credits from the notice at the top of the page.")).toBeTruthy()
     expect(buttons()).toEqual([])
     expect(screen.queryAllByRole("link")).toEqual([])
   })
+
+  it("paused after the island's item is dismissed offers Choose a plan itself and no Start", () => {
+    const { onStart } = renderWizard({
+      billing: billing(0),
+      islandItemShown: false,
+      state: "paused",
+    })
+
+    expect(screen.getByRole("heading", { name: "Sync paused — more credits needed" })).toBeTruthy()
+    expect(screen.queryByText("Add credits from the notice at the top of the page.")).toBeNull()
+    expect(screen.getByRole("link", { name: "Choose a plan" }).getAttribute("href")).toBe(
+      "/app/billing"
+    )
+    expect(buttons()).toEqual([])
+    expect(onStart).not.toHaveBeenCalled()
+  })
+
+  it.each(["active", "trialing"])(
+    "paused without an island item and a %s subscription offers Buy credits",
+    (subscriptionStatus) => {
+      renderWizard({
+        billing: billing(0, subscriptionStatus),
+        islandItemShown: false,
+        state: "paused",
+      })
+
+      expect(screen.getByRole("link", { name: "Buy credits" }).getAttribute("href")).toBe(
+        "/app/billing"
+      )
+      expect(screen.queryByRole("link", { name: "Choose a plan" })).toBeNull()
+    }
+  )
 
   it("resumable offers Continue, which starts once", () => {
     const { onStart } = renderWizard({ billing: billing(40, "active"), state: "resumable" })

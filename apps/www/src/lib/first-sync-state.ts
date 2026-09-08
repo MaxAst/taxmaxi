@@ -74,17 +74,26 @@ const NO_PENDING_COMPLETIONS: ReadonlySet<string> = new Set()
  *    job status decides the first paint)
  * 5. billing failed to load → `billing_unknown`
  * 6. the target's item is `credit_required`, or no item yet and the overview's
- *    latest job is `credit_required` → `paused` or `resumable`
+ *    latest job is `credit_required` → `paused` or `resumable`; while billing
+ *    is being re-read after that stop, always `paused`
  * 7. the target's item failed, or the latest sync failed with no item → `failed`
  * 8. otherwise `ready` or `needs_credits`
  */
 export function getFirstSyncState({
   billing,
+  billingRefreshPending = false,
   items,
   overviews,
   pendingCompletionSourceIds = NO_PENDING_COMPLETIONS,
 }: {
   readonly billing: FirstSyncBilling
+  /**
+   * True while billing is being re-read because a sync stopped for credits.
+   * The cached balance predates that stop, so a `credit_required` job reads
+   * as `paused`, never `resumable`, until the read settles (#108 D03, T05
+   * review). Other rows are not affected.
+   */
+  readonly billingRefreshPending?: boolean
   readonly items: ReadonlyArray<FirstSyncItem>
   readonly overviews: ReadonlyArray<FirstSyncSourceOverview>
   /**
@@ -110,6 +119,7 @@ export function getFirstSyncState({
   return {
     state: getTargetState({
       billing,
+      billingRefreshPending,
       completionPending: pendingCompletionSourceIds.has(targetSourceId),
       item,
       latestSync: target.latestSync,
@@ -120,11 +130,13 @@ export function getFirstSyncState({
 
 function getTargetState({
   billing,
+  billingRefreshPending,
   completionPending,
   item,
   latestSync,
 }: {
   readonly billing: FirstSyncBilling
+  readonly billingRefreshPending: boolean
   readonly completionPending: boolean
   readonly item: FirstSyncItem | undefined
   readonly latestSync: FirstSyncSourceOverview["latestSync"]
@@ -148,7 +160,7 @@ function getTargetState({
   }
 
   if (jobStatus === "credit_required") {
-    return hasUsableCredits(billing) ? "resumable" : "paused"
+    return !billingRefreshPending && hasUsableCredits(billing) ? "resumable" : "paused"
   }
 
   if (item?.status === "failed" || latestSync.status === "failed") {
