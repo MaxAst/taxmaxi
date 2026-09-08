@@ -29,7 +29,6 @@ import * as Deferred from "effect/Deferred"
 import * as Fiber from "effect/Fiber"
 import * as Exit from "effect/Exit"
 import { vi } from "vitest"
-import { SourceSyncJobRepositoryLive } from "../../persistence/src/layers/SourceSyncJobRepositoryLive.ts"
 import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
@@ -531,7 +530,7 @@ const calculationStatus = (sourceJobId?: string, taxYear = 2024) =>
   )
 
 const completeCalculationSourceJob = context.runWithLayer({
-  layer: SourceSyncJobRepositoryLive,
+  layer: RepositoriesLive,
   effect: Effect.gen(function* () {
     const repository = yield* SourceSyncJobRepository
     const job = yield* repository.createOrReuseJob({
@@ -1138,7 +1137,7 @@ describe("PortfolioApiLive", () => {
           sourceId: "00000000-0000-4000-8000-000000000583",
         }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
         const jobs = yield* context.runWithLayer({
-          layer: SourceSyncJobRepositoryLive,
+          layer: RepositoriesLive,
           effect: Effect.gen(function* () {
             const repository = yield* SourceSyncJobRepository
             const owned = yield* repository.createOrReuseJob({
@@ -1195,7 +1194,7 @@ describe("PortfolioApiLive", () => {
         expect(responses.other).toEqual(responses.absent)
         expect(yield* readCalculationEvidence).toEqual(beforeReads)
         yield* context.runWithLayer({
-          layer: SourceSyncJobRepositoryLive,
+          layer: RepositoriesLive,
           effect: Effect.gen(function* () {
             const repository = yield* SourceSyncJobRepository
             const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z"))
