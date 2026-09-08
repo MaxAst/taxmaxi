@@ -748,9 +748,10 @@ const make = Effect.gen(function* () {
 
   /**
    * Reuse the user's active request or start a fresh one. The repository does
-   * both under the user's write lock: an active request gets `lastSentAt` set
-   * to now and keeps its `sendCount`; otherwise a fresh request is written with
-   * `sendCount` 1. The caller hands the returned code to delivery.
+   * both under the user's write lock and takes the send time inside it: an
+   * active request gets `lastSentAt` set to that time and keeps its
+   * `sendCount`; otherwise a fresh request is written with `sendCount` 1. The
+   * caller hands the returned code to delivery.
    */
   const startOrReuseEmailVerificationRequest = ({
     userId,
@@ -770,7 +771,6 @@ const make = Effect.gen(function* () {
           email: sanitizeEmail(email),
           code,
           expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
-          sentAt: now,
         })
         .pipe(Effect.mapError((cause) => authProcessingError("start-email-verification", cause)))
     })
@@ -795,7 +795,6 @@ const make = Effect.gen(function* () {
           replacementId: id,
           code,
           expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
-          sentAt: now,
         })
         .pipe(Effect.mapError((cause) => authProcessingError("renew-email-verification", cause)))
     })

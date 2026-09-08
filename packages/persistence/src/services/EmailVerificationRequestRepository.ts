@@ -42,8 +42,9 @@ export interface EmailVerificationRequestInsert {
  * already have an active request.
  *
  * `id`, `code`, and `expiresAt` are used only when no active request exists
- * and a fresh one is inserted. `sentAt` is when the code is handed to
- * delivery; it also decides which existing request still counts as active.
+ * and a fresh one is inserted. The send time is taken by the repository inside
+ * the user's write lock; it also decides which existing request still counts
+ * as active.
  */
 export interface EmailVerificationRequestStart {
   readonly id: EmailVerificationRequestId
@@ -51,22 +52,20 @@ export interface EmailVerificationRequestStart {
   readonly email: Email
   readonly code: EmailVerificationCode
   readonly expiresAt: Timestamp
-  readonly sentAt: Timestamp
 }
 
 /**
  * EmailVerificationRequestRenewal - Input to replace a request with a fresh code.
  *
  * `id` names the request being replaced. The replacement keeps its user and
- * email, takes the replaced request's `sendCount` plus one, and records
- * `sentAt` as the time the new code is handed to delivery.
+ * email, takes the replaced request's `sendCount` plus one, and records the
+ * send time taken by the repository inside the user's write lock.
  */
 export interface EmailVerificationRequestRenewal {
   readonly id: EmailVerificationRequestId
   readonly replacementId: EmailVerificationRequestId
   readonly code: EmailVerificationCode
   readonly expiresAt: Timestamp
-  readonly sentAt: Timestamp
 }
 
 /**
@@ -87,12 +86,12 @@ export interface EmailVerificationRequestRepositoryService {
    * Reuse the user's active request or start a fresh one, in one transaction
    * under the user's write lock.
    *
-   * When an unexpired request exists, its `lastSentAt` moves to `sentAt`
-   * unless the stored value is already later (it never moves backward), and
-   * `sendCount` stays; the returned request carries the existing id, code,
-   * and stored `lastSentAt`. Otherwise the user's expired rows are deleted and
-   * a fresh request is inserted with `sendCount` 1. The caller sends the
-   * returned request's code.
+   * The send time is taken once inside the lock and decides both which
+   * request is still active and the written `lastSentAt`. When an unexpired
+   * request exists, its `lastSentAt` moves to that time and `sendCount` stays;
+   * the returned request carries the existing id and code. Otherwise the
+   * user's expired rows are deleted and a fresh request is inserted with
+   * `sendCount` 1. The caller sends the returned request's code.
    */
   readonly startOrReuse: (
     start: EmailVerificationRequestStart
@@ -103,9 +102,9 @@ export interface EmailVerificationRequestRepositoryService {
    * write lock.
    *
    * Inserts the replacement with the replaced row's `sendCount` plus one and
-   * the later of the replaced row's `lastSentAt` and `sentAt`, then deletes
-   * the replaced row. Returns none when the request is gone, which is also
-   * what the second of two concurrent renewals sees.
+   * the send time taken inside the lock as `lastSentAt`, then deletes the
+   * replaced row. Returns none when the request is gone, which is also what
+   * the second of two concurrent renewals sees.
    */
   readonly renew: (
     renewal: EmailVerificationRequestRenewal

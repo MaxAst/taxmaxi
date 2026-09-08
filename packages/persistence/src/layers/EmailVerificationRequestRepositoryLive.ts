@@ -65,13 +65,6 @@ const rowToEmailVerificationRequest = (
   )
 }
 
-/**
- * `last_sent_at` never moves backward. A writer captures its `sentAt` before
- * it takes the user lock, so a slow writer can reach the row after a faster
- * one already recorded a later send.
- */
-const laterOf = (stored: Date, sentAt: Date): Date => (sentAt > stored ? sentAt : stored)
-
 const make = Effect.gen(function* () {
   const db = yield* drizzle
 
@@ -151,17 +144,16 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           yield* lockUserRequests({ executor: tx, userId: start.userId })
 
+          // The send time is taken after the lock, so it is later than the
+          // previous holder's write and decides "active" as of this send.
           const now = yield* DateTime.nowAsDate
           const [active] = yield* tx
-            .select({
-              id: emailVerificationRequests.id,
-              lastSentAt: emailVerificationRequests.lastSentAt,
-            })
+            .select({ id: emailVerificationRequests.id })
             .from(emailVerificationRequests)
             .where(
               and(
                 eq(emailVerificationRequests.userId, start.userId),
-                gt(emailVerificationRequests.expiresAt, start.sentAt.toDate())
+                gt(emailVerificationRequests.expiresAt, now)
               )
             )
             .orderBy(desc(emailVerificationRequests.createdAt))
@@ -171,7 +163,7 @@ const make = Effect.gen(function* () {
             const [reused] = yield* tx
               .update(emailVerificationRequests)
               .set({
-                lastSentAt: laterOf(active.lastSentAt, start.sentAt.toDate()),
+                lastSentAt: now,
                 updatedAt: now,
               })
               .where(eq(emailVerificationRequests.id, active.id))
@@ -199,7 +191,7 @@ const make = Effect.gen(function* () {
             code: start.code,
             expiresAt: start.expiresAt.toDate(),
             sendCount: 1,
-            lastSentAt: start.sentAt.toDate(),
+            lastSentAt: now,
             createdAt: now,
             updatedAt: now,
           })
@@ -211,7 +203,7 @@ const make = Effect.gen(function* () {
             code: start.code,
             expiresAt: start.expiresAt,
             sendCount: 1,
-            lastSentAt: start.sentAt,
+            lastSentAt: Timestamp.make({ epochMillis: now.getTime() }),
             createdAt: Timestamp.make({ epochMillis: now.getTime() }),
             updatedAt: Timestamp.make({ epochMillis: now.getTime() }),
           })
@@ -248,9 +240,9 @@ const make = Effect.gen(function* () {
             return Option.none()
           }
 
+          // Taken after the lock, like in `startOrReuse`.
           const now = yield* DateTime.nowAsDate
           const sendCount = locked.sendCount + 1
-          const lastSentAt = laterOf(locked.lastSentAt, renewal.sentAt.toDate())
 
           yield* tx.insert(emailVerificationRequests).values({
             id: renewal.replacementId,
@@ -259,7 +251,7 @@ const make = Effect.gen(function* () {
             code: renewal.code,
             expiresAt: renewal.expiresAt.toDate(),
             sendCount,
-            lastSentAt,
+            lastSentAt: now,
             createdAt: now,
             updatedAt: now,
           })
@@ -276,7 +268,7 @@ const make = Effect.gen(function* () {
               code: renewal.code,
               expiresAt: renewal.expiresAt,
               sendCount,
-              lastSentAt: Timestamp.make({ epochMillis: lastSentAt.getTime() }),
+              lastSentAt: Timestamp.make({ epochMillis: now.getTime() }),
               createdAt: Timestamp.make({ epochMillis: now.getTime() }),
               updatedAt: Timestamp.make({ epochMillis: now.getTime() }),
             })
