@@ -1259,7 +1259,7 @@ describe("completed sync through worker and durable recovery", () => {
   )
 
   it.effect(
-    "8200 accepted requests survive bulk claim, failure, expiry and snapshot settlement",
+    "8200 accepted requests retain exact failed history through bulk claim and expiry",
     () =>
       Effect.gen(function* () {
         yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
@@ -1293,6 +1293,65 @@ describe("completed sync through worker and durable recovery", () => {
           })
         )
         expect(repaired.principalIds).toEqual([scope.principalId])
+        const state = yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return {
+                requests: yield* db
+                  .select({
+                    id: schema.calculationSyncRequests.id,
+                    status: schema.calculationSyncRequests.status,
+                  })
+                  .from(schema.calculationSyncRequests),
+                attempts: yield* db
+                  .select({
+                    id: schema.calculationSyncAttempts.id,
+                    requestId: schema.calculationSyncAttempts.requestId,
+                    status: schema.calculationSyncAttempts.status,
+                    failureCode: schema.calculationSyncAttempts.failureCode,
+                    runId: schema.calculationSyncAttempts.runId,
+                  })
+                  .from(schema.calculationSyncAttempts),
+              }
+            })
+          )
+        )
+        expect(
+          state.requests.map((row) => row.id).sort((left, right) => left.localeCompare(right))
+        ).toEqual(requestIds)
+        expect(state.requests.every((row) => row.status === "failed")).toBe(true)
+        expect(state.attempts.every((row) => row.status === "failed" && row.runId === null)).toBe(
+          true
+        )
+        expect(
+          state.attempts
+            .filter((row) => row.failureCode === "synthetic_hydration_failure")
+            .map((row) => row.id)
+            .sort((left, right) => left.localeCompare(right))
+        ).toEqual(
+          firstClaims
+            .map((claim) => claim.attemptId)
+            .sort((left, right) => left.localeCompare(right))
+        )
+        expect(
+          state.attempts
+            .filter((row) => row.failureCode === "calculation_stale_recomputed")
+            .map((row) => row.id)
+            .sort((left, right) => left.localeCompare(right))
+        ).toEqual(
+          abandoned.map((claim) => claim.attemptId).sort((left, right) => left.localeCompare(right))
+        )
+        expect(state.attempts).toHaveLength(16400)
+      })
+  )
+
+  it.effect(
+    "8200 accepted requests settle exact snapshot claims and reject their reuse atomically",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+        const requestIds = yield* Effect.promise(seedManyAcceptedRequests)
         const claims = yield* repositoryEffect((repository) => repository.claimSyncRequests(scope))
         expect(
           claims.map((claim) => claim.requestId).sort((left, right) => left.localeCompare(right))
@@ -1339,36 +1398,18 @@ describe("completed sync through worker and durable recovery", () => {
         expect(state.requests.every((row) => row.status === "succeeded")).toBe(true)
         expect(
           state.attempts
-            .filter((row) => row.failureCode === "synthetic_hydration_failure")
-            .map((row) => row.id)
-            .sort((left, right) => left.localeCompare(right))
-        ).toEqual(
-          firstClaims
-            .map((claim) => claim.attemptId)
-            .sort((left, right) => left.localeCompare(right))
-        )
-        expect(
-          state.attempts
-            .filter((row) => row.failureCode === "calculation_stale_recomputed")
-            .map((row) => row.id)
-            .sort((left, right) => left.localeCompare(right))
-        ).toEqual(
-          abandoned.map((claim) => claim.attemptId).sort((left, right) => left.localeCompare(right))
-        )
-        expect(
-          state.attempts
             .filter((row) => row.status === "succeeded" && row.runId === R1)
             .map((row) => row.id)
             .sort((left, right) => left.localeCompare(right))
         ).toEqual(
           claims.map((claim) => claim.attemptId).sort((left, right) => left.localeCompare(right))
         )
-        expect(state.attempts).toHaveLength(24600)
+        expect(state.attempts).toHaveLength(8200)
         const expiredStart = yield* Effect.exit(
           context.runWithLayer({
             layer: serviceLayer,
             effect: Effect.flatMap(CalculationRunService, (service) =>
-              service.recompute({ ...scope, id: R2, accountingChoices: [], syncClaims: abandoned })
+              service.recompute({ ...scope, id: R2, accountingChoices: [], syncClaims: claims })
             ),
           })
         )
@@ -1398,7 +1439,7 @@ describe("completed sync through worker and durable recovery", () => {
             )
           )
         )
-        expect(afterRejectedStart).toEqual([{ total: 24600, succeeded: 8200, running: 0 }])
+        expect(afterRejectedStart).toEqual([{ total: 8200, succeeded: 8200, running: 0 }])
       })
   )
 
