@@ -1044,7 +1044,7 @@ describe("Dashboard calculation refresh", () => {
   })
 })
 
-describe("Dashboard first-sync body (#108 T05)", () => {
+describe("Dashboard first-sync body (#108 T05, T06)", () => {
   let queryClient: QueryClient
   let billingReads: number
   let respondBilling: () => Promise<BillingStatus>
@@ -1522,5 +1522,92 @@ describe("Dashboard first-sync body (#108 T05)", () => {
     expect(queryClient.getQueryData(queries.billingStatus(testTaxMaxi).queryKey)).toBeDefined()
     // The completed sync spent credits, so the completion re-reads billing.
     await waitFor(() => expect(billingReads).toBe(2))
+  })
+
+  // #108 T06 (D07): after a Checkout return the billing overlay writes the
+  // refreshed status into the `billingStatus` cache. The dashboard stays
+  // mounted underneath and its wizard follows the cache: no reload, no
+  // remount, no extra billing read.
+  const writeBillingToCache = async (billing: BillingStatus) => {
+    await act(async () => {
+      queryClient.setQueryData(billingKey(), billing)
+      // React Query delivers observer notifications on a separate timer.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+  }
+
+  it("moves from needs_credits to ready when the billing overlay writes credits into the cache, without remount", async () => {
+    respondBilling = async () => billingStatus(0)
+    mount([sourceOverview()])
+
+    expect(
+      await screen.findByRole("heading", { name: "Pick a plan to unlock your import" })
+    ).toBeTruthy()
+    expect(screen.getByRole("link", { name: "Choose a plan" })).toBeTruthy()
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    const liveRegion = screen.getByRole("status", { name: "First sync updates" })
+
+    await writeBillingToCache(billingStatus(5))
+
+    expect(screen.getByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(screen.getByText("5 credits available")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Start my first sync" })).toBeTruthy()
+    expect(screen.queryByRole("link", { name: "Choose a plan" })).toBeNull()
+    // The same wizard instance moved: its live region is the same DOM node.
+    expect(screen.getByRole("status", { name: "First sync updates" })).toBe(liveRegion)
+    expect(billingReads).toBe(1)
+  })
+
+  it("moves from paused to resumable when the billing overlay writes credits into the cache, and Continue restarts the same source", async () => {
+    queryClient.setQueryData(billingKey(), billingStatus(0))
+    respondBilling = async () => billingStatus(0)
+    const overviews = [sourceOverview({ jobId: "job-1", status: "credit_required" })]
+    syncState.activeSyncs = [
+      {
+        id: SOURCE_A,
+        jobId: "job-1",
+        sourceName: "Coinbase",
+        status: "credit_required",
+        progress: 100,
+      },
+    ]
+    const view = render(dashboardTree(overviews))
+
+    expect(
+      await screen.findByRole("heading", { name: "Sync paused — more credits needed" })
+    ).toBeTruthy()
+    // The stop's one-time billing re-read settles with no credits: still paused.
+    await waitFor(() => expect(billingReads).toBe(1))
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(continueButton()).toBeNull()
+    const liveRegion = screen.getByRole("status", { name: "First sync updates" })
+
+    // The user bought credits; the overlay wrote the refreshed status (D07).
+    await writeBillingToCache(billingStatus(5))
+
+    expect(screen.getByRole("heading", { name: "Ready to continue" })).toBeTruthy()
+    expect(screen.getByText("5 credits available")).toBeTruthy()
+    expect(screen.getByRole("status", { name: "First sync updates" })).toBe(liveRegion)
+    expect(screen.getByTestId("sync-island").textContent).toBe("credit_required")
+    expect(billingReads).toBe(1)
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue my first sync" }))
+    expect(syncState.onSourceSync).toHaveBeenCalledTimes(1)
+    expect(syncState.onSourceSync.mock.calls[0]?.[0]).toMatchObject({ id: SOURCE_A })
+
+    // The hook replaces the island's credit_required item with the new queued
+    // job (use-source-syncs.test.tsx proves that replacement itself).
+    syncState.activeSyncs = [
+      { id: SOURCE_A, jobId: "job-2", sourceName: "Coinbase", status: "queued", progress: 0 },
+    ]
+    view.rerender(dashboardTree(overviews))
+
+    expect(screen.getByTestId("sync-island").textContent).toBe("queued")
+    expect(screen.getByRole("heading", { name: "Importing your Coinbase history" })).toBeTruthy()
+    expect(continueButton()).toBeNull()
+    expect(screen.queryAllByRole("button")).toEqual([])
+    // A queued job is not a credit stop, so billing is not read again.
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(billingReads).toBe(1)
   })
 })
