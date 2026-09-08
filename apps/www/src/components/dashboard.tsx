@@ -43,7 +43,7 @@ import {
 import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 import { TRANSACTION_PAGE_SIZE, TransactionsTable } from "./transactions-table"
 import { TransactionInspector } from "./transaction-inspector"
-import { SourceSyncIsland } from "./source-sync-island"
+import { SourceSyncIsland, type SourceSyncIslandItem } from "./source-sync-island"
 
 type DashboardSummary = {
   currentBalance: string | null
@@ -97,15 +97,45 @@ function sameItemStatuses(previous: ItemStatuses, next: ItemStatuses): boolean {
 
 /**
  * True when an item the previous render showed in another status is now
- * `credit_required`: the sync ran out of credits, or a start was refused. A
- * new item that arrives as `credit_required` (the reload seed) is not a move;
- * the loader read billing right before it.
+ * `credit_required`: the sync ran out of credits, or a start was refused
+ * before any job existed. This catches every live stop, including one
+ * without a job id.
  */
 function movedIntoCreditRequired(previous: ItemStatuses, next: ItemStatuses): boolean {
   return [...next].some(([sourceId, status]) => {
     const before = previous.get(sourceId)
     return status === "credit_required" && before !== undefined && before !== "credit_required"
   })
+}
+
+const NO_JOB_IDS: ReadonlySet<string> = new Set()
+
+/**
+ * The job ids of `credit_required` jobs whose billing re-read has not been
+ * triggered yet. A live stop, a reload seed that arrives already paused, and
+ * the overview's paused job before the seed lands all name the same job, so
+ * one id means one re-read however the stop reached the page (#108 D03, T05
+ * review). A fresh-but-stale cached balance never decides `resumable`.
+ */
+function findUnreadCreditStops({
+  items,
+  overviews,
+  readJobIds,
+}: {
+  items: ReadonlyArray<{ status: SourceSyncJob["status"]; jobId?: string }>
+  overviews: ReadonlyArray<SourceOverview>
+  readJobIds: ReadonlySet<string>
+}): ReadonlyArray<string> {
+  const jobIds = new Set<string>()
+  for (const item of items) {
+    if (item.status === "credit_required" && item.jobId !== undefined) jobIds.add(item.jobId)
+  }
+  for (const { latestSync } of overviews) {
+    if (latestSync.status === "credit_required" && latestSync.jobId !== null) {
+      jobIds.add(latestSync.jobId)
+    }
+  }
+  return [...jobIds].filter((jobId) => !readJobIds.has(jobId))
 }
 
 export function Dashboard({
@@ -433,12 +463,14 @@ export function Dashboard({
     startSourceSync,
   })
 
-  // A move into `credit_required` means the sync spent the balance the cache
-  // still shows. Billing is re-read before the wizard may offer Continue, and
-  // the move is caught during render so no frame derives `resumable` from the
-  // old balance (#108 D03, T05 review). React re-runs the render right away
-  // when state is set here, before anything is shown.
+  // A `credit_required` job means the sync spent the balance the cache still
+  // shows, whether the stop happened live or before this page loaded. Billing
+  // is re-read once per such job before the wizard may offer Continue, and the
+  // stop is caught during render so no frame derives `resumable` from the old
+  // balance (#108 D03, T05 review). React re-runs the render right away when
+  // state is set here, before anything is shown.
   const [seenItemStatuses, setSeenItemStatuses] = useState(NO_ITEM_STATUSES)
+  const [readCreditStopJobIds, setReadCreditStopJobIds] = useState(NO_JOB_IDS)
   const [billingRefreshPending, setBillingRefreshPending] = useState(false)
   const itemStatuses = useMemo(() => toItemStatuses(activeSyncs), [activeSyncs])
   if (!sameItemStatuses(seenItemStatuses, itemStatuses)) {
@@ -446,6 +478,17 @@ export function Dashboard({
     if (movedIntoCreditRequired(seenItemStatuses, itemStatuses)) {
       setBillingRefreshPending(true)
     }
+  }
+  const unreadCreditStops = anySourceSynced
+    ? []
+    : findUnreadCreditStops({
+        items: activeSyncs,
+        overviews: sourceOverviews,
+        readJobIds: readCreditStopJobIds,
+      })
+  if (unreadCreditStops.length > 0) {
+    setReadCreditStopJobIds(new Set([...readCreditStopJobIds, ...unreadCreditStops]))
+    setBillingRefreshPending(true)
   }
 
   useEffect(() => {
@@ -517,6 +560,15 @@ export function Dashboard({
     }
   }, [firstSyncTarget, onSourceSync])
 
+  // While the wizard shows, its Try again is the single retry control for the
+  // target source; the island keeps Retry for every other source and for the
+  // target once the wizard is gone (#108 D06, T05 review).
+  const canRetryFromIsland = useCallback(
+    (item: SourceSyncIslandItem) =>
+      firstSync.state === "done" || item.id !== firstSync.targetSourceId,
+    [firstSync.state, firstSync.targetSourceId]
+  )
+
   // Connecting a wallet from the wizard only creates the source. The first
   // sync stays an explicit click on the next step (#108 D03).
   const connectWalletSource = useCallback(
@@ -545,7 +597,12 @@ export function Dashboard({
 
   return (
     <div className="text-marketing-foreground flex min-h-screen flex-col pt-28 pb-8 sm:pt-32">
-      <SourceSyncIsland items={activeSyncs} onDismiss={onDismissSync} onRetry={onRetrySync} />
+      <SourceSyncIsland
+        canRetry={canRetryFromIsland}
+        items={activeSyncs}
+        onDismiss={onDismissSync}
+        onRetry={onRetrySync}
+      />
       {body ?? (
         <>
           <SourceCards

@@ -35,7 +35,7 @@ beforeEach(() => {
 })
 
 const syncState = vi.hoisted(() => ({
-  activeSyncs: [] as ReadonlyArray<SourceSyncIslandItem>,
+  activeSyncs: [] as ReadonlyArray<SourceSyncIslandItem & { jobId?: string }>,
   onCompleted: undefined as undefined | ((sourceId: string) => void | Promise<void>),
   onSourceSync: vi.fn(),
   onUnauthorized: undefined as undefined | (() => void | Promise<void>),
@@ -153,11 +153,28 @@ vi.mock("#/components/source-cards", () => ({
   ),
 }))
 
+// Mirrors the real island's Retry rule: a failed item offers Retry when a
+// handler exists and `canRetry` (default yes) allows it.
 vi.mock("#/components/source-sync-island", () => ({
-  SourceSyncIsland: ({ items }: { readonly items: ReadonlyArray<SourceSyncIslandItem> }) => (
+  SourceSyncIsland: ({
+    canRetry,
+    items,
+    onRetry,
+  }: {
+    readonly canRetry?: (item: SourceSyncIslandItem) => boolean
+    readonly items: ReadonlyArray<SourceSyncIslandItem>
+    readonly onRetry?: (item: SourceSyncIslandItem) => void
+  }) => (
     <div data-testid="sync-island">
       {items.map((item) => (
-        <span key={item.id}>{item.status}</span>
+        <span key={item.id}>
+          {item.status}
+          {item.status === "failed" && onRetry && (canRetry?.(item) ?? true) ? (
+            <button onClick={() => onRetry(item)} type="button">
+              Retry
+            </button>
+          ) : null}
+        </span>
       ))}
     </div>
   ),
@@ -1141,6 +1158,37 @@ describe("Dashboard first-sync body (#108 T05)", () => {
     expect(syncState.onSourceSync.mock.calls[0]?.[0]).toMatchObject({ id: SOURCE_A })
   })
 
+  it("leaves Try again as the only retry for the wizard's source while the island keeps Retry for others", async () => {
+    const SOURCE_B = "00000000-0000-4000-8000-000000000202"
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "failed", progress: 100 },
+      { id: SOURCE_B, sourceName: "Kraken", status: "failed", progress: 100 },
+    ]
+    mount([sourceOverview({ status: "failed" }), sourceOverview({ status: "failed" }, SOURCE_B)])
+
+    expect(
+      await screen.findByRole("heading", { name: "Your first sync didn't finish" })
+    ).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy()
+    const island = screen.getByTestId("sync-island")
+    expect(within(island).getAllByRole("button", { name: "Retry" })).toHaveLength(1)
+    // Source A (the wizard's target) shows no Retry; source B keeps it.
+    expect(island.children[0]?.textContent).toBe("failed")
+    expect(island.children[1]?.textContent).toBe("failedRetry")
+  })
+
+  it("lets the island offer Retry for a failed sync once the wizard is gone", async () => {
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "failed", progress: 100 },
+    ]
+    mount(syncedOverviews)
+
+    expect(await screen.findByRole("button", { name: "Assets" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull()
+    const island = screen.getByTestId("sync-island")
+    expect(within(island).getByRole("button", { name: "Retry" })).toBeTruthy()
+  })
+
   it("shows billing_unknown with a retry when billing fails, then recovers", async () => {
     respondBilling = async () => {
       throw new Error("Stripe is unavailable")
@@ -1254,16 +1302,24 @@ describe("Dashboard first-sync body (#108 T05)", () => {
   })
 
   it("offers the billing action itself once the island's credit_required item is dismissed", async () => {
+    queryClient.setQueryData(billingKey(), billingStatus(0))
     respondBilling = async () => billingStatus(0)
     const overviews = [sourceOverview({ jobId: "job-1", status: "credit_required" })]
     syncState.activeSyncs = [
-      { id: SOURCE_A, sourceName: "Coinbase", status: "credit_required", progress: 100 },
+      {
+        id: SOURCE_A,
+        jobId: "job-1",
+        sourceName: "Coinbase",
+        status: "credit_required",
+        progress: 100,
+      },
     ]
     const view = render(dashboardTree(overviews))
 
     expect(await screen.findByRole("heading", { name: "Sync paused — more credits needed" }))
     expect(screen.getByText("Add credits from the notice at the top of the page.")).toBeTruthy()
     expect(screen.queryByRole("link", { name: "Choose a plan" })).toBeNull()
+    await waitFor(() => expect(billingReads).toBe(1))
 
     // The user dismisses the island's notice; the hook drops the item.
     syncState.activeSyncs = []
@@ -1275,8 +1331,76 @@ describe("Dashboard first-sync body (#108 T05)", () => {
     )
     expect(screen.queryByText("Add credits from the notice at the top of the page.")).toBeNull()
     expect(screen.queryAllByRole("button")).toEqual([])
-    // An item that arrives as credit_required (the reload seed) is no credit
-    // stop: the loader read billing right before it, so no second read.
+    // The seeded stop re-read billing once for job-1; the dismissal and the
+    // overview naming the same job add no second read.
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(billingReads).toBe(1)
+  })
+
+  /**
+   * Reloads onto a job already paused for credits while the cache still says
+   * `credits: 3`, holding the re-read open until the test releases it.
+   */
+  const reloadOntoCreditStop = () => {
+    queryClient.setQueryData(billingKey(), billingStatus(3))
+    let release: ((billing: BillingStatus) => void) | undefined
+    respondBilling = () =>
+      new Promise<BillingStatus>((resolve) => {
+        release = resolve
+      })
+    const overviews = [sourceOverview({ jobId: "job-1", status: "credit_required" })]
+    syncState.activeSyncs = [
+      {
+        id: SOURCE_A,
+        jobId: "job-1",
+        sourceName: "Coinbase",
+        status: "credit_required",
+        progress: 100,
+      },
+    ]
+    const view = render(dashboardTree(overviews))
+
+    // The cached 3 credits are fresh but predate the stop: paused, no Continue.
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+    return {
+      view,
+      overviews,
+      release: (billing: BillingStatus) => {
+        if (release === undefined) throw new Error("billing re-read has not started")
+        release(billing)
+      },
+    }
+  }
+
+  it("re-reads billing once for a seeded credit_required job and stays paused until it settles", async () => {
+    const { overviews, release, view } = reloadOntoCreditStop()
+
+    await waitFor(() => expect(billingReads).toBe(1))
+    view.rerender(dashboardTree(overviews))
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+
+    release(billingStatus(3))
+    expect(await screen.findByRole("heading", { name: "Ready to continue" })).toBeTruthy()
+    expect(screen.getByText("3 credits available")).toBeTruthy()
+    view.rerender(dashboardTree(overviews))
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(billingReads).toBe(1)
+  })
+
+  it("keeps a seeded credit_required job paused when the re-read shows no credits", async () => {
+    const { release } = reloadOntoCreditStop()
+
+    await waitFor(() => expect(billingReads).toBe(1))
+    release(billingStatus(0))
+    await waitFor(() =>
+      expect(queryClient.getQueryData(billingKey())).toMatchObject({ credits: 0 })
+    )
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
     expect(billingReads).toBe(1)
   })
 

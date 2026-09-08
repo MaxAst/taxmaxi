@@ -88,8 +88,21 @@ export type SourceSyncIslandItem = {
 
 type SourceSyncIslandProps = {
   items: ReadonlyArray<SourceSyncIslandItem>
+  /**
+   * Whether a failed item gets the Retry button. Defaults to yes for every
+   * item; the dashboard says no for the source whose retry another control
+   * already owns (#108 D06). Nothing else about the item changes.
+   */
+  canRetry?: (item: SourceSyncIslandItem) => boolean
   onDismiss?: (item: SourceSyncIslandItem) => void
   onRetry?: (item: SourceSyncIslandItem) => void
+}
+
+function isRetryOffered(
+  item: SourceSyncIslandItem,
+  canRetry: SourceSyncIslandProps["canRetry"]
+): boolean {
+  return item.status === "failed" && (canRetry?.(item) ?? true)
 }
 
 /**
@@ -291,7 +304,7 @@ const statusTone: Record<SourceSyncStatus, string> = {
 const formatInteger = (value: number): string =>
   new Intl.NumberFormat(getLocale(), { maximumFractionDigits: 0 }).format(value)
 
-export function SourceSyncIsland({ items, onDismiss, onRetry }: SourceSyncIslandProps) {
+export function SourceSyncIsland({ canRetry, items, onDismiss, onRetry }: SourceSyncIslandProps) {
   const reduceMotion = useReducedMotion()
   const { billingActionLabel, onBillingAction } = useCreditRecovery(items)
   const [mockScenario, setMockScenario] = useState<SourceSyncMockScenario>("live")
@@ -437,6 +450,7 @@ export function SourceSyncIsland({ items, onDismiss, onRetry }: SourceSyncIsland
                   ) : (
                     <ActiveIslandContent
                       billingActionLabel={billingActionLabel}
+                      canRetry={canRetry}
                       expanded={expanded}
                       item={primaryItem}
                       items={visibleItems}
@@ -451,7 +465,7 @@ export function SourceSyncIsland({ items, onDismiss, onRetry }: SourceSyncIsland
               </AnimatePresence>
 
               <span aria-live="polite" className="sr-only" role="status">
-                {getAnnouncement(visibleItems)}
+                {getAnnouncement(visibleItems, canRetry)}
               </span>
             </motion.div>
           ) : null}
@@ -494,6 +508,7 @@ function CompactIslandContent({
 
 function ActiveIslandContent({
   billingActionLabel,
+  canRetry,
   expanded,
   item,
   items,
@@ -504,6 +519,7 @@ function ActiveIslandContent({
   reduceMotion,
 }: {
   billingActionLabel: string
+  canRetry?: SourceSyncIslandProps["canRetry"]
   expanded: boolean
   item: SourceSyncIslandItem
   items: ReadonlyArray<SourceSyncIslandItem>
@@ -596,7 +612,7 @@ function ActiveIslandContent({
                     {billingActionLabel}
                   </Button>
                 ) : null}
-                {item.status === "failed" && onRetry ? (
+                {onRetry && isRetryOffered(item, canRetry) ? (
                   <Button onClick={() => onRetry(item)} size="sm" type="button" variant="secondary">
                     <RotateCcw aria-hidden="true" className="size-3.5" strokeWidth={2.5} />
                     {m["app.syncIsland.retry"]()}
@@ -754,16 +770,27 @@ function getSourceNames(items: ReadonlyArray<SourceSyncIslandItem>): string {
   })
 }
 
-function getAnnouncement(items: ReadonlyArray<SourceSyncIslandItem>): string {
+function getAnnouncement(
+  items: ReadonlyArray<SourceSyncIslandItem>,
+  canRetry: SourceSyncIslandProps["canRetry"]
+): string {
   const primaryItem = items[0]
 
   if (primaryItem?.status === "credit_required") {
     return `${getIslandHeadline(items)}. ${getCreditRequiredCopy(primaryItem.creditOutcome)}`
   }
 
-  return primaryItem?.status === "failed"
-    ? `${getIslandHeadline(items)}. ${primaryItem.message ?? m["app.syncIsland.openDetailsToRetry"]()}`
-    : `${getIslandHeadline(items)}.`
+  if (primaryItem?.status !== "failed") {
+    return `${getIslandHeadline(items)}.`
+  }
+
+  // "Open details to retry" is only promised when the details offer Retry.
+  const detail =
+    primaryItem.message ??
+    (isRetryOffered(primaryItem, canRetry) ? m["app.syncIsland.openDetailsToRetry"]() : undefined)
+  return detail === undefined
+    ? `${getIslandHeadline(items)}.`
+    : `${getIslandHeadline(items)}. ${detail}`
 }
 
 function formatRecordCount(value: number | undefined): string {
