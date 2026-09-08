@@ -5,7 +5,21 @@ import { PrincipalId } from "@my/core/ownership"
 import { SourceId } from "@my/core/source"
 import { PrincipalClaimRepositoryLive } from "../../src/layers/PrincipalClaimRepositoryLive.ts"
 import { PrincipalClaimRepository } from "../../src/services/PrincipalClaimRepository.ts"
-import { SourceSyncJobRepository } from "@my/sync-engine/services"
+import {
+  SourceSyncJobRepository,
+  CalculationRecomputeQueue,
+  CalculationRecomputeQueueError,
+  CoinGeckoHistoricalPriceClient,
+  CALCULATION_RECOMPUTE_JOB_NAME,
+} from "@my/sync-engine/services"
+import { HistoricalAssetPriceRepository } from "../../src/services/HistoricalAssetPriceRepository.ts"
+import { ConfigProvider, Option } from "effect"
+import { TestClock } from "effect/testing"
+import {
+  makeWorkerBullMqCalculationConsumerLive,
+  type WorkerBullMqCalculationProcessor,
+} from "../../../../apps/worker/src/layers/WorkerBullMqCalculationConsumerLive.ts"
+import { runCalculationMaintenancePass } from "../../../../apps/worker/src/layers/WorkerCalculationMaintenanceLive.ts"
 import { eq, sql } from "drizzle-orm"
 import * as BigDecimal from "effect/BigDecimal"
 import * as DateTime from "effect/DateTime"
@@ -25,6 +39,7 @@ import { schema } from "../../src/schema/index.ts"
 import {
   CalculationRunId,
   CalculationRunRepository,
+  type CalculationRunRepositoryShape,
 } from "../../src/services/CalculationRunRepository.ts"
 import { CalculationRunService } from "../../src/services/CalculationRunService.ts"
 import { FactualLedgerRepository } from "../../src/services/FactualLedgerRepository.ts"
@@ -122,6 +137,93 @@ const capturedIds = (runId: CalculationRunId) =>
         .from(schema.calculationRunSyncRequests)
         .where(eq(schema.calculationRunSyncRequests.runId, runId))
     )
+  )
+
+// Only queue acquisition and external price I/O are controlled; calculations and storage stay real.
+const withWorker = <A, E, R>(
+  use: (processor: WorkerBullMqCalculationProcessor) => Effect.Effect<A, E, R>,
+  options: {
+    readonly priceNeeds?: ReturnType<
+      typeof HistoricalAssetPriceRepository.of
+    >["listMissingCoinGeckoDailyEurPriceNeeds"]
+    readonly wrapRepository?: (
+      repository: CalculationRunRepositoryShape
+    ) => CalculationRunRepositoryShape
+    readonly ledgerLayer?: typeof FactualLedgerRepositoryLive
+  } = {}
+) =>
+  Effect.gen(function* () {
+    const ready = yield* Deferred.make<WorkerBullMqCalculationProcessor>()
+    const repositoryLayer = Layer.effect(
+      CalculationRunRepository,
+      Effect.map(
+        CalculationRunRepository,
+        (repository) => options.wrapRepository?.(repository) ?? repository
+      )
+    ).pipe(Layer.provide(CalculationRunRepositoryLive))
+    const dependencies = Layer.mergeAll(
+      repositoryLayer,
+      CalculationRunServiceLive.pipe(
+        Layer.provide(
+          Layer.merge(repositoryLayer, options.ledgerLayer ?? FactualLedgerRepositoryLive)
+        )
+      ),
+      Layer.succeed(
+        HistoricalAssetPriceRepository,
+        HistoricalAssetPriceRepository.of({
+          listMissingCoinGeckoDailyEurPriceNeeds: options.priceNeeds ?? (() => Effect.succeed([])),
+          upsertCoinGeckoDailyEurPrice: () => Effect.die("No price needs in this fixture"),
+        })
+      ),
+      Layer.succeed(
+        CoinGeckoHistoricalPriceClient,
+        CoinGeckoHistoricalPriceClient.of({
+          fetchDailyEurPrice: () => Effect.succeed(Option.none()),
+        })
+      )
+    )
+    const workerLayer = makeWorkerBullMqCalculationConsumerLive({
+      acquireWorker: (_config, processor) =>
+        Deferred.succeed(ready, processor).pipe(Effect.as({ close: Effect.void })),
+    }).pipe(Layer.provide(dependencies), Layer.fresh)
+    return yield* Effect.scoped(
+      Deferred.await(ready).pipe(
+        Effect.flatMap(use),
+        Effect.provide(workerLayer.pipe(Layer.provide(context.TestPgClientLive))),
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnvRecord({ QUEUE_REDIS_URL: "redis://localhost:6379" })
+        )
+      )
+    )
+  })
+const deliver = (processor: WorkerBullMqCalculationProcessor) =>
+  Effect.tryPromise({
+    try: () =>
+      processor({ name: CALCULATION_RECOMPUTE_JOB_NAME, data: { principalId: scope.principalId } }),
+    catch: (cause) => new PersistenceError({ operation: "joined.worker", cause }),
+  })
+const maintenance = (
+  queue: ReturnType<typeof CalculationRecomputeQueue.of>,
+  staleBefore = DateTime.toDateUtc(DateTime.makeUnsafe("2000-01-01T00:00:00Z"))
+) =>
+  context.runWithLayer({
+    layer: Layer.merge(
+      CalculationRunRepositoryLive,
+      Layer.succeed(CalculationRecomputeQueue, queue)
+    ),
+    effect: runCalculationMaintenancePass({ staleBefore, limit: 100 }),
+  })
+const repositoryEffect = <A, E>(
+  use: (repository: CalculationRunRepositoryShape) => Effect.Effect<A, E>
+) =>
+  context.runWithLayer({
+    layer: CalculationRunRepositoryLive,
+    effect: Effect.flatMap(CalculationRunRepository, use),
+  })
+const statusForYear = (taxYear: number, sourceJobId: string) =>
+  repositoryEffect((repository) =>
+    repository.getSyncStatus({ ...scope, taxYear: TaxYear.make(taxYear), sourceJobId })
   )
 
 // Clone the migrated template once; beforeEach then clears its seeded assets before our fixtures.
@@ -773,5 +875,376 @@ const seedFullHistory = Effect.gen(function* () {
       reason: "Synthetic full-history total",
       supersedesOverrideId: null,
     })
+  }
+})
+
+describe("completed sync through worker and durable recovery", () => {
+  it.effect("completion_dispatch_recovers and failed hydration retains exact runless history", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+      const job = yield* Effect.promise(() => completeJob())
+      const requestId = (yield* Effect.promise(() => readStatus(job))).jobs[0]?.work?.requestId
+      const failedDispatch = yield* maintenance(
+        CalculationRecomputeQueue.of({
+          enqueuePrincipalRecompute: () =>
+            Effect.fail(
+              new CalculationRecomputeQueueError({
+                operation: "synthetic.enqueue",
+                cause: "queue unavailable",
+              })
+            ),
+        })
+      )
+      expect(failedDispatch.failedRequests).toBe(1)
+      expect((yield* Effect.promise(() => readStatus(job))).jobs[0]?.work).toMatchObject({
+        requestId,
+        status: "queued",
+        attempts: [],
+      })
+      yield* withWorker(
+        (processor) =>
+          Effect.gen(function* () {
+            expect(Exit.isFailure(yield* Effect.exit(deliver(processor)))).toBe(true)
+          }),
+        {
+          priceNeeds: () =>
+            Effect.fail(
+              new PersistenceError({
+                operation: "synthetic.price-needs",
+                cause: "hydration storage unavailable",
+              })
+            ),
+        }
+      )
+      const failed = (yield* Effect.promise(() => readStatus(job))).jobs[0]?.work
+      expect(failed).toMatchObject({
+        requestId,
+        status: "failed",
+        attempts: [
+          { runId: null, status: "failed", failureCode: "calculation_price_hydration_failed" },
+        ],
+      })
+      yield* TestClock.setTime(Date.parse("2026-02-01T00:00:01Z"))
+      const dispatches: string[] = []
+      yield* maintenance(
+        CalculationRecomputeQueue.of({
+          enqueuePrincipalRecompute: (principalId) =>
+            Effect.sync(() => {
+              dispatches.push(principalId)
+            }),
+        })
+      )
+      expect(dispatches).toEqual([scope.principalId])
+      yield* withWorker((processor) => deliver(processor))
+      const settled = (yield* Effect.promise(() => readStatus(job))).jobs[0]
+      expect(settled).toMatchObject({
+        activeCoverage: "covered",
+        work: {
+          requestId,
+          status: "succeeded",
+          attempts: [{ ...failed?.attempts[0] }, { status: "succeeded" }],
+        },
+      })
+      expect(settled?.work?.attempts[1]?.runId).not.toBeNull()
+    })
+  )
+
+  it.effect("coalesced_scopes_do_not_lose_requests across a failed year and year rollover", () =>
+    Effect.gen(function* () {
+      yield* context.runWithLayer({
+        layer: serviceLayer,
+        effect: Effect.flatMap(CalculationRunService, (service) =>
+          service.recompute({
+            ...scope,
+            taxYear: TaxYear.make(2024),
+            id: R0,
+            accountingChoices: [],
+          })
+        ),
+      })
+      const job = yield* Effect.promise(() => completeJob())
+      yield* TestClock.setTime(Date.parse("2027-02-01T00:00:00Z"))
+      yield* withWorker(
+        (processor) =>
+          Effect.gen(function* () {
+            expect(Exit.isFailure(yield* Effect.exit(deliver(processor)))).toBe(true)
+          }),
+        {
+          wrapRepository: (repository) => ({
+            ...repository,
+            start: (params) =>
+              params.taxYear === 2024
+                ? Effect.fail(
+                    new PersistenceError({ operation: "synthetic.2024", cause: "one scope fails" })
+                  )
+                : repository.start(params),
+          }),
+        }
+      )
+      expect((yield* statusForYear(2024, job)).jobs[0]?.work?.status).toBe("failed")
+      expect((yield* statusForYear(2026, job)).jobs[0]?.work?.status).toBe("succeeded")
+      expect((yield* statusForYear(2025, job)).work.status).toBe("not_requested")
+      expect((yield* statusForYear(2027, job)).work.status).toBe("not_requested")
+      yield* withWorker((processor) => deliver(processor))
+      expect((yield* statusForYear(2024, job)).jobs[0]?.work?.status).toBe("succeeded")
+      const links = yield* Effect.promise(() =>
+        runPg(
+          Effect.flatMap(drizzle, (db) =>
+            db
+              .select({ taxYear: schema.calculationRunSyncRequests.taxYear })
+              .from(schema.calculationRunSyncRequests)
+          )
+        )
+      )
+      expect(links.every((link) => link.taxYear === 2024 || link.taxYear === 2026)).toBe(true)
+    })
+  )
+
+  it.effect(
+    "two consumers and maintenance preserve jobs accepted after the accounting snapshot",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+        const firstJob = yield* Effect.promise(() => completeJob())
+        const established = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const ledgerLayer = Layer.effect(
+          FactualLedgerRepository,
+          Effect.map(FactualLedgerRepository, (repository) =>
+            FactualLedgerRepository.of({
+              load: (params) =>
+                Effect.gen(function* () {
+                  // loadSnapshot has already fixed PostgreSQL visibility before this real factual read.
+                  yield* Deferred.succeed(established, undefined)
+                  yield* Deferred.await(release)
+                  return yield* repository.load(params)
+                }),
+            })
+          )
+        ).pipe(Layer.provide(FactualLedgerRepositoryLive))
+        yield* withWorker(
+          (first) =>
+            Effect.gen(function* () {
+              const running = yield* Effect.forkChild(deliver(first))
+              yield* Deferred.await(established)
+              const laterJob = yield* Effect.promise(() => completeJob())
+              const queued: string[] = []
+              yield* maintenance(
+                CalculationRecomputeQueue.of({
+                  enqueuePrincipalRecompute: (principalId) =>
+                    Effect.sync(() => {
+                      queued.push(principalId)
+                    }),
+                })
+              )
+              expect(queued).toContain(scope.principalId)
+              yield* withWorker((second) => deliver(second))
+              const secondResult = yield* Effect.promise(() => readStatus(laterJob))
+              expect(secondResult.jobs[0]?.work?.status).toBe("succeeded")
+              yield* Deferred.succeed(release, undefined)
+              yield* Fiber.join(running)
+              const firstStatus = yield* Effect.promise(() => readStatus(firstJob))
+              const laterStatus = yield* Effect.promise(() => readStatus(laterJob))
+              const firstRun = firstStatus.jobs[0]?.work?.attempts[0]?.runId
+              expect(firstRun).toBeDefined()
+              if (firstRun === undefined || firstRun === null)
+                return yield* Effect.die("First request has no run")
+              expect(
+                yield* Effect.promise(() => capturedIds(CalculationRunId.make(firstRun)))
+              ).toEqual([{ requestId: firstStatus.jobs[0]?.work?.requestId }])
+              expect(laterStatus.jobs[0]?.work?.attempts).toHaveLength(1)
+              expect(laterStatus.jobs[0]?.work?.status).toBe("succeeded")
+              // Duplicate delivery adds coverage, but never a second attempt to already settled work.
+              yield* withWorker((second) => deliver(second))
+              expect(
+                (yield* Effect.promise(() => readStatus(laterJob))).jobs[0]?.work?.attempts
+              ).toHaveLength(1)
+            }).pipe(Effect.ensuring(Deferred.succeed(release, undefined))),
+          { ledgerLayer }
+        )
+      })
+  )
+
+  it.effect("a non-sync worker delivery creates no requests or source links", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+      yield* withWorker((processor) => deliver(processor))
+      const status = yield* Effect.promise(() => readStatus())
+      expect(status.work.status).toBe("not_requested")
+      expect(status.activeRun).not.toBeNull()
+      const rows = yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return {
+              requests: yield* db
+                .select({ id: schema.calculationSyncRequests.id })
+                .from(schema.calculationSyncRequests),
+              links: yield* db
+                .select({ requestId: schema.calculationRunSyncRequests.requestId })
+                .from(schema.calculationRunSyncRequests),
+              captures: yield* db
+                .select({ runId: schema.calculationRunSyncCaptures.runId })
+                .from(schema.calculationRunSyncCaptures),
+            }
+          })
+        )
+      )
+      expect(rows.requests).toEqual([])
+      expect(rows.links).toEqual([])
+      expect(rows.captures).toHaveLength(1)
+    })
+  )
+
+  it.effect("bounded maintenance advances past a repeatedly failing principal", () =>
+    Effect.gen(function* () {
+      const laterPrincipal = PrincipalId.make("00000000-0000-4000-8000-000000000199")
+      const laterSource = "00000000-0000-4000-8000-000000000299"
+      yield* Effect.promise(() =>
+        runPg(
+          seedSyncEngineRepositoryFixture({
+            principalId: laterPrincipal,
+            sourceId: laterSource,
+            userId: "00000000-0000-4000-8000-000000000198",
+          })
+        )
+      )
+      yield* Effect.promise(() => completeJob())
+      yield* Effect.promise(() =>
+        completeJob({ principalId: laterPrincipal, sourceId: laterSource })
+      )
+      const deliveries: string[] = []
+      const queue = CalculationRecomputeQueue.of({
+        enqueuePrincipalRecompute: (principalId) =>
+          Effect.gen(function* () {
+            deliveries.push(principalId)
+            if (principalId === scope.principalId)
+              return yield* Effect.fail(
+                new CalculationRecomputeQueueError({
+                  operation: "synthetic.queue",
+                  cause: "first principal keeps failing",
+                })
+              )
+          }),
+      })
+      const pass = (afterPrincipalId?: PrincipalId) =>
+        context.runWithLayer({
+          layer: Layer.merge(
+            CalculationRunRepositoryLive,
+            Layer.succeed(CalculationRecomputeQueue, queue)
+          ),
+          effect: runCalculationMaintenancePass({
+            limit: 1,
+            staleBefore: DateTime.toDateUtc(DateTime.makeUnsafe("2000-01-01T00:00:00Z")),
+            ...(afterPrincipalId === undefined ? {} : { afterPrincipalId }),
+          }),
+        })
+      const first = yield* pass()
+      expect(deliveries).toEqual([scope.principalId])
+      expect(first.failedRequests).toBe(1)
+      expect(first.nextAfterPrincipalId).toBe(scope.principalId)
+      const second = yield* pass(scope.principalId)
+      expect(deliveries).toEqual([scope.principalId, laterPrincipal])
+      expect(second.requestedRecomputes).toBe(1)
+      expect(second.nextAfterPrincipalId).toBe(laterPrincipal)
+      expect((yield* pass(laterPrincipal)).nextAfterPrincipalId).toBeNull()
+    })
+  )
+
+  for (const phase of ["runless", "started"] as const) {
+    it.effect(
+      `maintenance expires ${phase} work and stale claim IDs cannot settle its replacement`,
+      () =>
+        Effect.gen(function* () {
+          yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+          const job = yield* Effect.promise(() => completeJob())
+          const claims = yield* repositoryEffect((repository) =>
+            repository.claimSyncRequests(scope)
+          )
+          expect(claims).toHaveLength(1)
+          const reached = yield* Deferred.make<void>()
+          const release = yield* Deferred.make<void>()
+          const repositoryLayer = Layer.effect(
+            CalculationRunRepository,
+            Effect.map(CalculationRunRepository, (repository) =>
+              CalculationRunRepository.of({
+                ...repository,
+                persist: (params) =>
+                  Effect.gen(function* () {
+                    yield* Deferred.succeed(reached, undefined)
+                    yield* Deferred.await(release)
+                    return yield* repository.persist(params)
+                  }),
+              })
+            )
+          ).pipe(Layer.provide(CalculationRunRepositoryLive))
+          const delayed =
+            phase === "started"
+              ? yield* Effect.forkChild(
+                  Effect.exit(
+                    context.runWithLayer({
+                      layer: CalculationRunServiceLive.pipe(
+                        Layer.provide(Layer.merge(repositoryLayer, FactualLedgerRepositoryLive))
+                      ),
+                      effect: Effect.flatMap(CalculationRunService, (service) =>
+                        service.recompute({
+                          ...scope,
+                          id: R1,
+                          accountingChoices: [],
+                          syncClaims: claims,
+                        })
+                      ),
+                    })
+                  )
+                )
+              : null
+          if (delayed !== null) yield* Deferred.await(reached)
+          const queued: string[] = []
+          const repaired = yield* maintenance(
+            CalculationRecomputeQueue.of({
+              enqueuePrincipalRecompute: (principalId) =>
+                Effect.sync(() => {
+                  queued.push(principalId)
+                }),
+            }),
+            DateTime.toDateUtc(DateTime.makeUnsafe("2099-01-01T00:00:00Z"))
+          )
+          expect(repaired.failedStaleRuns).toBe(phase === "started" ? 1 : 0)
+          expect(queued).toContain(scope.principalId)
+          const failed = (yield* Effect.promise(() => readStatus(job))).jobs[0]?.work
+          expect(failed).toMatchObject({
+            status: "failed",
+            attempts: [
+              {
+                status: "failed",
+                failureCode: "calculation_stale_recomputed",
+                runId: phase === "started" ? R1 : null,
+              },
+            ],
+          })
+          yield* withWorker((processor) => deliver(processor))
+          const replacement = yield* Effect.promise(() => readStatus(job))
+          expect(replacement.jobs[0]?.work?.status).toBe("succeeded")
+          yield* repositoryEffect((repository) =>
+            repository.failSyncClaims({ ...scope, claims, failureCode: "late_old_failure" })
+          )
+          expect(yield* Effect.promise(() => readStatus(job))).toEqual(replacement)
+          if (delayed !== null) {
+            yield* Deferred.succeed(release, undefined)
+            expect(Exit.isFailure(yield* Fiber.join(delayed))).toBe(true)
+          } else {
+            const expired = yield* Effect.exit(
+              context.runWithLayer({
+                layer: serviceLayer,
+                effect: Effect.flatMap(CalculationRunService, (service) =>
+                  service.recompute({ ...scope, id: R2, accountingChoices: [], syncClaims: claims })
+                ),
+              })
+            )
+            expect(Exit.isFailure(expired)).toBe(true)
+          }
+          expect(yield* Effect.promise(() => readStatus(job))).toEqual(replacement)
+        })
+    )
   }
 })

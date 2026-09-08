@@ -48,6 +48,12 @@ export const CalculationSyncAttemptId = Schema.String.check(Schema.isUUID()).pip
 /** Stable identity of one attempt at a completed-sync request. */
 export type CalculationSyncAttemptId = typeof CalculationSyncAttemptId.Type
 
+/** Exact work owned by one worker before its accounting snapshot exists. */
+export interface CalculationSyncClaim {
+  readonly requestId: CalculationSyncRequestId
+  readonly attemptId: CalculationSyncAttemptId
+}
+
 /** Exact request links read alongside the factual ledger; an empty array is explicit evidence. */
 export interface CalculationRunSyncCapture {
   readonly requestIds: ReadonlyArray<CalculationSyncRequestId>
@@ -138,6 +144,8 @@ export interface PersistCalculationRunParams {
 
 /** Input metadata committed before the pure engine starts. */
 export interface StartCalculationRunParams {
+  /** Omission uses normal snapshot-time claiming; supplied pairs must still be owned. */
+  readonly syncClaims?: ReadonlyArray<CalculationSyncClaim>
   readonly id: CalculationRunId
   readonly principalId: PrincipalId
   readonly jurisdiction: JurisdictionCode
@@ -208,12 +216,16 @@ export interface ListActiveCalculationRunTaxYearsParams {
 
 /** Input for one bounded calculation-maintenance pass. */
 export interface MaintainCalculationRunsParams {
+  /** Continue discovery after this principal; omit to start again. */
+  readonly afterPrincipalId?: PrincipalId
   readonly staleBefore: Date
   readonly limit: number
 }
 
 /** Durable work found by one calculation-maintenance pass. */
 export interface CalculationRunMaintenanceResult {
+  /** Next discovery cursor; null wraps the next pass to the beginning. */
+  readonly nextAfterPrincipalId: PrincipalId | null
   readonly failedStaleRuns: number
   readonly principalIds: ReadonlyArray<PrincipalId>
 }
@@ -275,6 +287,24 @@ export interface CalculationSyncStatus {
 
 /** Persistence contract for atomic, write-once calculation results. */
 export interface CalculationRunRepositoryShape {
+  /** Claim queued/failed scope work before hydration without inventing a calculation run. */
+  readonly claimSyncRequests: (
+    params: GetLatestCalculationRunStatusParams
+  ) => Effect.Effect<ReadonlyArray<CalculationSyncClaim>, PersistenceError>
+
+  /** Fail only the caller's exact still-running, runless attempts. */
+  readonly failSyncClaims: (
+    params: GetLatestCalculationRunStatusParams & {
+      readonly claims: ReadonlyArray<CalculationSyncClaim>
+      readonly failureCode: string
+    }
+  ) => Effect.Effect<void, PersistenceError>
+
+  /** List every durably accepted scope year, including previously succeeded work. */
+  readonly listRequestedTaxYears: (
+    params: ListActiveCalculationRunTaxYearsParams
+  ) => Effect.Effect<ReadonlyArray<TaxYear>, PersistenceError>
+
   /** Read all scope work and exact selected-job coverage without writing or enqueueing. */
   readonly getSyncStatus: (
     params: GetCalculationSyncStatusParams

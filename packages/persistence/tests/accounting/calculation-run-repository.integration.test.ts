@@ -98,6 +98,9 @@ const calculationRunServiceWithPersist = (
         fail: repository.fail,
         getLatestStatus: repository.getLatestStatus,
         getSyncStatus: repository.getSyncStatus,
+        claimSyncRequests: repository.claimSyncRequests,
+        failSyncClaims: repository.failSyncClaims,
+        listRequestedTaxYears: repository.listRequestedTaxYears,
         listActiveTaxYears: repository.listActiveTaxYears,
         settleStaleAndFindRecomputePrincipals: repository.settleStaleAndFindRecomputePrincipals,
         persist: makePersist(repository),
@@ -1050,13 +1053,19 @@ describe("CalculationRunRepositoryLive", () => {
 
       expect(maintenance).toEqual({
         failedStaleRuns: 1,
+        nextAfterPrincipalId: null,
         principalIds: [TEST_PRINCIPAL_ID],
       })
       expect(retryAfterSettlement).toEqual({
         failedStaleRuns: 0,
+        nextAfterPrincipalId: null,
         principalIds: [TEST_PRINCIPAL_ID],
       })
-      expect(settledAfterReplacement).toEqual({ failedStaleRuns: 0, principalIds: [] })
+      expect(settledAfterReplacement).toEqual({
+        failedStaleRuns: 0,
+        nextAfterPrincipalId: null,
+        principalIds: [],
+      })
       expect(runs).toEqual([
         {
           id: FIFTH_RUN_ID,
@@ -1144,7 +1153,11 @@ describe("CalculationRunRepositoryLive", () => {
       const first = yield* maintain
       const retry = yield* maintain
 
-      expect(first).toEqual({ failedStaleRuns: 0, principalIds: [TEST_PRINCIPAL_ID] })
+      expect(first).toEqual({
+        failedStaleRuns: 0,
+        nextAfterPrincipalId: null,
+        principalIds: [TEST_PRINCIPAL_ID],
+      })
       expect(retry).toEqual(first)
     })
   )

@@ -243,49 +243,82 @@ const processJob = Effect.fn("worker.calculation.process", {
     "calculation-worker:job-started"
   )
 
-  yield* hydrateCoinGeckoDailyEurPrices(payload.principalId)
   const calculationRunRepository = yield* CalculationRunRepository
-  const currentTaxYear = yield* currentGermanTaxYear
-  const activeTaxYears = yield* calculationRunRepository.listActiveTaxYears({
+  const principalScope = {
     principalId: payload.principalId,
     jurisdiction: GERMAN_JURISDICTION,
     reportingCurrency: EUR,
-  })
-  const taxYears = [...new Set([...activeTaxYears, currentTaxYear])].sort(
+  }
+  const requestedTaxYears = yield* calculationRunRepository.listRequestedTaxYears(principalScope)
+  const claimedScopes = yield* Effect.forEach(requestedTaxYears, (taxYear) =>
+    calculationRunRepository
+      .claimSyncRequests({ ...principalScope, taxYear })
+      .pipe(Effect.map((syncClaims) => ({ taxYear, syncClaims })))
+  )
+  const hydration = yield* hydrateCoinGeckoDailyEurPrices(payload.principalId).pipe(Effect.result)
+  if (Result.isFailure(hydration)) {
+    yield* Effect.forEach(claimedScopes, ({ taxYear, syncClaims }) =>
+      calculationRunRepository.failSyncClaims({
+        ...principalScope,
+        taxYear,
+        claims: syncClaims,
+        failureCode: "calculation_price_hydration_failed",
+      })
+    )
+    return yield* hydration.failure
+  }
+  const currentTaxYear = yield* currentGermanTaxYear
+  const activeTaxYears = yield* calculationRunRepository.listActiveTaxYears(principalScope)
+  const taxYears = [...new Set([...requestedTaxYears, ...activeTaxYears, currentTaxYear])].sort(
     (left, right) => left - right
   )
-  const results = yield* Effect.forEach(
+  const outcomes = yield* Effect.forEach(
     taxYears,
-    (taxYear) => {
-      const runId = CalculationRunId.make(randomUUID())
-
-      return calculationRunService
-        .recompute({
-          id: runId,
-          principalId: payload.principalId,
-          jurisdiction: GERMAN_JURISDICTION,
-          taxYear,
-          reportingCurrency: EUR,
-          accountingChoices: [],
-        })
-        .pipe(
-          Effect.tap((result) =>
-            Effect.logInfo(
-              {
-                queueName: CALCULATION_RECOMPUTE_QUEUE_NAME,
-                queueJobId: job.id ?? null,
-                workerId: config.workerId,
-                principalId: payload.principalId,
-                runId,
+    (taxYear) =>
+      Effect.gen(function* () {
+        const runId = CalculationRunId.make(randomUUID())
+        const syncClaims =
+          claimedScopes.find((scope) => scope.taxYear === taxYear)?.syncClaims ??
+          (yield* calculationRunRepository.claimSyncRequests({ ...principalScope, taxYear }))
+        return yield* calculationRunService
+          .recompute({
+            id: runId,
+            ...principalScope,
+            taxYear,
+            accountingChoices: [],
+            syncClaims,
+          })
+          .pipe(
+            Effect.tap((result) =>
+              Effect.logInfo(
+                {
+                  queueName: CALCULATION_RECOMPUTE_QUEUE_NAME,
+                  queueJobId: job.id ?? null,
+                  workerId: config.workerId,
+                  principalId: payload.principalId,
+                  runId,
+                  taxYear,
+                  activated: result.activated,
+                },
+                "calculation-worker:tax-year-completed"
+              )
+            ),
+            Effect.tapError(() =>
+              calculationRunRepository.failSyncClaims({
+                ...principalScope,
                 taxYear,
-                activated: result.activated,
-              },
-              "calculation-worker:tax-year-completed"
+                claims: syncClaims,
+                failureCode: "calculation_failed",
+              })
             )
           )
-        )
-    },
+      }).pipe(Effect.result),
     { concurrency: 1 }
+  )
+  const failure = outcomes.find(Result.isFailure)
+  if (failure !== undefined) return yield* failure.failure
+  const results = outcomes.flatMap((outcome) =>
+    Result.isSuccess(outcome) ? [outcome.success] : []
   )
 
   yield* Effect.logInfo(

@@ -87,6 +87,9 @@ const emptyCalculationRunRepository = CalculationRunRepository.of({
   fail: () => Effect.die("unused fail"),
   getLatestStatus: () => Effect.die("unused getLatestStatus"),
   getSyncStatus: () => Effect.die("unused getSyncStatus"),
+  claimSyncRequests: () => Effect.succeed([]),
+  failSyncClaims: () => Effect.void,
+  listRequestedTaxYears: () => Effect.succeed([]),
   listActiveTaxYears: () => Effect.succeed([]),
   persist: () => Effect.die("unused persist"),
   settleStaleAndFindRecomputePrincipals: () => Effect.die("unused maintenance"),
@@ -146,6 +149,9 @@ const makeMaintenanceRepository = (
     fail: () => Effect.die("unused fail"),
     getLatestStatus: () => Effect.die("unused getLatestStatus"),
     getSyncStatus: () => Effect.die("unused getSyncStatus"),
+    claimSyncRequests: () => Effect.succeed([]),
+    failSyncClaims: () => Effect.void,
+    listRequestedTaxYears: () => Effect.succeed([]),
     listActiveTaxYears: () => Effect.die("unused listActiveTaxYears"),
     settleStaleAndFindRecomputePrincipals,
     persist: () => Effect.die("unused persist"),
@@ -210,6 +216,7 @@ describe("WorkerCalculationMaintenanceLive", () => {
       const repository = makeMaintenanceRepository(() =>
         Effect.succeed({
           failedStaleRuns: 1,
+          nextAfterPrincipalId: null,
           principalIds: [principalId, otherPrincipalId],
         })
       )
@@ -244,11 +251,13 @@ describe("WorkerCalculationMaintenanceLive", () => {
       expect(requested).toEqual([principalId, otherPrincipalId, principalId, otherPrincipalId])
       expect(first).toEqual({
         failedStaleRuns: 1,
+        nextAfterPrincipalId: null,
         requestedRecomputes: 1,
         failedRequests: 1,
       })
       expect(retry).toEqual({
         failedStaleRuns: 1,
+        nextAfterPrincipalId: null,
         requestedRecomputes: 2,
         failedRequests: 0,
       })
@@ -261,7 +270,7 @@ describe("WorkerCalculationMaintenanceLive", () => {
       const repository = makeMaintenanceRepository(() =>
         Effect.sync(() => {
           passes += 1
-          return { failedStaleRuns: 0, principalIds: [] }
+          return { failedStaleRuns: 0, principalIds: [], nextAfterPrincipalId: null }
         })
       )
       const queue = CalculationRecomputeQueue.of({
@@ -433,6 +442,9 @@ describe("WorkerBullMqCalculationConsumerLive", () => {
         fail: () => Effect.die("unused fail"),
         getLatestStatus: () => Effect.die("unused getLatestStatus"),
         getSyncStatus: () => Effect.die("unused getSyncStatus"),
+        claimSyncRequests: () => Effect.succeed([]),
+        failSyncClaims: () => Effect.void,
+        listRequestedTaxYears: () => Effect.succeed([]),
         listActiveTaxYears: () =>
           Effect.succeed([TaxYear.make(2022), TaxYear.make(2024), TaxYear.make(2026)]),
         persist: () => Effect.die("unused persist"),
@@ -548,6 +560,57 @@ describe("WorkerBullMqCalculationConsumerLive", () => {
 
       expect(steps).toEqual(["hydrate", "recompute"])
       expect(taxYears).toEqual([TaxYear.make(2026)])
+    })
+  )
+
+  it.effect("keeps accepted scopes across rollover and tries later years after a failure", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-12-31T22:59:59.000Z"))
+      const years: Array<number> = []
+      const failedYears: Array<number> = []
+      let processor: WorkerBullMqCalculationProcessor | null = null
+      const repository = CalculationRunRepository.of({
+        ...emptyCalculationRunRepository,
+        listRequestedTaxYears: () => Effect.succeed([TaxYear.make(2024), TaxYear.make(2026)]),
+        failSyncClaims: ({ taxYear }) =>
+          Effect.sync(() => {
+            failedYears.push(taxYear)
+          }),
+      })
+      yield* withCalculationConsumer({
+        calculationRunRepository: repository,
+        historicalPriceRepository: HistoricalAssetPriceRepository.of({
+          ...emptyHistoricalPriceRepository,
+          listMissingCoinGeckoDailyEurPriceNeeds: () =>
+            TestClock.setTime(Date.parse("2026-12-31T23:00:00.000Z")).pipe(Effect.as([])),
+        }),
+        service: CalculationRunService.of({
+          recompute: ({ taxYear, id, syncClaims }) =>
+            Effect.gen(function* () {
+              years.push(taxYear)
+              expect(syncClaims).toEqual([])
+              if (taxYear === 2024)
+                return yield* new CalculationRunAlreadyStoredError({ runId: id })
+              return writeResult
+            }),
+        }),
+        acquireWorker: (value) =>
+          Effect.sync(() => {
+            processor = value
+            return { close: Effect.void }
+          }),
+        effect: Effect.gen(function* () {
+          if (processor === null) return yield* Effect.die("Processor was not acquired")
+          const acquired = processor
+          const outcome = yield* Effect.tryPromise({
+            try: () => acquired(makeJob({ principalId })),
+            catch: (cause) => new WorkerTestPromiseRejectionError({ cause }),
+          }).pipe(Effect.result)
+          expect(Result.isFailure(outcome)).toBe(true)
+        }),
+      })
+      expect(years).toEqual([2024, 2026, 2027])
+      expect(failedYears).toEqual([2024])
     })
   )
 

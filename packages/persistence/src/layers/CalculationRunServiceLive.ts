@@ -232,6 +232,7 @@ const make = Effect.gen(function* () {
       const snapshot = yield* loadSnapshot(params)
 
       yield* calculationRunRepository.start({
+        ...(params.syncClaims === undefined ? {} : { syncClaims: params.syncClaims }),
         id: params.id,
         principalId: params.principalId,
         jurisdiction: params.jurisdiction,
