@@ -46,6 +46,22 @@ const source: SourceSyncSource = {
   walletAddress: null,
 }
 
+const PREVIOUS_LAST_SYNCED_AT = DateTime.toDateUtc(DateTime.makeUnsafe("2025-12-31T12:00:00.000Z"))
+
+const LAST_SYNCED_AT_EVENT_PREFIX = "last-synced-at:"
+
+const lastSyncedAtEvents = (events: ReadonlyArray<string>) =>
+  events
+    .filter((event) => event.startsWith(LAST_SYNCED_AT_EVENT_PREFIX))
+    .map((event) => event.slice(LAST_SYNCED_AT_EVENT_PREFIX.length))
+
+// Every progress write left the previous completion timestamp in place.
+const expectLastSyncedAtUntouched = (events: ReadonlyArray<string>) => {
+  const stamps = lastSyncedAtEvents(events)
+  expect(stamps.length).toBeGreaterThan(0)
+  expect(stamps).toEqual(stamps.map(() => PREVIOUS_LAST_SYNCED_AT.toISOString()))
+}
+
 const initialExecution: SourceSyncExecutionState = {
   phase: "discovering",
   processedRecords: 0,
@@ -122,6 +138,7 @@ const makeExecutorLayer = ({
   heartbeatIntervalMs = 10_000,
   pageSize = 100,
   prepareReplayTransactions = false,
+  previousLastSyncedAt = null,
   events,
 }: {
   readonly mode: SourceSyncJobMode
@@ -150,6 +167,7 @@ const makeExecutorLayer = ({
   readonly heartbeatIntervalMs?: number
   readonly pageSize?: number
   readonly prepareReplayTransactions?: boolean
+  readonly previousLastSyncedAt?: Date | null
   readonly events: Array<string>
 }) => {
   let heartbeatCount = 0
@@ -261,12 +279,17 @@ const makeExecutorLayer = ({
   })
 
   let latestExecutionState = initialExecution
+  // Mirrors the live repository: an omitted lastSyncedAt leaves the stored value untouched.
+  let storedLastSyncedAt = previousLastSyncedAt
   const SourceSyncStateRepositoryTestLive = Layer.succeed(SourceSyncStateRepository, {
     getExecutionState: () => Effect.succeed(latestExecutionState),
     persistProgress: ({ state, lastSyncedAt }) =>
       Effect.sync(() => {
         latestExecutionState = state
-        events.push(`progress:${state.fetchedRecords}:${lastSyncedAt === null ? "open" : "done"}`)
+        if (lastSyncedAt !== undefined) {
+          storedLastSyncedAt = lastSyncedAt
+        }
+        events.push(`${LAST_SYNCED_AT_EVENT_PREFIX}${storedLastSyncedAt?.toISOString() ?? "null"}`)
         events.push(
           `phase:${state.phase}:${state.processedRecords}:${state.totalRecords ?? "unknown"}`
         )
@@ -758,13 +781,28 @@ describe("SourceSyncJobExecutor", () => {
       const result = yield* Effect.gen(function* () {
         const executor = yield* SourceSyncJobExecutor
         return yield* executor.execute({ jobId: "job-1" })
-      }).pipe(Effect.provide(makeExecutorLayer({ mode: "sync", events })))
+      }).pipe(
+        Effect.provide(
+          makeExecutorLayer({
+            mode: "sync",
+            previousLastSyncedAt: PREVIOUS_LAST_SYNCED_AT,
+            events,
+          })
+        )
+      )
 
       expect(result.status).toBe("completed")
-      expect(events).toContain("progress:0:open")
       expect(events).toContain("heartbeat:source-sync-inline-executor")
-      expect(events).toContain("progress:0:done")
       expect(events).toContain("complete:0:0")
+
+      // Sync start and every progress write keep the previous completion;
+      // only the completion write replaces it.
+      const previous = PREVIOUS_LAST_SYNCED_AT.toISOString()
+      const stamps = lastSyncedAtEvents(events)
+      expect(stamps.length).toBeGreaterThan(1)
+      expect(stamps.slice(0, -1)).toEqual(stamps.slice(0, -1).map(() => previous))
+      const completionStamp = stamps.at(-1) ?? "null"
+      expect(Date.parse(completionStamp)).toBeGreaterThan(PREVIOUS_LAST_SYNCED_AT.getTime())
     })
   )
 
@@ -974,11 +1012,18 @@ describe("SourceSyncJobExecutor", () => {
         return yield* executor.execute({ jobId: "job-1" })
       }).pipe(
         Effect.provide(
-          makeExecutorLayer({ mode: "replay", replayRawRecords: [replayRawRecord], events })
+          makeExecutorLayer({
+            mode: "replay",
+            replayRawRecords: [replayRawRecord],
+            previousLastSyncedAt: PREVIOUS_LAST_SYNCED_AT,
+            events,
+          })
         )
       )
 
       expect(result.status).toBe("completed")
+      // A replay never touches the timestamp, before or after completion.
+      expectLastSyncedAtUntouched(events)
       expect(events).toContain("rollback-reconciliations")
       expect(events).toContain("reset-derived-state")
       expect(events).toContain("heartbeat:source-sync-inline-executor")
@@ -1303,6 +1348,7 @@ describe("SourceSyncJobExecutor", () => {
               failCreditRawRecordId: rawRecordTwo.id,
               failCreditAvailableCredits: 0,
               pageSize: 1,
+              previousLastSyncedAt: PREVIOUS_LAST_SYNCED_AT,
               events,
             })
           )
@@ -1332,6 +1378,8 @@ describe("SourceSyncJobExecutor", () => {
         expect(events).toContain(`persist-normalized:${rawRecordTwo.id}`)
         expect(events.some((event) => event.startsWith("fail:"))).toBe(false)
         expect(events.some((event) => event.startsWith("credit-required:"))).toBe(true)
+        // A credit stop is not a completion: the previous timestamp stays.
+        expectLastSyncedAtUntouched(events)
       })
   )
 
@@ -1423,12 +1471,23 @@ describe("SourceSyncJobExecutor", () => {
       const result = yield* Effect.gen(function* () {
         const executor = yield* SourceSyncJobExecutor
         return yield* executor.execute({ jobId: "job-1" })
-      }).pipe(Effect.provide(makeExecutorLayer({ mode: "sync", failFetch: true, events })))
+      }).pipe(
+        Effect.provide(
+          makeExecutorLayer({
+            mode: "sync",
+            failFetch: true,
+            previousLastSyncedAt: PREVIOUS_LAST_SYNCED_AT,
+            events,
+          })
+        )
+      )
 
       expect(result.status).toBe("failed")
       expect(result.message).toBe("provider unavailable")
       expect(events).toContain("failure-metadata:provider unavailable")
       expect(events).toContain("fail:provider unavailable")
+      // A failed sync is not a completion: the previous timestamp stays.
+      expectLastSyncedAtUntouched(events)
     })
   )
 
