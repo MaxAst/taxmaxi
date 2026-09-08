@@ -12,15 +12,15 @@ import * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import type {
   CalculationRunId,
-  CalculationSyncClaim,
+  CalculationSyncPreparation,
   CalculationRunWriteError,
   CalculationRunWriteResult,
 } from "./CalculationRunRepository.ts"
 
 /** Input for one full calculation over a stable factual snapshot. */
 export interface RecomputeCalculationRunParams {
-  /** Exact pre-snapshot claims; omission preserves normal snapshot-time claiming. */
-  readonly syncClaims?: ReadonlyArray<CalculationSyncClaim>
+  /** Explicitly observed inputs for recording a failure before a run starts. */
+  readonly syncPreparation?: CalculationSyncPreparation
   readonly id: CalculationRunId
   readonly principalId: PrincipalId
   readonly jurisdiction: JurisdictionCode

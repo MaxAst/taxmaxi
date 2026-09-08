@@ -431,8 +431,8 @@ const FailingCalculationRunRepositoryLive = Layer.effect(
       fail: repository.fail,
       getLatestStatus: repository.getLatestStatus,
       getSyncStatus: repository.getSyncStatus,
-      claimSyncRequests: repository.claimSyncRequests,
-      failSyncClaims: repository.failSyncClaims,
+      observeSyncPreparation: repository.observeSyncPreparation,
+      failSyncPreparation: repository.failSyncPreparation,
       listRequestedTaxYears: repository.listRequestedTaxYears,
       listActiveTaxYears: repository.listActiveTaxYears,
       persist: () =>

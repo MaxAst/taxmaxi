@@ -250,12 +250,12 @@ const processJob = Effect.fn("worker.calculation.process", {
     reportingCurrency: EUR,
   }
   const requestedTaxYears = yield* calculationRunRepository.listRequestedTaxYears(principalScope)
-  // Reserve only the scope about to run; later scopes must not age while waiting.
+  // Observe preparation inputs without reserving work during slow price hydration.
   const firstRequestedYear = requestedTaxYears[0]
-  const firstClaims =
+  const firstPreparation =
     firstRequestedYear === undefined
-      ? []
-      : yield* calculationRunRepository.claimSyncRequests({
+      ? undefined
+      : yield* calculationRunRepository.observeSyncPreparation({
           ...principalScope,
           taxYear: firstRequestedYear,
         })
@@ -277,22 +277,23 @@ const processJob = Effect.fn("worker.calculation.process", {
     (taxYear) =>
       Effect.gen(function* () {
         const runId = CalculationRunId.make(randomUUID())
-        const syncClaims =
+        const syncPreparation =
           taxYear === firstRequestedYear
-            ? firstClaims
-            : yield* calculationRunRepository.claimSyncRequests({ ...principalScope, taxYear })
-        // Stored quotes are reused; each later scope owns work only for its own hydration/run.
+            ? firstPreparation
+            : yield* calculationRunRepository.observeSyncPreparation({ ...principalScope, taxYear })
+        // Stored quotes are reused; each scope observes inputs before its own preparation.
         const hydration =
           taxYear === taxYears[0]
             ? initialHydration
             : yield* hydrateCoinGeckoDailyEurPrices(payload.principalId).pipe(Effect.result)
         if (Result.isFailure(hydration)) {
-          yield* calculationRunRepository.failSyncClaims({
-            ...principalScope,
-            taxYear,
-            claims: syncClaims,
-            failureCode: "calculation_price_hydration_failed",
-          })
+          if (syncPreparation !== undefined)
+            yield* calculationRunRepository.failSyncPreparation({
+              ...principalScope,
+              taxYear,
+              preparation: syncPreparation,
+              failureCode: "calculation_price_hydration_failed",
+            })
           return yield* hydration.failure
         }
         return yield* calculationRunService
@@ -301,7 +302,7 @@ const processJob = Effect.fn("worker.calculation.process", {
             ...principalScope,
             taxYear,
             accountingChoices: [],
-            syncClaims,
+            ...(syncPreparation === undefined ? {} : { syncPreparation }),
           })
           .pipe(
             Effect.tap((result) =>
@@ -317,14 +318,6 @@ const processJob = Effect.fn("worker.calculation.process", {
                 },
                 "calculation-worker:tax-year-completed"
               )
-            ),
-            Effect.tapError(() =>
-              calculationRunRepository.failSyncClaims({
-                ...principalScope,
-                taxYear,
-                claims: syncClaims,
-                failureCode: "calculation_failed",
-              })
             )
           )
       }).pipe(Effect.result),

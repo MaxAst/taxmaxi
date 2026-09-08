@@ -1124,6 +1124,8 @@ describe("completed sync through worker and durable recovery", () => {
       Effect.gen(function* () {
         yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
         const firstJob = yield* Effect.promise(() => completeJob())
+        let firstRun: CalculationRunId | undefined
+        let secondRun: CalculationRunId | undefined
         const established = yield* Deferred.make<void>()
         const release = yield* Deferred.make<void>()
         const ledgerLayer = Layer.effect(
@@ -1156,20 +1158,47 @@ describe("completed sync through worker and durable recovery", () => {
                 })
               )
               expect(queued).toContain(scope.principalId)
-              yield* withWorker((second) => deliver(second))
+              yield* withWorker((second) => deliver(second), {
+                wrapRepository: (repository) => ({
+                  ...repository,
+                  start: (params) =>
+                    Effect.gen(function* () {
+                      secondRun = params.id
+                      return yield* repository.start(params)
+                    }),
+                }),
+              })
               const secondResult = yield* Effect.promise(() => readStatus(laterJob))
               expect(secondResult.jobs[0]?.work?.status).toBe("succeeded")
               yield* Deferred.succeed(release, undefined)
               yield* Fiber.join(running)
               const firstStatus = yield* Effect.promise(() => readStatus(firstJob))
               const laterStatus = yield* Effect.promise(() => readStatus(laterJob))
-              const firstRun = firstStatus.jobs[0]?.work?.attempts[0]?.runId
               expect(firstRun).toBeDefined()
-              if (firstRun === undefined || firstRun === null)
-                return yield* Effect.die("First request has no run")
+              if (firstRun === undefined)
+                return yield* Effect.die("First consumer did not start a run")
+              const firstRunId = firstRun
+              expect(yield* Effect.promise(() => capturedIds(firstRunId))).toEqual([
+                { requestId: firstStatus.jobs[0]?.work?.requestId },
+              ])
+              if (secondRun === undefined)
+                return yield* Effect.die("Second consumer did not start a run")
+              const secondRunId = secondRun
               expect(
-                yield* Effect.promise(() => capturedIds(CalculationRunId.make(firstRun)))
-              ).toEqual([{ requestId: firstStatus.jobs[0]?.work?.requestId }])
+                (yield* Effect.promise(() => capturedIds(secondRunId))).sort((left, right) =>
+                  left.requestId.localeCompare(right.requestId)
+                )
+              ).toEqual(
+                [firstStatus.jobs[0]?.work?.requestId, laterStatus.jobs[0]?.work?.requestId]
+                  .sort((left, right) => (left ?? "").localeCompare(right ?? ""))
+                  .map((requestId) => ({ requestId }))
+              )
+              expect(firstStatus.jobs[0]?.work?.attempts).toMatchObject([
+                { runId: secondRun, status: "succeeded" },
+              ])
+              expect(laterStatus.jobs[0]?.work?.attempts).toMatchObject([
+                { runId: secondRun, status: "succeeded" },
+              ])
               expect(laterStatus.jobs[0]?.work?.attempts).toHaveLength(1)
               expect(laterStatus.jobs[0]?.work?.status).toBe("succeeded")
               // Duplicate delivery adds coverage, but never a second attempt to already settled work.
@@ -1178,7 +1207,17 @@ describe("completed sync through worker and durable recovery", () => {
                 (yield* Effect.promise(() => readStatus(laterJob))).jobs[0]?.work?.attempts
               ).toHaveLength(1)
             }).pipe(Effect.ensuring(Deferred.succeed(release, undefined))),
-          { ledgerLayer }
+          {
+            ledgerLayer,
+            wrapRepository: (repository) => ({
+              ...repository,
+              start: (params) =>
+                Effect.gen(function* () {
+                  firstRun = params.id
+                  return yield* repository.start(params)
+                }),
+            }),
+          }
         )
       })
   )
@@ -1254,52 +1293,282 @@ describe("completed sync through worker and durable recovery", () => {
     })
   )
 
-  it.effect("claiming 8200 accepted requests preserves exact request and attempt identities", () =>
-    Effect.gen(function* () {
-      yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
-      const requestIds = yield* Effect.promise(seedManyAcceptedRequests)
-      const claims = yield* repositoryEffect((repository) => repository.claimSyncRequests(scope))
-      expect(
-        claims.map((claim) => claim.requestId).sort((left, right) => left.localeCompare(right))
-      ).toEqual(requestIds)
-      const state = yield* Effect.promise(() =>
-        runPg(
-          Effect.gen(function* () {
-            const db = yield* drizzle
-            return {
-              requests: yield* db
-                .select({
-                  id: schema.calculationSyncRequests.id,
-                  status: schema.calculationSyncRequests.status,
-                })
-                .from(schema.calculationSyncRequests),
-              attempts: yield* db
-                .select({
-                  requestId: schema.calculationSyncAttempts.requestId,
-                  attemptId: schema.calculationSyncAttempts.id,
-                  status: schema.calculationSyncAttempts.status,
-                  runId: schema.calculationSyncAttempts.runId,
-                })
-                .from(schema.calculationSyncAttempts),
-            }
+  it.effect(
+    "8200 accepted requests create exact run-linked attempts at the accounting snapshot",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+        const requestIds = yield* Effect.promise(seedManyAcceptedRequests)
+        yield* context.runWithLayer({ layer: serviceLayer, effect: recomputeEffect(R1) })
+        expect(
+          (yield* Effect.promise(() => capturedIds(R1)))
+            .map((row) => row.requestId)
+            .sort((left, right) => left.localeCompare(right))
+        ).toEqual(requestIds)
+        const state = yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return {
+                requests: yield* db
+                  .select({
+                    id: schema.calculationSyncRequests.id,
+                    status: schema.calculationSyncRequests.status,
+                  })
+                  .from(schema.calculationSyncRequests),
+                attempts: yield* db
+                  .select({
+                    requestId: schema.calculationSyncAttempts.requestId,
+                    attemptId: schema.calculationSyncAttempts.id,
+                    status: schema.calculationSyncAttempts.status,
+                    runId: schema.calculationSyncAttempts.runId,
+                  })
+                  .from(schema.calculationSyncAttempts),
+              }
+            })
+          )
+        )
+        expect(
+          state.requests.map((row) => row.id).sort((left, right) => left.localeCompare(right))
+        ).toEqual(requestIds)
+        expect(state.requests.every((row) => row.status === "succeeded")).toBe(true)
+        expect(
+          state.attempts
+            .map((row) => row.requestId)
+            .sort((left, right) => left.localeCompare(right))
+        ).toEqual(requestIds)
+        expect(state.attempts.every((row) => row.status === "succeeded" && row.runId === R1)).toBe(
+          true
+        )
+        expect(new Set(state.attempts.map((row) => row.attemptId)).size).toBe(8200)
+      })
+  )
+
+  it.effect(
+    "preparation failure records only observed owned requests and excludes later work",
+    () =>
+      Effect.gen(function* () {
+        const firstJob = yield* Effect.promise(() => completeJob())
+        const preparation = yield* repositoryEffect((repository) =>
+          repository.observeSyncPreparation(scope)
+        )
+        const foreignPrincipal = PrincipalId.make("00000000-0000-4000-8000-000000000199")
+        const foreignSource = "00000000-0000-4000-8000-000000000299"
+        yield* Effect.promise(() =>
+          runPg(
+            seedSyncEngineRepositoryFixture({
+              principalId: foreignPrincipal,
+              sourceId: foreignSource,
+              userId: "00000000-0000-4000-8000-000000000198",
+            })
+          )
+        )
+        yield* Effect.promise(() =>
+          completeJob({ principalId: foreignPrincipal, sourceId: foreignSource })
+        )
+        const foreignPreparation = yield* repositoryEffect((repository) =>
+          repository.observeSyncPreparation({ ...scope, principalId: foreignPrincipal })
+        )
+        const laterJob = yield* Effect.promise(() => completeJob())
+        yield* repositoryEffect((repository) =>
+          repository.failSyncPreparation({
+            ...scope,
+            preparation: {
+              ...preparation,
+              requestIds: [...preparation.requestIds, ...foreignPreparation.requestIds],
+            },
+            failureCode: "synthetic_preparation_failure",
           })
+        )
+        expect((yield* Effect.promise(() => readStatus(firstJob))).jobs[0]?.work).toMatchObject({
+          status: "failed",
+          attempts: [
+            { runId: null, status: "failed", failureCode: "synthetic_preparation_failure" },
+          ],
+        })
+        expect((yield* Effect.promise(() => readStatus(laterJob))).jobs[0]?.work).toMatchObject({
+          status: "queued",
+          attempts: [],
+        })
+        const foreign = yield* repositoryEffect((repository) =>
+          repository.getSyncStatus({ ...scope, principalId: foreignPrincipal })
+        )
+        expect(foreign.jobs[0]?.work).toMatchObject({ status: "queued", attempts: [] })
+      })
+  )
+
+  it.effect("preparation failure safely records 8200 exact terminal runless attempts", () =>
+    Effect.gen(function* () {
+      const requestIds = yield* Effect.promise(seedManyAcceptedRequests)
+      const preparation = yield* repositoryEffect((repository) =>
+        repository.observeSyncPreparation(scope)
+      )
+      expect([...preparation.requestIds].sort((left, right) => left.localeCompare(right))).toEqual(
+        requestIds
+      )
+      yield* repositoryEffect((repository) =>
+        repository.failSyncPreparation({
+          ...scope,
+          preparation,
+          failureCode: "synthetic_bulk_preparation_failure",
+        })
+      )
+      const attempts = yield* Effect.promise(() =>
+        runPg(
+          Effect.flatMap(drizzle, (db) =>
+            db
+              .select({
+                id: schema.calculationSyncAttempts.id,
+                requestId: schema.calculationSyncAttempts.requestId,
+                status: schema.calculationSyncAttempts.status,
+                runId: schema.calculationSyncAttempts.runId,
+                failureCode: schema.calculationSyncAttempts.failureCode,
+              })
+              .from(schema.calculationSyncAttempts)
+          )
         )
       )
       expect(
-        state.requests.map((row) => row.id).sort((left, right) => left.localeCompare(right))
+        attempts.map((row) => row.requestId).sort((left, right) => left.localeCompare(right))
       ).toEqual(requestIds)
-      expect(state.requests.every((row) => row.status === "running")).toBe(true)
+      expect(new Set(attempts.map((row) => row.id)).size).toBe(8200)
       expect(
-        state.attempts
-          .map(({ requestId, attemptId }) => ({ requestId, attemptId }))
-          .sort((left, right) => left.requestId.localeCompare(right.requestId))
-      ).toEqual([...claims].sort((left, right) => left.requestId.localeCompare(right.requestId)))
-      expect(state.attempts.every((row) => row.status === "running" && row.runId === null)).toBe(
-        true
-      )
-      expect(new Set(state.attempts.map((row) => row.attemptId)).size).toBe(8200)
+        attempts.every(
+          (row) =>
+            row.status === "failed" &&
+            row.runId === null &&
+            row.failureCode === "synthetic_bulk_preparation_failure"
+        )
+      ).toBe(true)
     })
   )
+
+  it.effect("slow failed hydration keeps its original observation and actual failure time", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+      const firstJob = yield* Effect.promise(() => completeJob())
+      const reached = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      yield* withWorker(
+        (processor) =>
+          Effect.gen(function* () {
+            const running = yield* Effect.forkChild(Effect.exit(deliver(processor)))
+            yield* Deferred.await(reached)
+            const laterJob = yield* Effect.promise(() => completeJob())
+            yield* TestClock.setTime(Date.parse("2026-02-01T00:06:00Z"))
+            const repaired = yield* maintenance(
+              CalculationRecomputeQueue.of({ enqueuePrincipalRecompute: () => Effect.void }),
+              DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:01:00Z"))
+            )
+            expect(repaired.failedStaleRuns).toBe(0)
+            yield* Deferred.succeed(release, undefined)
+            expect(Exit.isFailure(yield* Fiber.join(running))).toBe(true)
+            const first = (yield* Effect.promise(() => readStatus(firstJob))).jobs[0]?.work
+            expect(first).toMatchObject({
+              status: "failed",
+              attempts: [
+                {
+                  status: "failed",
+                  runId: null,
+                  failureCode: "calculation_price_hydration_failed",
+                },
+              ],
+            })
+            expect((yield* Effect.promise(() => readStatus(laterJob))).jobs[0]?.work).toMatchObject(
+              { status: "queued", attempts: [] }
+            )
+            const attempts = yield* Effect.promise(() =>
+              runPg(
+                Effect.flatMap(drizzle, (db) =>
+                  db
+                    .select({
+                      requestId: schema.calculationSyncAttempts.requestId,
+                      startedAt: schema.calculationSyncAttempts.startedAt,
+                      completedAt: schema.calculationSyncAttempts.completedAt,
+                    })
+                    .from(schema.calculationSyncAttempts)
+                )
+              )
+            )
+            expect(attempts).toEqual([
+              {
+                requestId: first?.requestId,
+                startedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z")),
+                completedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:06:00Z")),
+              },
+            ])
+          }).pipe(Effect.ensuring(Deferred.succeed(release, undefined))),
+        {
+          priceNeeds: () =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(reached, undefined)
+              yield* Deferred.await(release)
+              return yield* new PersistenceError({
+                operation: "synthetic.slow_hydration",
+                cause: "price storage unavailable",
+              })
+            }),
+        }
+      )
+    })
+  )
+
+  for (const phase of ["hydration", "snapshot"] as const) {
+    it.effect(
+      `slow ${phase} remains eligible through maintenance and preserves later accepted work`,
+      () =>
+        Effect.gen(function* () {
+          yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+          const firstJob = yield* Effect.promise(() => completeJob())
+          const reached = yield* Deferred.make<void>()
+          const release = yield* Deferred.make<void>()
+          const pause = Deferred.succeed(reached, undefined).pipe(
+            Effect.andThen(Deferred.await(release))
+          )
+          const ledgerLayer = Layer.effect(
+            FactualLedgerRepository,
+            Effect.map(FactualLedgerRepository, (repository) =>
+              FactualLedgerRepository.of({
+                load: (params) => pause.pipe(Effect.andThen(repository.load(params))),
+              })
+            )
+          ).pipe(Layer.provide(FactualLedgerRepositoryLive))
+          yield* withWorker(
+            (processor) =>
+              Effect.gen(function* () {
+                const running = yield* Effect.forkChild(deliver(processor))
+                yield* Deferred.await(reached)
+                const laterJob = yield* Effect.promise(() => completeJob())
+                yield* TestClock.setTime(Date.parse("2026-02-01T00:06:00Z"))
+                const repaired = yield* maintenance(
+                  CalculationRecomputeQueue.of({ enqueuePrincipalRecompute: () => Effect.void }),
+                  DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:01:00Z"))
+                )
+                expect(repaired.failedStaleRuns).toBe(0)
+                expect(
+                  (yield* Effect.promise(() => readStatus(firstJob))).jobs[0]?.work
+                ).toMatchObject({ status: "queued", attempts: [] })
+                expect(
+                  (yield* Effect.promise(() => readStatus(laterJob))).jobs[0]?.work
+                ).toMatchObject({ status: "queued", attempts: [] })
+                yield* Deferred.succeed(release, undefined)
+                yield* Fiber.join(running)
+                expect(
+                  (yield* Effect.promise(() => readStatus(firstJob))).jobs[0]?.work
+                ).toMatchObject({ status: "succeeded", attempts: [{ status: "succeeded" }] })
+                expect(
+                  (yield* Effect.promise(() => readStatus(laterJob))).jobs[0]?.work?.status
+                ).toBe(phase === "snapshot" ? "queued" : "succeeded")
+                yield* withWorker((next) => deliver(next))
+                expect(
+                  (yield* Effect.promise(() => readStatus(laterJob))).jobs[0]?.work?.status
+                ).toBe("succeeded")
+              }).pipe(Effect.ensuring(Deferred.succeed(release, undefined))),
+            phase === "snapshot" ? { ledgerLayer } : { priceNeeds: () => pause.pipe(Effect.as([])) }
+          )
+        })
+    )
+  }
 
   it.effect("bounded maintenance advances past a repeatedly failing principal", () =>
     Effect.gen(function* () {
@@ -1356,100 +1625,80 @@ describe("completed sync through worker and durable recovery", () => {
     })
   )
 
-  for (const phase of ["runless", "started"] as const) {
-    it.effect(
-      `maintenance expires ${phase} work and stale claim IDs cannot settle its replacement`,
-      () =>
-        Effect.gen(function* () {
-          yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
-          const job = yield* Effect.promise(() => completeJob())
-          const claims = yield* repositoryEffect((repository) =>
-            repository.claimSyncRequests(scope)
+  it.effect(
+    "maintenance expires a started run while late preparation and finalization leave its replacement intact",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-02-01T00:00:00Z"))
+        const job = yield* Effect.promise(() => completeJob())
+        const preparation = yield* repositoryEffect((repository) =>
+          repository.observeSyncPreparation(scope)
+        )
+        const reached = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const repositoryLayer = Layer.effect(
+          CalculationRunRepository,
+          Effect.map(CalculationRunRepository, (repository) =>
+            CalculationRunRepository.of({
+              ...repository,
+              persist: (params) =>
+                Effect.gen(function* () {
+                  yield* Deferred.succeed(reached, undefined)
+                  yield* Deferred.await(release)
+                  return yield* repository.persist(params)
+                }),
+            })
           )
-          expect(claims).toHaveLength(1)
-          const reached = yield* Deferred.make<void>()
-          const release = yield* Deferred.make<void>()
-          const repositoryLayer = Layer.effect(
-            CalculationRunRepository,
-            Effect.map(CalculationRunRepository, (repository) =>
-              CalculationRunRepository.of({
-                ...repository,
-                persist: (params) =>
-                  Effect.gen(function* () {
-                    yield* Deferred.succeed(reached, undefined)
-                    yield* Deferred.await(release)
-                    return yield* repository.persist(params)
-                  }),
+        ).pipe(Layer.provide(CalculationRunRepositoryLive))
+        yield* Effect.gen(function* () {
+          const delayed = yield* Effect.forkChild(
+            Effect.exit(
+              context.runWithLayer({
+                layer: CalculationRunServiceLive.pipe(
+                  Layer.provide(Layer.merge(repositoryLayer, FactualLedgerRepositoryLive))
+                ),
+                effect: recomputeEffect(R1),
               })
             )
-          ).pipe(Layer.provide(CalculationRunRepositoryLive))
-          const delayed =
-            phase === "started"
-              ? yield* Effect.forkChild(
-                  Effect.exit(
-                    context.runWithLayer({
-                      layer: CalculationRunServiceLive.pipe(
-                        Layer.provide(Layer.merge(repositoryLayer, FactualLedgerRepositoryLive))
-                      ),
-                      effect: Effect.flatMap(CalculationRunService, (service) =>
-                        service.recompute({
-                          ...scope,
-                          id: R1,
-                          accountingChoices: [],
-                          syncClaims: claims,
-                        })
-                      ),
-                    })
-                  )
-                )
-              : null
-          if (delayed !== null) yield* Deferred.await(reached)
-          const queued: string[] = []
+          )
+          yield* Deferred.await(reached)
+          yield* repositoryEffect((repository) =>
+            repository.failSyncPreparation({
+              ...scope,
+              preparation,
+              failureCode: "late_preparation_failure",
+            })
+          )
+          expect((yield* Effect.promise(() => readStatus(job))).jobs[0]?.work).toMatchObject({
+            status: "running",
+            attempts: [{ status: "running", runId: R1 }],
+          })
+          yield* TestClock.setTime(Date.parse("2026-02-01T00:06:00Z"))
           const repaired = yield* maintenance(
-            CalculationRecomputeQueue.of({
-              enqueuePrincipalRecompute: (principalId) =>
-                Effect.sync(() => {
-                  queued.push(principalId)
-                }),
-            }),
+            CalculationRecomputeQueue.of({ enqueuePrincipalRecompute: () => Effect.void }),
             DateTime.toDateUtc(DateTime.makeUnsafe("2099-01-01T00:00:00Z"))
           )
-          expect(repaired.failedStaleRuns).toBe(phase === "started" ? 1 : 0)
-          expect(queued).toContain(scope.principalId)
-          const failed = (yield* Effect.promise(() => readStatus(job))).jobs[0]?.work
-          expect(failed).toMatchObject({
-            status: "failed",
-            attempts: [
-              {
-                status: "failed",
-                failureCode: "calculation_stale_recomputed",
-                runId: phase === "started" ? R1 : null,
-              },
-            ],
-          })
+          expect(repaired.failedStaleRuns).toBe(1)
           yield* withWorker((processor) => deliver(processor))
           const replacement = yield* Effect.promise(() => readStatus(job))
-          expect(replacement.jobs[0]?.work?.status).toBe("succeeded")
+          expect(replacement.jobs[0]?.work).toMatchObject({
+            status: "succeeded",
+            attempts: [
+              { runId: R1, status: "failed", failureCode: "calculation_stale_recomputed" },
+              { status: "succeeded" },
+            ],
+          })
           yield* repositoryEffect((repository) =>
-            repository.failSyncClaims({ ...scope, claims, failureCode: "late_old_failure" })
+            repository.failSyncPreparation({
+              ...scope,
+              preparation,
+              failureCode: "late_old_failure",
+            })
           )
+          yield* Deferred.succeed(release, undefined)
+          expect(Exit.isFailure(yield* Fiber.join(delayed))).toBe(true)
           expect(yield* Effect.promise(() => readStatus(job))).toEqual(replacement)
-          if (delayed !== null) {
-            yield* Deferred.succeed(release, undefined)
-            expect(Exit.isFailure(yield* Fiber.join(delayed))).toBe(true)
-          } else {
-            const expired = yield* Effect.exit(
-              context.runWithLayer({
-                layer: serviceLayer,
-                effect: Effect.flatMap(CalculationRunService, (service) =>
-                  service.recompute({ ...scope, id: R2, accountingChoices: [], syncClaims: claims })
-                ),
-              })
-            )
-            expect(Exit.isFailure(expired)).toBe(true)
-          }
-          expect(yield* Effect.promise(() => readStatus(job))).toEqual(replacement)
-        })
-    )
-  }
+        }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)))
+      })
+  )
 })

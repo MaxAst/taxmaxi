@@ -174,8 +174,8 @@ const CalculationRunStatusFailureTestLive = Layer.succeed(
   CalculationRunRepository.of({
     fail: () => Effect.die("CalculationRunRepository test stub: fail"),
     getSyncStatus: () => Effect.die("unused getSyncStatus"),
-    claimSyncRequests: () => Effect.succeed([]),
-    failSyncClaims: () => Effect.void,
+    observeSyncPreparation: () => Effect.die("unused observeSyncPreparation"),
+    failSyncPreparation: () => Effect.void,
     listRequestedTaxYears: () => Effect.succeed([]),
     getLatestStatus: () =>
       Effect.fail(
@@ -472,8 +472,8 @@ describe("SyncRunsApiLive", () => {
             fail: repository.fail,
             getLatestStatus: repository.getLatestStatus,
             getSyncStatus: repository.getSyncStatus,
-            claimSyncRequests: repository.claimSyncRequests,
-            failSyncClaims: repository.failSyncClaims,
+            observeSyncPreparation: repository.observeSyncPreparation,
+            failSyncPreparation: repository.failSyncPreparation,
             listRequestedTaxYears: repository.listRequestedTaxYears,
             listActiveTaxYears: repository.listActiveTaxYears,
             settleStaleAndFindRecomputePrincipals: repository.settleStaleAndFindRecomputePrincipals,

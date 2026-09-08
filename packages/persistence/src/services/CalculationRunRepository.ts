@@ -48,10 +48,10 @@ export const CalculationSyncAttemptId = Schema.String.check(Schema.isUUID()).pip
 /** Stable identity of one attempt at a completed-sync request. */
 export type CalculationSyncAttemptId = typeof CalculationSyncAttemptId.Type
 
-/** Exact work owned by one worker before its accounting snapshot exists. */
-export interface CalculationSyncClaim {
-  readonly requestId: CalculationSyncRequestId
-  readonly attemptId: CalculationSyncAttemptId
+/** Exact queued or failed requests observed before calculation preparation starts. */
+export interface CalculationSyncPreparation {
+  readonly requestIds: ReadonlyArray<CalculationSyncRequestId>
+  readonly startedAt: Date
 }
 
 /** Exact request links read alongside the factual ledger; an empty array is explicit evidence. */
@@ -144,8 +144,6 @@ export interface PersistCalculationRunParams {
 
 /** Input metadata committed before the pure engine starts. */
 export interface StartCalculationRunParams {
-  /** Omission uses normal snapshot-time claiming; supplied pairs must still be owned. */
-  readonly syncClaims?: ReadonlyArray<CalculationSyncClaim>
   readonly id: CalculationRunId
   readonly principalId: PrincipalId
   readonly jurisdiction: JurisdictionCode
@@ -287,15 +285,15 @@ export interface CalculationSyncStatus {
 
 /** Persistence contract for atomic, write-once calculation results. */
 export interface CalculationRunRepositoryShape {
-  /** Claim queued/failed scope work before hydration without inventing a calculation run. */
-  readonly claimSyncRequests: (
+  /** Observe exact preparation inputs without claiming requests or writing attempts. */
+  readonly observeSyncPreparation: (
     params: GetLatestCalculationRunStatusParams
-  ) => Effect.Effect<ReadonlyArray<CalculationSyncClaim>, PersistenceError>
+  ) => Effect.Effect<CalculationSyncPreparation, PersistenceError>
 
-  /** Fail only the caller's exact still-running, runless attempts. */
-  readonly failSyncClaims: (
+  /** Record failed preparation only for observed requests still queued or failed in this scope. */
+  readonly failSyncPreparation: (
     params: GetLatestCalculationRunStatusParams & {
-      readonly claims: ReadonlyArray<CalculationSyncClaim>
+      readonly preparation: CalculationSyncPreparation
       readonly failureCode: string
     }
   ) => Effect.Effect<void, PersistenceError>
