@@ -19,7 +19,7 @@ export type FirstSyncState =
 /** The part of a source overview the state reads. */
 export type FirstSyncSourceOverview = {
   readonly source: { readonly id: SourceOverview["source"]["id"] }
-  readonly latestSync: Pick<SourceOverview["latestSync"], "lastSyncedAt" | "status">
+  readonly latestSync: Pick<SourceOverview["latestSync"], "jobId" | "lastSyncedAt" | "status">
 }
 
 /** The part of billing status the state reads; `null` when the load failed (non-401). */
@@ -56,6 +56,8 @@ export function hasActiveSubscription(billing: FirstSyncBilling): boolean {
   return billing?.subscriptionStatus === "active" || billing?.subscriptionStatus === "trialing"
 }
 
+const NO_PENDING_COMPLETIONS: ReadonlySet<string> = new Set()
+
 /**
  * Derives the first-sync state from server facts plus the sync hook's
  * in-memory items (#108 D03). Never stored; reload recomputes it from the
@@ -64,21 +66,33 @@ export function hasActiveSubscription(billing: FirstSyncBilling): boolean {
  * Precedence, top to bottom:
  * 1. any source has `lastSyncedAt` → `done`
  * 2. no source → `needs_source`
- * 3. the target's item is queued, running, or completed → `syncing`
- *    (a completed item stays "underway" until the overview confirms it)
- * 4. billing failed to load → `billing_unknown`
- * 5. the target's item is `credit_required` → `paused` or `resumable`
- * 6. the target's item failed, or the latest sync failed with no item → `failed`
- * 7. otherwise `ready` or `needs_credits`
+ * 3. the target's item is queued, running, or completed, or its completion
+ *    still waits for the overview refetch → `syncing` (the wizard never
+ *    flashes a second Start during the hand-off)
+ * 4. no item yet and the overview's latest job is pending or processing → `syncing`
+ *    (after a reload the hook seeds its items in an effect; the overview's
+ *    job status decides the first paint)
+ * 5. billing failed to load → `billing_unknown`
+ * 6. the target's item is `credit_required`, or no item yet and the overview's
+ *    latest job is `credit_required` → `paused` or `resumable`
+ * 7. the target's item failed, or the latest sync failed with no item → `failed`
+ * 8. otherwise `ready` or `needs_credits`
  */
 export function getFirstSyncState({
   billing,
   items,
   overviews,
+  pendingCompletionSourceIds = NO_PENDING_COMPLETIONS,
 }: {
   readonly billing: FirstSyncBilling
   readonly items: ReadonlyArray<FirstSyncItem>
   readonly overviews: ReadonlyArray<FirstSyncSourceOverview>
+  /**
+   * Sources whose sync completed but whose overview refetch has not resolved
+   * successfully yet. The hook drops a completed item after a short delay,
+   * so this keeps `syncing` until the overview can confirm `lastSyncedAt`.
+   */
+  readonly pendingCompletionSourceIds?: ReadonlySet<string>
 }): FirstSyncStateResult {
   if (overviews.some((overview) => overview.latestSync.lastSyncedAt !== null)) {
     return { state: "done", targetSourceId: null }
@@ -94,21 +108,38 @@ export function getFirstSyncState({
   const item = items.find((candidate) => candidate.id === targetSourceId)
 
   return {
-    state: getTargetState({ billing, item, latestStatus: target.latestSync.status }),
+    state: getTargetState({
+      billing,
+      completionPending: pendingCompletionSourceIds.has(targetSourceId),
+      item,
+      latestSync: target.latestSync,
+    }),
     targetSourceId,
   }
 }
 
 function getTargetState({
   billing,
+  completionPending,
   item,
-  latestStatus,
+  latestSync,
 }: {
   readonly billing: FirstSyncBilling
+  readonly completionPending: boolean
   readonly item: FirstSyncItem | undefined
-  readonly latestStatus: FirstSyncSourceOverview["latestSync"]["status"]
+  readonly latestSync: FirstSyncSourceOverview["latestSync"]
 }): FirstSyncState {
-  if (item?.status === "queued" || item?.status === "running" || item?.status === "completed") {
+  // When the hook has an item for the source, the item decides. Before it has
+  // one (the reconnect seed runs in an effect), the overview's latest job
+  // stands in for it (#108 D03, T05 review rows).
+  const jobStatus = item?.status ?? toSeedJobStatus(latestSync)
+
+  if (
+    completionPending ||
+    jobStatus === "queued" ||
+    jobStatus === "running" ||
+    jobStatus === "completed"
+  ) {
     return "syncing"
   }
 
@@ -116,13 +147,40 @@ function getTargetState({
     return "billing_unknown"
   }
 
-  if (item?.status === "credit_required") {
+  if (jobStatus === "credit_required") {
     return hasUsableCredits(billing) ? "resumable" : "paused"
   }
 
-  if (item?.status === "failed" || latestStatus === "failed") {
+  if (item?.status === "failed" || latestSync.status === "failed") {
     return "failed"
   }
 
   return hasUsableCredits(billing) ? "ready" : "needs_credits"
+}
+
+/**
+ * The overview job the reload seed would reconnect to, in the job endpoint's
+ * words (`pending` is `queued`, `processing` is `running`). Only jobs with a
+ * `jobId` count, mirroring the seed (#108 D02); a completed or failed job is
+ * history and yields nothing.
+ */
+function toSeedJobStatus(
+  latestSync: FirstSyncSourceOverview["latestSync"]
+): FirstSyncItem["status"] | undefined {
+  if (latestSync.jobId === null) {
+    return undefined
+  }
+
+  switch (latestSync.status) {
+    case "pending":
+      return "queued"
+    case "processing":
+      return "running"
+    case "credit_required":
+      return "credit_required"
+    case "completed":
+    case "failed":
+    case null:
+      return undefined
+  }
 }

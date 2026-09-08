@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { FirstSyncWizard, type FirstSyncWizardState } from "#/components/first-sync-wizard"
 import type { FirstSyncBilling } from "#/lib/first-sync-state"
+import { setLocale } from "#/paraglide/runtime"
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to }: { readonly children: ReactNode; readonly to: string }) => (
@@ -170,6 +171,21 @@ describe("FirstSyncWizard copy and actions per state", () => {
     renderWizard({ billing: billing(500, "active"), state: "ready" })
 
     expect(screen.getByText("500 credits available")).toBeTruthy()
+  })
+
+  it("formats the credit count in the selected locale", async () => {
+    const originalUrl = window.location.href
+    window.history.replaceState(null, "", "/app")
+    await setLocale("de", { reload: false })
+    try {
+      renderWizard({ billing: billing(10_000, "active"), state: "ready" })
+
+      expect(screen.getByText("10.000 Credits verfügbar")).toBeTruthy()
+    } finally {
+      cleanup()
+      await setLocale("en", { reload: false })
+      window.history.replaceState(null, "", originalUrl)
+    }
   })
 
   it("syncing says the sync is underway and offers no action", () => {

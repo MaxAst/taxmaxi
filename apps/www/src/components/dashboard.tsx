@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { useRouteContext } from "@tanstack/react-router"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import { Ellipsis, RotateCcw } from "lucide-react"
@@ -59,6 +59,25 @@ type DashboardSummary = {
 }
 
 const NO_OVERVIEWS: ReadonlyArray<SourceOverview> = []
+
+/**
+ * A source whose sync completed while its overview refetch has not resolved
+ * successfully yet. `dataUpdateCount` is the overview query's count at the
+ * moment of completion; a later successful fetch raises it.
+ */
+type PendingCompletion = {
+  readonly sourceId: AccountId
+  readonly dataUpdateCount: number
+}
+
+function getOverviewDataUpdateCount(queryClient: QueryClient, sourceId: AccountId): number {
+  return queryClient.getQueryState(queryKeys.sourceOverview(sourceId))?.dataUpdateCount ?? 0
+}
+
+function isCompletionConfirmed(queryClient: QueryClient, pending: PendingCompletion): boolean {
+  const state = queryClient.getQueryState(queryKeys.sourceOverview(pending.sourceId))
+  return state?.status === "success" && state.dataUpdateCount > pending.dataUpdateCount
+}
 
 export function Dashboard({
   accounts = mockAccounts,
@@ -121,6 +140,7 @@ export function Dashboard({
   )
   const [syncCompletedAt, setSyncCompletedAt] = useState<number | null>(null)
   const [fastRefresh, setFastRefresh] = useState(false)
+  const [pendingCompletions, setPendingCompletions] = useState<ReadonlyArray<PendingCompletion>>([])
   const observedRunIds = useRef(new Set<string | null>())
   const dependentReadsAllowed = useRef(false)
 
@@ -277,10 +297,40 @@ export function Dashboard({
       setTransactionCursors([null])
       setSyncCompletedAt(Date.now())
       setFastRefresh(true)
+      // The hook drops the completed item after a short delay. The wizard
+      // keeps saying "underway" until the overview refetch below has resolved
+      // successfully, so it never falls through to a second Start (#108 D03).
+      setPendingCompletions((current) => [
+        ...current.filter((pending) => pending.sourceId !== sourceId),
+        { sourceId, dataUpdateCount: getOverviewDataUpdateCount(queryClient, sourceId) },
+      ])
       void queryClient.invalidateQueries({ queryKey: ["taxmaxi", "portfolio"] })
       await onSourceSyncCompleted?.(sourceId)
     },
     [onSourceSyncCompleted, queryClient]
+  )
+
+  // A pending completion clears once its overview query has fetched
+  // successfully after the completion. A failed refetch keeps it pending; the
+  // calculation refresh above invalidates the overview again on a changed run.
+  useEffect(() => {
+    if (pendingCompletions.length === 0) return
+    const clearConfirmed = () => {
+      const confirmed = pendingCompletions.filter((pending) =>
+        isCompletionConfirmed(queryClient, pending)
+      )
+      if (confirmed.length === 0) return
+      setPendingCompletions((current) => current.filter((pending) => !confirmed.includes(pending)))
+    }
+    clearConfirmed()
+    return queryClient.getQueryCache().subscribe((event) => {
+      if (event.type === "updated" && event.action.type === "success") clearConfirmed()
+    })
+  }, [pendingCompletions, queryClient])
+
+  const pendingCompletionSourceIds = useMemo(
+    () => new Set(pendingCompletions.map((pending) => pending.sourceId)),
+    [pendingCompletions]
   )
 
   const summary = useMemo<DashboardSummary>(() => {
@@ -375,16 +425,21 @@ export function Dashboard({
     [createWalletSource, onSourceSync]
   )
 
-  // A billing read that is still pending counts as not loaded: the wizard
-  // then shows `billing_unknown` with a retry instead of guessing at credits.
+  // A billing read that is still pending, or whose latest attempt failed for
+  // a non-401 reason, counts as not loaded even when an older result is still
+  // cached: the wizard then shows `billing_unknown` with a retry instead of
+  // guessing at credits (#108 D03, D08). A 401 is handled above.
+  const billingFailed = billingQuery.isError && !isTaxMaxiUnauthorizedError(billingQuery.error)
+  const billing = billingFailed ? null : (billingQuery.data ?? null)
   const firstSync = useMemo(
     () =>
       getFirstSyncState({
-        billing: billingQuery.data ?? null,
+        billing,
         items: activeSyncs,
         overviews: sourceOverviews,
+        pendingCompletionSourceIds,
       }),
-    [activeSyncs, billingQuery.data, sourceOverviews]
+    [activeSyncs, billing, pendingCompletionSourceIds, sourceOverviews]
   )
   const firstSyncTarget =
     firstSync.targetSourceId === null ? undefined : accountsById.get(firstSync.targetSourceId)
@@ -412,7 +467,7 @@ export function Dashboard({
   const body =
     firstSync.state === "done" ? null : (
       <FirstSyncWizard
-        billing={billingQuery.data ?? null}
+        billing={billing}
         billingRefreshing={billingQuery.isFetching}
         createWalletSource={createWalletSource === undefined ? undefined : connectWalletSource}
         onRetryBilling={() => void billingQuery.refetch()}

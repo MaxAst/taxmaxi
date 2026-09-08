@@ -14,6 +14,7 @@ import {
 } from "#/lib/first-sync-state"
 import { cn } from "#/lib/utils"
 import { m } from "#/paraglide/messages"
+import { getLocale } from "#/paraglide/runtime"
 
 /**
  * The first-sync wizard (#108, variant D): while no source has completed a
@@ -200,7 +201,7 @@ function getHeadline({
 function formatCredits(credits: number): string {
   return credits === 1
     ? m["app.firstSync.credits.one"]()
-    : m["app.firstSync.credits.many"]({ count: new Intl.NumberFormat().format(credits) })
+    : m["app.firstSync.credits.many"]({ count: new Intl.NumberFormat(getLocale()).format(credits) })
 }
 
 function StepBody({

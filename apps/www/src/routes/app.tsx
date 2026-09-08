@@ -24,9 +24,12 @@ import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 /**
  * Loads everything the `/app` page needs before it renders: the sources with
  * their overviews, the account (for `welcomeSeenAt`), and the billing status
- * (#108 D08). A 401 from any read is rethrown so the route redirects to
- * login. A non-401 billing failure does not block the page: `billing` is
- * `null` and the first-sync wizard shows `billing_unknown` with a retry.
+ * (#108 D08). All three reads run together and every one settles before the
+ * result is judged, so a 401 from any read is rethrown (the route redirects
+ * to login) even when another read failed first for a different reason. A
+ * non-401 billing failure does not block the page: `billing` is `null` and
+ * the first-sync wizard shows `billing_unknown` with a retry. Any other
+ * failure is rethrown.
  */
 export const loadAppPageData = async ({
   loadAccount,
@@ -44,20 +47,30 @@ export const loadAppPageData = async ({
   readonly overviews: ReadonlyArray<SourceOverview>
   readonly sourceList: SourceList
 }> => {
-  const billingPromise = loadBilling().catch((error: unknown) => {
-    if (isTaxMaxiUnauthorizedError(error)) throw error
-    return null
-  })
-  const sourcesPromise = loadSources().then(async (sourceList) => ({
-    overviews: await Promise.all(sourceList.sources.map((source) => loadSourceOverview(source.id))),
-    sourceList,
-  }))
-  const [{ overviews, sourceList }, account, billing] = await Promise.all([
-    sourcesPromise,
+  const [sources, account, billing] = await Promise.allSettled([
+    loadSources().then(async (sourceList) => ({
+      overviews: await Promise.all(
+        sourceList.sources.map((source) => loadSourceOverview(source.id))
+      ),
+      sourceList,
+    })),
     loadAccount(),
-    billingPromise,
+    loadBilling(),
   ])
-  return { account, billing, overviews, sourceList }
+
+  const unauthorized = [sources, account, billing].find(
+    (result) => result.status === "rejected" && isTaxMaxiUnauthorizedError(result.reason)
+  )
+  if (unauthorized?.status === "rejected") throw unauthorized.reason
+  if (sources.status === "rejected") throw sources.reason
+  if (account.status === "rejected") throw account.reason
+
+  return {
+    account: account.value,
+    billing: billing.status === "fulfilled" ? billing.value : null,
+    overviews: sources.value.overviews,
+    sourceList: sources.value.sourceList,
+  }
 }
 
 export const Route = createFileRoute("/app")({

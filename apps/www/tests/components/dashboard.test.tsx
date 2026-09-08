@@ -1161,6 +1161,114 @@ describe("Dashboard first-sync body (#108 T05)", () => {
     expect(billingReads).toBe(2)
   })
 
+  it("shows billing_unknown when a billing refresh fails even though older credits are cached", async () => {
+    respondBilling = async () => billingStatus(5)
+    mount([sourceOverview()])
+
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(screen.getByText("5 credits available")).toBeTruthy()
+
+    respondBilling = async () => {
+      throw new Error("Stripe is unavailable")
+    }
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: queries.billingStatus(testTaxMaxi).queryKey })
+    })
+
+    expect(await screen.findByRole("heading", { name: "We couldn't check your plan" })).toBeTruthy()
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+    expect(screen.queryByText("5 credits available")).toBeNull()
+    expect(queryClient.getQueryData(queries.billingStatus(testTaxMaxi).queryKey)).toMatchObject({
+      credits: 5,
+    })
+    expect(billingReads).toBe(2)
+  })
+
+  it("derives syncing from a processing overview job on the first render, before the hook has an item", () => {
+    queryClient.setQueryData(queries.billingStatus(testTaxMaxi).queryKey, billingStatus(5))
+
+    mount([sourceOverview({ jobId: "job-1", status: "processing" })])
+
+    expect(screen.getByRole("heading", { name: "Importing your Coinbase history" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+    expect(screen.queryAllByRole("button")).toEqual([])
+    expect(assetsTab()).toBeNull()
+  })
+
+  // Mirrors the `/app` route: accounts and overviews come from the overview
+  // query, and a completed sync invalidates that query.
+  const OverviewHarness = ({ readOverview }: { readOverview: () => Promise<SourceOverview> }) => {
+    const overview = useQuery({
+      queryKey: queryKeys.sourceOverview(SOURCE_A),
+      queryFn: readOverview,
+      staleTime: Infinity,
+    }).data
+    if (overview === undefined) return null
+    return (
+      <Dashboard
+        accounts={[toAccount(overview)]}
+        onSourceSyncCompleted={async (sourceId) => {
+          await queryClient.invalidateQueries({
+            exact: true,
+            queryKey: queryKeys.sourceOverview(sourceId),
+          })
+        }}
+        sourceOverviews={[overview]}
+      />
+    )
+  }
+
+  it("keeps syncing after the completed item is gone until the overview refetch confirms it", async () => {
+    let overviewReads = 0
+    let releaseOverview: ((overview: SourceOverview) => void) | undefined
+    const readOverview = async () => {
+      overviewReads += 1
+      if (overviewReads === 1) return sourceOverview()
+      return new Promise<SourceOverview>((resolve) => {
+        releaseOverview = resolve
+      })
+    }
+    // A fresh element per render, so React re-renders the dashboard and the
+    // hook mock hands over the changed items.
+    const tree = () => (
+      <QueryClientProvider client={queryClient}>
+        <OverviewHarness readOverview={readOverview} />
+      </QueryClientProvider>
+    )
+
+    const view = render(tree())
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "completed", progress: 100 },
+    ]
+    view.rerender(tree())
+    expect(screen.getByRole("heading", { name: "Importing your Coinbase history" })).toBeTruthy()
+
+    // The job completes: the refetch starts but has not resolved yet, and the
+    // hook drops its completed item in the meantime.
+    await act(async () => {
+      void syncState.onCompleted?.(SOURCE_A)
+    })
+    expect(overviewReads).toBe(2)
+    syncState.activeSyncs = []
+    view.rerender(tree())
+
+    expect(screen.getByRole("heading", { name: "Importing your Coinbase history" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+    expect(assetsTab()).toBeNull()
+
+    await act(async () => {
+      releaseOverview?.(
+        sourceOverview({ lastSyncedAt: "2025-03-10T12:00:00.000Z", status: "completed" })
+      )
+    })
+
+    expect(await screen.findByRole("button", { name: "Assets" })).toBeTruthy()
+    expect(screen.queryByRole("heading", { name: "Importing your Coinbase history" })).toBeNull()
+  })
+
   it("moves from the wizard to the tabs when the completed sync refreshes the overview", async () => {
     let overviewReads = 0
     const readOverview = async () => {
@@ -1170,32 +1278,9 @@ describe("Dashboard first-sync body (#108 T05)", () => {
         : sourceOverview({ lastSyncedAt: "2025-03-10T12:00:00.000Z", status: "completed" })
     }
 
-    // Mirrors the `/app` route: accounts and overviews come from the overview
-    // query, and a completed sync invalidates that query.
-    function Harness() {
-      const overview = useQuery({
-        queryKey: queryKeys.sourceOverview(SOURCE_A),
-        queryFn: readOverview,
-        staleTime: Infinity,
-      }).data
-      if (overview === undefined) return null
-      return (
-        <Dashboard
-          accounts={[toAccount(overview)]}
-          onSourceSyncCompleted={async (sourceId) => {
-            await queryClient.invalidateQueries({
-              exact: true,
-              queryKey: queryKeys.sourceOverview(sourceId),
-            })
-          }}
-          sourceOverviews={[overview]}
-        />
-      )
-    }
-
     render(
       <QueryClientProvider client={queryClient}>
-        <Harness />
+        <OverviewHarness readOverview={readOverview} />
       </QueryClientProvider>
     )
 

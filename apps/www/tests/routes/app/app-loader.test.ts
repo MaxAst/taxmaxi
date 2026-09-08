@@ -83,6 +83,12 @@ const overview = (sourceId: string): SourceOverview => ({
 })
 
 const unauthorized = () => new TaxMaxiError({ message: "Sign in again.", status: 401 })
+const unavailable = () => new TaxMaxiError({ message: "Unavailable.", status: 500 })
+
+const rejectLater = <T>(error: unknown): Promise<T> =>
+  new Promise((_, reject) => {
+    setTimeout(() => reject(error), 0)
+  })
 
 const loaders = (overrides: Partial<Parameters<typeof loadAppPageData>[0]> = {}) => ({
   loadAccount: vi.fn().mockResolvedValue(account),
@@ -133,7 +139,7 @@ describe("loadAppPageData (#108 D08)", () => {
     ).rejects.toBe(error)
   })
 
-  it("rethrows a 401 from the sources read even while billing is still pending", async () => {
+  it("rethrows a 401 from the sources read once a slower billing read has settled", async () => {
     const error = unauthorized()
     let releaseBilling: (status: BillingStatus) => void = () => undefined
     const pendingBilling = new Promise<BillingStatus>((resolve) => {
@@ -147,7 +153,33 @@ describe("loadAppPageData (#108 D08)", () => {
       })
     )
 
-    await expect(pending).rejects.toBe(error)
     releaseBilling(billing)
+    await expect(pending).rejects.toBe(error)
+  })
+
+  it("prefers a later 401 from billing over an earlier 500 from the sources read", async () => {
+    const error = unauthorized()
+
+    await expect(
+      loadAppPageData(
+        loaders({
+          loadBilling: vi.fn().mockReturnValue(rejectLater<BillingStatus>(error)),
+          loadSources: vi.fn().mockRejectedValue(unavailable()),
+        })
+      )
+    ).rejects.toBe(error)
+  })
+
+  it("rethrows a non-401 sources failure, not the billing failure, when both fail", async () => {
+    const error = unavailable()
+
+    await expect(
+      loadAppPageData(
+        loaders({
+          loadBilling: vi.fn().mockRejectedValue(new Error("Stripe is unavailable")),
+          loadSources: vi.fn().mockRejectedValue(error),
+        })
+      )
+    ).rejects.toBe(error)
   })
 })

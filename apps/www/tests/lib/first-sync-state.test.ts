@@ -16,7 +16,7 @@ const overview = (
   latestSync: Partial<FirstSyncSourceOverview["latestSync"]> = {}
 ): FirstSyncSourceOverview => ({
   source: { id: sourceId },
-  latestSync: { lastSyncedAt: null, status: null, ...latestSync },
+  latestSync: { jobId: null, lastSyncedAt: null, status: null, ...latestSync },
 })
 
 const billing = (credits: number, subscriptionStatus: string | null = null): FirstSyncBilling => ({
@@ -113,6 +113,127 @@ describe("getFirstSyncState (#108 D03, one case per row)", () => {
     expect(
       getFirstSyncState({ billing: null, items: [], overviews: [overview(SOURCE_A)] })
     ).toEqual({ state: "billing_unknown", targetSourceId: SOURCE_A })
+  })
+
+  it.each(["pending", "processing"] as const)(
+    "no active item yet, latestSync.status %s with a jobId → syncing",
+    (status) => {
+      expect(
+        getFirstSyncState({
+          billing: billing(5),
+          items: [],
+          overviews: [overview(SOURCE_A, { jobId: "job-1", status })],
+        })
+      ).toEqual({ state: "syncing", targetSourceId: SOURCE_A })
+    }
+  )
+
+  it("no active item yet, latestSync.status credit_required with a jobId, credits 0 → paused", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(0),
+        items: [],
+        overviews: [overview(SOURCE_A, { jobId: "job-1", status: "credit_required" })],
+      })
+    ).toEqual({ state: "paused", targetSourceId: SOURCE_A })
+  })
+
+  it("no active item yet, latestSync.status credit_required with a jobId, credits ≥ 1 → resumable", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(1),
+        items: [],
+        overviews: [overview(SOURCE_A, { jobId: "job-1", status: "credit_required" })],
+      })
+    ).toEqual({ state: "resumable", targetSourceId: SOURCE_A })
+  })
+})
+
+describe("getFirstSyncState overview job before the hook has an item (#108 D03, T05 review rows)", () => {
+  it("ignores an overview job without a jobId, like the reload seed", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(5),
+        items: [],
+        overviews: [overview(SOURCE_A, { jobId: null, status: "processing" })],
+      }).state
+    ).toBe("ready")
+  })
+
+  it("lets the hook's item take over once it exists", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(5),
+        items: [item("failed")],
+        overviews: [overview(SOURCE_A, { jobId: "job-1", status: "processing" })],
+      }).state
+    ).toBe("failed")
+  })
+
+  it("reports billing_unknown for a credit_required overview job while billing is unknown", () => {
+    expect(
+      getFirstSyncState({
+        billing: null,
+        items: [],
+        overviews: [overview(SOURCE_A, { jobId: "job-1", status: "credit_required" })],
+      }).state
+    ).toBe("billing_unknown")
+  })
+
+  it("treats a completed overview job as history", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(0),
+        items: [],
+        overviews: [overview(SOURCE_A, { jobId: "job-1", status: "completed" })],
+      }).state
+    ).toBe("needs_credits")
+  })
+})
+
+describe("getFirstSyncState pending completion", () => {
+  it("stays syncing after the completed item is gone until the overview refetch confirms it", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(5),
+        items: [],
+        overviews: [overview(SOURCE_A)],
+        pendingCompletionSourceIds: new Set([SOURCE_A]),
+      }).state
+    ).toBe("syncing")
+  })
+
+  it("outranks an unknown billing status", () => {
+    expect(
+      getFirstSyncState({
+        billing: null,
+        items: [],
+        overviews: [overview(SOURCE_A)],
+        pendingCompletionSourceIds: new Set([SOURCE_A]),
+      }).state
+    ).toBe("syncing")
+  })
+
+  it("gives way to done once the overview carries lastSyncedAt", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(5),
+        items: [],
+        overviews: [overview(SOURCE_A, { lastSyncedAt: "2025-03-10T12:00:00.000Z" })],
+        pendingCompletionSourceIds: new Set([SOURCE_A]),
+      }).state
+    ).toBe("done")
+  })
+
+  it("only applies to the target source", () => {
+    expect(
+      getFirstSyncState({
+        billing: billing(5),
+        items: [],
+        overviews: [overview(SOURCE_A), overview(SOURCE_B)],
+        pendingCompletionSourceIds: new Set([SOURCE_B]),
+      }).state
+    ).toBe("ready")
   })
 })
 
