@@ -79,8 +79,12 @@ The rule that when one accounting movement in a transaction is excluded or block
 _Avoid_: Partial transaction, leg-level exclusion
 
 **Covering run**:
-A calculation run in the requested scope whose snapshot sees the relevant override record and completed linked replay work. For a movement correction, it also retains the selected stream leaf, including withdrawal, and the exact captured inputs and application outcome; coverage is distinct from current attention and work status (ADR 0013), never inferred from timestamps.
+A calculation run in the requested scope whose captured inputs prove it includes the named change and required completed source work. Movement corrections also require the selected stream leaf, including withdrawal, and the exact captured inputs and application outcome; completed-sync coverage does not mean all imported activity is free of blockers (ADRs 0013 and 0014).
 _Avoid_: Latest run, run after the override
+
+**Calculation request**:
+A recorded need to calculate results for a principal and an explicit jurisdiction, tax year, and reporting currency. A request linked to a completed sync names that exact source job; it remains distinct from attempts to calculate it and from the result currently displayed.
+_Avoid_: Pending run, queue job (when the durable request is meant)
 
 ## Wallet input language
 
