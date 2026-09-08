@@ -747,11 +747,12 @@ const make = Effect.gen(function* () {
   })
 
   /**
-   * Write a first verification request and record its send facts: `sendCount`
-   * is 1 and `lastSentAt` is now, because the caller hands the code to
-   * delivery right after this returns.
+   * Reuse the user's active request or start a fresh one. The repository does
+   * both under the user's write lock: an active request gets `lastSentAt` set
+   * to now and keeps its `sendCount`; otherwise a fresh request is written with
+   * `sendCount` 1. The caller hands the returned code to delivery.
    */
-  const createEmailVerificationRequest = ({
+  const startOrReuseEmailVerificationRequest = ({
     userId,
     email,
   }: {
@@ -763,38 +764,20 @@ const make = Effect.gen(function* () {
       const { id, code } = yield* generateEmailVerificationIdAndCode
 
       return yield* emailVerificationRequestRepo
-        .create({
+        .startOrReuse({
           id,
           userId,
           email: sanitizeEmail(email),
           code,
           expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
-          sendCount: 1,
-          lastSentAt: now,
+          sentAt: now,
         })
-        .pipe(Effect.mapError((cause) => authProcessingError("create-email-verification", cause)))
+        .pipe(Effect.mapError((cause) => authProcessingError("start-email-verification", cause)))
     })
 
   /**
-   * Record that an existing request's code is sent again: `lastSentAt` moves
-   * to now, `sendCount` stays. None means the request is gone meanwhile.
-   */
-  const recordEmailVerificationSend = ({
-    requestId,
-    sentAt,
-  }: {
-    readonly requestId: EmailVerificationRequestId
-    readonly sentAt: Timestamp.Timestamp
-  }): Effect.Effect<Option.Option<EmailVerificationRequest>, AuthProcessingError> =>
-    emailVerificationRequestRepo
-      .recordSend({ id: requestId, sentAt })
-      .pipe(
-        Effect.mapError((cause) => authProcessingError("record-email-verification-send", cause))
-      )
-
-  /**
    * Replace a request with a fresh code. The repository advances `sendCount`
-   * under a row lock, so concurrent resends cannot undercount. None means the
+   * under the user's write lock, so concurrent writers cannot undercount. None means the
    * request is gone (verified, expired and cleaned, or already replaced).
    */
   const renewEmailVerificationRequest = ({
@@ -969,30 +952,10 @@ const make = Effect.gen(function* () {
      */
     startEmailVerification: (user) =>
       Effect.gen(function* () {
-        const now = Timestamp.now()
-        const maybeExistingRequest = yield* emailVerificationRequestRepo
-          .findByUserId(user.id)
-          .pipe(Effect.mapError((cause) => authProcessingError("find-email-verification", cause)))
-
-        // Reusing an active request re-sends its code, so the send is recorded
-        // on that row first. If the row vanished meanwhile, start fresh.
-        const reusedRequest = yield* Option.isSome(maybeExistingRequest) &&
-        !isEmailVerificationRequestExpired({
-          request: maybeExistingRequest.value,
-          now,
+        const verificationRequest = yield* startOrReuseEmailVerificationRequest({
+          userId: user.id,
+          email: user.email,
         })
-          ? recordEmailVerificationSend({
-              requestId: maybeExistingRequest.value.id,
-              sentAt: now,
-            })
-          : Effect.succeed(Option.none<EmailVerificationRequest>())
-
-        const verificationRequest = yield* Option.isSome(reusedRequest)
-          ? Effect.succeed(reusedRequest.value)
-          : createEmailVerificationRequest({
-              userId: user.id,
-              email: user.email,
-            })
 
         yield* sendEmailVerificationRequest({
           request: verificationRequest,

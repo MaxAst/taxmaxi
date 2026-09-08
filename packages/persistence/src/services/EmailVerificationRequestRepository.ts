@@ -38,11 +38,19 @@ export interface EmailVerificationRequestInsert {
 }
 
 /**
- * EmailVerificationRequestSend - Input to record that an existing request's code
- * was sent again.
+ * EmailVerificationRequestStart - Input to send a code to a user who may
+ * already have an active request.
+ *
+ * `id`, `code`, and `expiresAt` are used only when no active request exists
+ * and a fresh one is inserted. `sentAt` is when the code is handed to
+ * delivery; it also decides which existing request still counts as active.
  */
-export interface EmailVerificationRequestSend {
+export interface EmailVerificationRequestStart {
   readonly id: EmailVerificationRequestId
+  readonly userId: AuthUserId
+  readonly email: Email
+  readonly code: EmailVerificationCode
+  readonly expiresAt: Timestamp
   readonly sentAt: Timestamp
 }
 
@@ -68,29 +76,33 @@ export interface EmailVerificationRequestRepositoryService {
   /**
    * Create a new verification request.
    *
-   * Implementations may replace any existing request for the same user so that
-   * only the most recent verification code remains active.
+   * Replaces any existing request for the same user so that only the most
+   * recent verification code remains active. Runs under the user's write lock.
    */
   readonly create: (
     request: EmailVerificationRequestInsert
   ) => Effect.Effect<EmailVerificationRequest, PersistenceError>
 
   /**
-   * Record that the existing request's code was sent again: sets `lastSentAt`
-   * and leaves `sendCount` unchanged. Returns none when the request no longer
-   * exists.
+   * Reuse the user's active request or start a fresh one, in one transaction
+   * under the user's write lock.
+   *
+   * When an unexpired request exists, its `lastSentAt` moves to `sentAt` and
+   * `sendCount` stays; the returned request carries the existing id and code.
+   * Otherwise the user's expired rows are deleted and a fresh request is
+   * inserted with `sendCount` 1. The caller sends the returned request's code.
    */
-  readonly recordSend: (
-    send: EmailVerificationRequestSend
-  ) => Effect.Effect<Option.Option<EmailVerificationRequest>, PersistenceError>
+  readonly startOrReuse: (
+    start: EmailVerificationRequestStart
+  ) => Effect.Effect<EmailVerificationRequest, PersistenceError>
 
   /**
-   * Replace a request with a fresh code in one transaction.
+   * Replace a request with a fresh code in one transaction under the user's
+   * write lock.
    *
-   * Locks the replaced row, inserts the replacement with the locked row's
-   * `sendCount` plus one, and deletes the locked row. Two concurrent renewals
-   * of the same request therefore serialize: the second finds the row gone and
-   * returns none.
+   * Inserts the replacement with the replaced row's `sendCount` plus one and
+   * deletes the replaced row. Returns none when the request is gone, which is
+   * also what the second of two concurrent renewals sees.
    */
   readonly renew: (
     renewal: EmailVerificationRequestRenewal
