@@ -9,9 +9,9 @@
   "scripts": {
     "prepare": "effect-tsgo patch --typescript --oxlint && husky",
     "generate": "plop",
-    "test": "vitest",
-    "test:watch": "vitest watch",
-    "test:coverage": "vitest run --coverage",
+    "test": "turbo run build --filter='./packages/*' && vitest",
+    "test:watch": "turbo run build --filter='./packages/*' && vitest watch",
+    "test:coverage": "turbo run build --filter='./packages/*' && vitest run --coverage",
     "build": "turbo build",
     "clean": "turbo run clean && rm -rf node_modules .turbo && rm -f pnpm-lock.yaml",
     "clean:lite": "turbo run clean && rm -rf .turbo",

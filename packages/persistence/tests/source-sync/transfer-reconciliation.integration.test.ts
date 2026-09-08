@@ -34,6 +34,8 @@ import {
 } from "../support/integration-test-kit.ts"
 
 const context = makeIntegrationTestDatabaseContext({
+  // One holder, three contenders, and a lock observer.
+  maxConnections: 5,
   databaseNamePrefix: "taxmaxi_transfer_reconciliation_repo",
 })
 
@@ -4415,30 +4417,12 @@ describe("TransferReconciliationServiceLive", () => {
             })
           )
       )
-      yield* Effect.promise(() => context.waitForQueryBlockedOnLock({ queryIncludes: "sources" }))
-      let blockedLockCount = 0
-      for (let attempt = 0; attempt < 100 && blockedLockCount < 3; attempt += 1) {
-        const [row] = yield* Effect.promise(() =>
-          runPg(
-            Effect.gen(function* () {
-              const db = yield* drizzle
-              return yield* db.$client<{ readonly count: string }>`
-            select count(*)::text as count
-            from pg_stat_activity
-            where datname = current_database()
-              and wait_event_type = 'Lock'
-              and query like '%sources%for update%'
-          `
-            })
-          )
-        )
-        blockedLockCount = Number(row?.count ?? "0")
-        if (blockedLockCount < 3) {
-          yield* Effect.sleep("10 millis")
-        }
-      }
-      expect(blockedLockCount).toBeGreaterThanOrEqual(3)
-      yield* Deferred.succeed(releaseTransaction, undefined)
+      yield* Effect.promise(() =>
+        context.waitForQueryBlockedOnLock({
+          queryIncludes: 'from "sources"',
+          minimumWaiters: 3,
+        })
+      ).pipe(Effect.ensuring(Deferred.succeed(releaseTransaction, undefined)))
       yield* Effect.promise(() => Promise.all([rollbackTransaction, ...competingSourceLocks]))
     })
   )

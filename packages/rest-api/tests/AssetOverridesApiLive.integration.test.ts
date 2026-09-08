@@ -1347,7 +1347,7 @@ const installCreateRacePause = Effect.gen(function* () {
     create function pause_override_target_insert() returns trigger
     language plpgsql as $trigger$
     begin
-      perform pg_sleep(0.5);
+      perform pg_advisory_xact_lock(hashtextextended('test:override-rest-create', 0));
       return new;
     end
     $trigger$
@@ -1357,28 +1357,6 @@ const installCreateRacePause = Effect.gen(function* () {
     before insert on principal_asset_override_targets
     for each row execute function pause_override_target_insert()
   `)
-})
-
-const waitForCreateRacePause = Effect.gen(function* () {
-  const db = yield* drizzle
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const [activity] = yield* db
-      .select({
-        isPaused: sql<boolean>`exists (
-        select 1
-        from pg_stat_activity
-        where datname = current_database()
-          and pid <> pg_backend_pid()
-          and wait_event = 'PgSleep'
-          and query like 'insert into "principal_asset_override_targets"%'
-      )`,
-      })
-      .from(schema.principals)
-      .limit(1)
-    if (activity?.isPaused === true) return
-    yield* db.execute(sql`select pg_sleep(0.01)`)
-  }
-  return yield* Effect.die("Timed out waiting for the REST create race pause.")
 })
 
 const removeCreateRacePause = Effect.gen(function* () {
@@ -2419,17 +2397,34 @@ describe("AssetOverridesApiLive", () => {
         }),
       }
       yield* installCreateRacePause.pipe(Effect.provide(TestPgClientLive), Effect.scoped)
-      const first = yield* post(request).pipe(
-        Effect.provide(HttpLive),
-        Effect.scoped,
-        Effect.forkScoped
+      yield* Effect.addFinalizer(() =>
+        removeCreateRacePause.pipe(Effect.provide(TestPgClientLive), Effect.scoped, Effect.orDie)
       )
-      yield* waitForCreateRacePause.pipe(Effect.provide(TestPgClientLive), Effect.scoped)
-      const attempts = yield* Effect.all(
-        [Fiber.join(first), post(request).pipe(Effect.provide(HttpLive), Effect.scoped)],
-        { concurrency: "unbounded" }
-      )
-      yield* removeCreateRacePause.pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+      const { release } = yield* context.holdAdvisoryLock({ key: "test:override-rest-create" })
+      const attempts = yield* Effect.gen(function* () {
+        const first = yield* post(request).pipe(
+          Effect.provide(HttpLive),
+          Effect.scoped,
+          Effect.forkScoped
+        )
+        yield* Effect.promise(() =>
+          context.waitForQueryBlockedOnLock({
+            queryIncludes: 'insert into "principal_asset_override_targets"',
+          })
+        )
+        const second = yield* post(request).pipe(
+          Effect.provide(HttpLive),
+          Effect.scoped,
+          Effect.forkScoped
+        )
+        yield* Effect.promise(() =>
+          context.waitForQueryBlockedOnLock({
+            queryIncludes: 'from "principals"',
+          })
+        )
+        yield* release
+        return yield* Effect.all([Fiber.join(first), Fiber.join(second)])
+      }).pipe(Effect.ensuring(release))
 
       expect(attempts.map(({ status }) => status).sort((left, right) => left - right)).toEqual([
         200, 409,

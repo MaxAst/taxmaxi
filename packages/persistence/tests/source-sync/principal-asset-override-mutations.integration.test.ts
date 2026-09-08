@@ -5,6 +5,7 @@ import { PrincipalId } from "@my/core/ownership"
 import { eq, sql } from "drizzle-orm"
 import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
 import * as Option from "effect/Option"
 import * as Result from "effect/Result"
 import { PrincipalAssetOverrideRepositoryLive } from "../../src/layers/PrincipalAssetOverrideRepositoryLive.ts"
@@ -732,7 +733,7 @@ describe("PrincipalAssetOverrideRepository mutations", () => {
               language plpgsql as $trigger$
               begin
                 if nextval('delay_first_override_target_insert') = 1 then
-                  perform pg_sleep(0.25);
+                  perform pg_advisory_xact_lock(hashtextextended('test:override-repository-create', 0));
                 end if;
                 return new;
               end
@@ -747,32 +748,45 @@ describe("PrincipalAssetOverrideRepository mutations", () => {
         )
       )
 
-      const attempts = yield* Effect.all(
-        [
-          create({
-            expectedSystemRevision: initial.system.identityRevision,
-            replacement: { _tag: "identity", assetId: TEST_BTC_ASSET_ID },
-          }).pipe(Effect.result),
-          create({
-            expectedSystemRevision: initial.system.identityRevision,
-            replacement: { _tag: "identity", assetId: TEST_BTC_ASSET_ID },
-          }).pipe(Effect.result),
-        ],
-        { concurrency: "unbounded" }
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.execute(
+                sql`drop trigger delay_first_override_target_insert on principal_asset_override_targets`
+              )
+              yield* db.execute(sql`drop function delay_first_override_target_insert()`)
+              yield* db.execute(sql`drop sequence delay_first_override_target_insert`)
+            })
+          )
+        ).pipe(Effect.orDie)
       )
 
-      yield* Effect.promise(() =>
-        runPg(
-          Effect.gen(function* () {
-            const db = yield* drizzle
-            yield* db.execute(
-              sql`drop trigger delay_first_override_target_insert on principal_asset_override_targets`
-            )
-            yield* db.execute(sql`drop function delay_first_override_target_insert()`)
-            yield* db.execute(sql`drop sequence delay_first_override_target_insert`)
+      const { release } = yield* context.holdAdvisoryLock({
+        key: "test:override-repository-create",
+      })
+      const attempt = () =>
+        create({
+          expectedSystemRevision: initial.system.identityRevision,
+          replacement: { _tag: "identity", assetId: TEST_BTC_ASSET_ID },
+        }).pipe(Effect.result)
+      const attempts = yield* Effect.gen(function* () {
+        const first = yield* Effect.forkScoped(attempt())
+        yield* Effect.promise(() =>
+          context.waitForQueryBlockedOnLock({
+            queryIncludes: 'insert into "principal_asset_override_targets"',
           })
         )
-      )
+        const second = yield* Effect.forkScoped(attempt())
+        yield* Effect.promise(() =>
+          context.waitForQueryBlockedOnLock({
+            queryIncludes: 'from "principals"',
+          })
+        )
+        yield* release
+        return yield* Effect.all([Fiber.join(first), Fiber.join(second)])
+      }).pipe(Effect.ensuring(release))
 
       expect(attempts.filter(Result.isSuccess)).toHaveLength(1)
       const [failed] = attempts.filter(Result.isFailure)

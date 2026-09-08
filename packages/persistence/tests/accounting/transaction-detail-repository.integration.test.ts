@@ -1601,8 +1601,9 @@ describe("transaction detail calculation snapshot", () => {
         yield* acceptTotal(fixture.acquisition.targetId, "20")
         yield* recompute(1)
         const previous = yield* readCalculation(fixture.purchaseId)
+        const services = yield* Effect.context<never>()
         detailSnapshot.afterInitialRead = () =>
-          Effect.runPromise(
+          Effect.runPromiseWith(services)(
             Effect.gen(function* () {
               yield* acceptTotal(fixture.acquisition.targetId, "30", "replace")
               yield* recompute(2)

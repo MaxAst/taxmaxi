@@ -1328,15 +1328,108 @@ describe("coinbase normalization persistence", () => {
           expect(state.transfers).toEqual([])
           expect(state.legs).toHaveLength(0)
         })
-      }),
-    15_000
+      })
   )
 
-  it.effect(
-    "clears resolved mapping review without reopening closed no-derivation rows",
-    () =>
-      Effect.gen(function* () {
-        const account = makeCoinbaseRecord({
+  it.effect("clears resolved mapping review without reopening closed no-derivation rows", () =>
+    Effect.gen(function* () {
+      const account = makeCoinbaseRecord({
+        recordType: "coinbase_account",
+        externalRecordId: "coinbase-account-1",
+        occurredAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-01T00:00:00.000Z")),
+        payload: {
+          id: "coinbase-account-1",
+          created_at: "2025-01-01T00:00:00.000Z",
+          updated_at: "2025-01-01T00:00:00.000Z",
+        },
+      })
+      activeSyncRecords = [
+        account,
+        ...(
+          [
+            { status: "completed", amount: "0.00000000" },
+            { status: "pending", amount: "0.40000000" },
+          ] as const
+        ).map(({ status, amount }, index) =>
+          makeCoinbaseRecord({
+            externalRecordId: `tx-${status}-hype-no-derivation`,
+            occurredAt: DateTime.toDateUtc(
+              DateTime.makeUnsafe(`2025-01-0${index + 2}T10:00:00.000Z`)
+            ),
+            payload: {
+              id: `tx-${status}-hype-no-derivation`,
+              type: "tx",
+              status,
+              amount: { amount, currency: "HYPE" },
+              native_amount: { amount: "4000.00", currency: "EUR" },
+              created_at: `2025-01-0${index + 2}T10:00:00.000Z`,
+              resource_path: `/v2/accounts/coinbase-account-1/transactions/tx-${status}-hype-no-derivation`,
+            },
+          })
+        ),
+      ]
+      activeCryptoCurrencies = [...defaultCryptoCurrencies, hypeCryptoCurrency]
+      yield* seedPendingProviderAssetMapping({
+        currencyCode: "HYPE",
+        providerAssetId: "hype-provider-asset",
+        providerType: "crypto",
+      })
+      yield* runSync()
+
+      const providerAsset = yield* Effect.gen(function* () {
+        const db = yield* drizzle
+        yield* db
+          .insert(schema.assets)
+          .values({
+            id: PROVIDER_OVERRIDE_ASSET_ID,
+            name: "Principal HYPE selection",
+            symbol: "HYPE-SELECTED",
+            type: "fungible",
+          })
+          .onConflictDoNothing({ target: schema.assets.id })
+        const [row] = yield* db
+          .select({ id: schema.providerAssets.id })
+          .from(schema.providerAssets)
+          .where(
+            and(
+              eq(schema.providerAssets.provider, "coinbase"),
+              eq(schema.providerAssets.currencyCode, "HYPE")
+            )
+          )
+          .limit(1)
+        if (row === undefined) return yield* Effect.die("Missing HYPE provider asset")
+        return row
+      }).pipe(Effect.provide(TestPgClientLive))
+
+      yield* createProviderIdentityOverride({ providerAssetRowId: providerAsset.id })
+      remoteReferenceCatalogAvailable = false
+      const replay = yield* replaySource()
+      const state = yield* fetchCounts()
+
+      expect(replay.status).toBe("completed")
+      expect(state.legs).toEqual([])
+      expect(state.transfers).toEqual([])
+      expect(state.transactionReviews).toHaveLength(2)
+      expect(
+        state.transactionReviews.every(
+          ({ matchedLayer }) => matchedLayer?.includes("provider_asset_mapping") === false
+        )
+      ).toBe(true)
+      const pendingTransaction = state.transactions.find(
+        ({ externalId }) => externalId === "tx-pending-hype-no-derivation"
+      )
+      expect(
+        state.transactionReviews.some(
+          ({ transactionId }) => transactionId === pendingTransaction?.id
+        )
+      ).toBe(true)
+    })
+  )
+
+  it.effect("persists a settled fiat Coinbase tx for review without an inventory leg", () =>
+    Effect.gen(function* () {
+      activeSyncRecords = [
+        makeCoinbaseRecord({
           recordType: "coinbase_account",
           externalRecordId: "coinbase-account-1",
           occurredAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-01T00:00:00.000Z")),
@@ -1345,145 +1438,45 @@ describe("coinbase normalization persistence", () => {
             created_at: "2025-01-01T00:00:00.000Z",
             updated_at: "2025-01-01T00:00:00.000Z",
           },
-        })
-        activeSyncRecords = [
-          account,
-          ...(
-            [
-              { status: "completed", amount: "0.00000000" },
-              { status: "pending", amount: "0.40000000" },
-            ] as const
-          ).map(({ status, amount }, index) =>
-            makeCoinbaseRecord({
-              externalRecordId: `tx-${status}-hype-no-derivation`,
-              occurredAt: DateTime.toDateUtc(
-                DateTime.makeUnsafe(`2025-01-0${index + 2}T10:00:00.000Z`)
-              ),
-              payload: {
-                id: `tx-${status}-hype-no-derivation`,
-                type: "tx",
-                status,
-                amount: { amount, currency: "HYPE" },
-                native_amount: { amount: "4000.00", currency: "EUR" },
-                created_at: `2025-01-0${index + 2}T10:00:00.000Z`,
-                resource_path: `/v2/accounts/coinbase-account-1/transactions/tx-${status}-hype-no-derivation`,
-              },
-            })
-          ),
-        ]
-        activeCryptoCurrencies = [...defaultCryptoCurrencies, hypeCryptoCurrency]
-        yield* seedPendingProviderAssetMapping({
-          currencyCode: "HYPE",
-          providerAssetId: "hype-provider-asset",
-          providerType: "crypto",
-        })
+        }),
+        makeCoinbaseRecord({
+          externalRecordId: "tx-fiat-credit-1",
+          occurredAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-02T10:00:00.000Z")),
+          payload: {
+            id: "tx-fiat-credit-1",
+            type: "tx",
+            status: "completed",
+            amount: { amount: "100.00", currency: "EUR" },
+            native_amount: { amount: "100.00", currency: "EUR" },
+            created_at: "2025-01-02T10:00:00.000Z",
+            resource_path: "/v2/accounts/coinbase-account-1/transactions/tx-fiat-credit-1",
+            description: "Uncategorized fiat credit",
+          },
+        }),
+      ]
+
+      yield* Effect.gen(function* () {
         yield* runSync()
-
-        const providerAsset = yield* Effect.gen(function* () {
-          const db = yield* drizzle
-          yield* db
-            .insert(schema.assets)
-            .values({
-              id: PROVIDER_OVERRIDE_ASSET_ID,
-              name: "Principal HYPE selection",
-              symbol: "HYPE-SELECTED",
-              type: "fungible",
-            })
-            .onConflictDoNothing({ target: schema.assets.id })
-          const [row] = yield* db
-            .select({ id: schema.providerAssets.id })
-            .from(schema.providerAssets)
-            .where(
-              and(
-                eq(schema.providerAssets.provider, "coinbase"),
-                eq(schema.providerAssets.currencyCode, "HYPE")
-              )
-            )
-            .limit(1)
-          if (row === undefined) return yield* Effect.die("Missing HYPE provider asset")
-          return row
-        }).pipe(Effect.provide(TestPgClientLive))
-
-        yield* createProviderIdentityOverride({ providerAssetRowId: providerAsset.id })
-        remoteReferenceCatalogAvailable = false
-        const replay = yield* replaySource()
         const state = yield* fetchCounts()
 
-        expect(replay.status).toBe("completed")
-        expect(state.legs).toEqual([])
-        expect(state.transfers).toEqual([])
-        expect(state.transactionReviews).toHaveLength(2)
-        expect(
-          state.transactionReviews.every(
-            ({ matchedLayer }) => matchedLayer?.includes("provider_asset_mapping") === false
-          )
-        ).toBe(true)
-        const pendingTransaction = state.transactions.find(
-          ({ externalId }) => externalId === "tx-pending-hype-no-derivation"
-        )
-        expect(
-          state.transactionReviews.some(
-            ({ transactionId }) => transactionId === pendingTransaction?.id
-          )
-        ).toBe(true)
-      }),
-    15_000
-  )
-
-  it.effect(
-    "persists a settled fiat Coinbase tx for review without an inventory leg",
-    () =>
-      Effect.gen(function* () {
-        activeSyncRecords = [
-          makeCoinbaseRecord({
-            recordType: "coinbase_account",
-            externalRecordId: "coinbase-account-1",
-            occurredAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-01T00:00:00.000Z")),
-            payload: {
-              id: "coinbase-account-1",
-              created_at: "2025-01-01T00:00:00.000Z",
-              updated_at: "2025-01-01T00:00:00.000Z",
-            },
+        expect(state.rawRows.every((row) => row.normalizationError === null)).toBe(true)
+        expect(state.transactions).toEqual([
+          expect.objectContaining({
+            externalId: "tx-fiat-credit-1",
+            providerStatus: "completed",
           }),
-          makeCoinbaseRecord({
-            externalRecordId: "tx-fiat-credit-1",
-            occurredAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-02T10:00:00.000Z")),
-            payload: {
-              id: "tx-fiat-credit-1",
-              type: "tx",
-              status: "completed",
-              amount: { amount: "100.00", currency: "EUR" },
-              native_amount: { amount: "100.00", currency: "EUR" },
-              created_at: "2025-01-02T10:00:00.000Z",
-              resource_path: "/v2/accounts/coinbase-account-1/transactions/tx-fiat-credit-1",
-              description: "Uncategorized fiat credit",
-            },
+        ])
+        expect(state.transactionReviews).toEqual([
+          expect.objectContaining({
+            reviewStatus: "needs_review",
+            needsReview: true,
+            originalTypeKey: "uncategorized",
+            currentTypeKey: "uncategorized",
           }),
-        ]
-
-        yield* Effect.gen(function* () {
-          yield* runSync()
-          const state = yield* fetchCounts()
-
-          expect(state.rawRows.every((row) => row.normalizationError === null)).toBe(true)
-          expect(state.transactions).toEqual([
-            expect.objectContaining({
-              externalId: "tx-fiat-credit-1",
-              providerStatus: "completed",
-            }),
-          ])
-          expect(state.transactionReviews).toEqual([
-            expect.objectContaining({
-              reviewStatus: "needs_review",
-              needsReview: true,
-              originalTypeKey: "uncategorized",
-              currentTypeKey: "uncategorized",
-            }),
-          ])
-          expect(state.legs).toHaveLength(0)
-        })
-      }),
-    15_000
+        ])
+        expect(state.legs).toHaveLength(0)
+      })
+    })
   )
 
   it.effect("persists normalized Coinbase artifacts idempotently across reruns", () =>
@@ -2440,8 +2433,7 @@ describe("coinbase normalization persistence", () => {
         expect(blockedState.providerUses).toEqual([{ providerAssetRowId: providerAsset.id }])
         expect(blockedState.review?.categorizationReason).toContain("missing_decimals")
         expect(blockedState.review?.matchedLayer).toContain("principal_asset_override")
-      }),
-    15_000
+      })
   )
 
   it.effect(
@@ -2549,8 +2541,7 @@ describe("coinbase normalization persistence", () => {
           reviewStatus: "needs_review",
         })
         expect(fixture.excluded.transactionReview).toBeNull()
-      }),
-    15_000
+      })
   )
 
   it.effect("records source use for a pending fee provider asset", () =>
@@ -2589,113 +2580,110 @@ describe("coinbase normalization persistence", () => {
     })
   )
 
-  it.effect(
-    "returns source uses without persisting them before normalized artifacts",
-    () =>
-      Effect.gen(function* () {
-        activeCryptoCurrencies = [...defaultCryptoCurrencies, hypeCryptoCurrency]
+  it.effect("returns source uses without persisting them before normalized artifacts", () =>
+    Effect.gen(function* () {
+      activeCryptoCurrencies = [...defaultCryptoCurrencies, hypeCryptoCurrency]
 
-        const hypeRecord = makeHypeReviewableSyncRecords().find(
-          (record) => record.recordType === "coinbase_transaction"
-        )
-        if (hypeRecord === undefined) {
-          expect.fail("Missing HYPE transaction fixture")
-        }
+      const hypeRecord = makeHypeReviewableSyncRecords().find(
+        (record) => record.recordType === "coinbase_transaction"
+      )
+      if (hypeRecord === undefined) {
+        expect.fail("Missing HYPE transaction fixture")
+      }
 
-        const source: SourceSyncSource = {
-          id: sourceId,
-          principalId,
-          providerKey: "coinbase",
-          cexAccountId: null,
-          addressId: null,
-          walletAddress: null,
-        }
-        const sourceRecord: SourceRawRecord = {
-          id: "00000000-0000-4000-8000-000000000209",
-          sourceId,
-          provider: "coinbase",
-          recordType: hypeRecord.recordType,
-          externalAccountId: hypeRecord.externalAccountId,
-          externalRecordId: hypeRecord.externalRecordId,
-          externalParentId: hypeRecord.externalParentId,
-          occurredAt: hypeRecord.occurredAt,
-          payload: hypeRecord.payload,
-          importedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-05-01T10:01:00.000Z")),
-          normalizedAt: null,
-          normalizationError: null,
-          createdAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-05-01T10:01:00.000Z")),
-          updatedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-05-01T10:01:00.000Z")),
-        }
+      const source: SourceSyncSource = {
+        id: sourceId,
+        principalId,
+        providerKey: "coinbase",
+        cexAccountId: null,
+        addressId: null,
+        walletAddress: null,
+      }
+      const sourceRecord: SourceRawRecord = {
+        id: "00000000-0000-4000-8000-000000000209",
+        sourceId,
+        provider: "coinbase",
+        recordType: hypeRecord.recordType,
+        externalAccountId: hypeRecord.externalAccountId,
+        externalRecordId: hypeRecord.externalRecordId,
+        externalParentId: hypeRecord.externalParentId,
+        occurredAt: hypeRecord.occurredAt,
+        payload: hypeRecord.payload,
+        importedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-05-01T10:01:00.000Z")),
+        normalizedAt: null,
+        normalizationError: null,
+        createdAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-05-01T10:01:00.000Z")),
+        updatedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-05-01T10:01:00.000Z")),
+      }
 
-        const fixture = yield* Effect.gen(function* () {
-          const provider = yield* CoinbaseSourceSyncProvider
-          yield* provider.refreshReferenceData
-          const lookups = yield* provider.loadNormalizationLookups
-          const db = yield* drizzle
-          const [providerAsset] = yield* db
-            .select({
-              id: schema.providerAssets.id,
-              retrievedAt: schema.providerAssets.retrievedAt,
-            })
-            .from(schema.providerAssets)
-            .where(
-              and(
-                eq(schema.providerAssets.provider, "coinbase"),
-                eq(schema.providerAssets.currencyCode, "HYPE")
-              )
-            )
-            .limit(1)
-          if (providerAsset === undefined) {
-            return yield* Effect.die("Missing HYPE provider asset fixture")
-          }
-
-          return {
-            lookups,
-            providerAssetRowId: providerAsset.id,
-          }
-        }).pipe(Effect.provide(TestLayer))
-
-        const prepared = yield* Effect.gen(function* () {
-          const provider = yield* CoinbaseSourceSyncProvider
-          return yield* provider.prepareNormalization({
-            source,
-            sourceRecord,
-            lookups: fixture.lookups,
+      const fixture = yield* Effect.gen(function* () {
+        const provider = yield* CoinbaseSourceSyncProvider
+        yield* provider.refreshReferenceData
+        const lookups = yield* provider.loadNormalizationLookups
+        const db = yield* drizzle
+        const [providerAsset] = yield* db
+          .select({
+            id: schema.providerAssets.id,
+            retrievedAt: schema.providerAssets.retrievedAt,
           })
-        }).pipe(Effect.provide(TestLayer))
-
-        const state = yield* Effect.promise(() =>
-          context.runPg(
-            Effect.gen(function* () {
-              const db = yield* drizzle
-              const sourceUses = yield* db
-                .select({ sourceId: schema.providerAssetSourceUses.sourceId })
-                .from(schema.providerAssetSourceUses)
-                .where(
-                  eq(schema.providerAssetSourceUses.providerAssetRowId, fixture.providerAssetRowId)
-                )
-              const jobs = yield* db
-                .select({
-                  mode: schema.processingJobs.mode,
-                  status: schema.processingJobs.status,
-                })
-                .from(schema.processingJobs)
-                .where(eq(schema.processingJobs.sourceId, sourceId))
-              return { jobs, sourceUses }
-            })
+          .from(schema.providerAssets)
+          .where(
+            and(
+              eq(schema.providerAssets.provider, "coinbase"),
+              eq(schema.providerAssets.currencyCode, "HYPE")
+            )
           )
-        )
+          .limit(1)
+        if (providerAsset === undefined) {
+          return yield* Effect.die("Missing HYPE provider asset fixture")
+        }
 
-        expect(prepared.legDerivationStrategy).toBe("skip")
-        expect(prepared.providerAssetRowIds).toContain(fixture.providerAssetRowId)
-        expect(prepared.transactionReview).toMatchObject({
-          matchedLayer: "provider_asset_mapping",
-          reviewStatus: "needs_review",
+        return {
+          lookups,
+          providerAssetRowId: providerAsset.id,
+        }
+      }).pipe(Effect.provide(TestLayer))
+
+      const prepared = yield* Effect.gen(function* () {
+        const provider = yield* CoinbaseSourceSyncProvider
+        return yield* provider.prepareNormalization({
+          source,
+          sourceRecord,
+          lookups: fixture.lookups,
         })
-        expect(state.sourceUses).toEqual([])
-        expect(state.jobs).toEqual([])
-      }),
-    15_000
+      }).pipe(Effect.provide(TestLayer))
+
+      const state = yield* Effect.promise(() =>
+        context.runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const sourceUses = yield* db
+              .select({ sourceId: schema.providerAssetSourceUses.sourceId })
+              .from(schema.providerAssetSourceUses)
+              .where(
+                eq(schema.providerAssetSourceUses.providerAssetRowId, fixture.providerAssetRowId)
+              )
+            const jobs = yield* db
+              .select({
+                mode: schema.processingJobs.mode,
+                status: schema.processingJobs.status,
+              })
+              .from(schema.processingJobs)
+              .where(eq(schema.processingJobs.sourceId, sourceId))
+            return { jobs, sourceUses }
+          })
+        )
+      )
+
+      expect(prepared.legDerivationStrategy).toBe("skip")
+      expect(prepared.providerAssetRowIds).toContain(fixture.providerAssetRowId)
+      expect(prepared.transactionReview).toMatchObject({
+        matchedLayer: "provider_asset_mapping",
+        reviewStatus: "needs_review",
+      })
+      expect(state.sourceUses).toEqual([])
+      expect(state.jobs).toEqual([])
+    })
   )
 
   it.effect("replays reviewable raw rows after approving an economic asset mapping", () =>

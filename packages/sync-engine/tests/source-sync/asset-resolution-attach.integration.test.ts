@@ -1357,8 +1357,7 @@ describe("asset resolution attach and rebuild", () => {
           expect(state.mapping).toMatchObject({ mappingStatus: "pending_review" })
           expect((yield* fetchResolutionJobState({ jobId })).status).toBe("completed")
         }).pipe(Effect.provide(TestLayer))
-      ),
-    15_000
+      )
   )
 
   it.effect.each([
@@ -1426,8 +1425,7 @@ describe("asset resolution attach and rebuild", () => {
           expect(after.replayJobs).toEqual(before.replayJobs)
           expect((yield* fetchResolutionJobState({ jobId })).status).toBe("completed")
         }).pipe(Effect.provide(TestLayer))
-      ),
-    15_000
+      )
   )
 
   it.effect.each(["approved", "excluded"] as const)(
@@ -1506,8 +1504,7 @@ describe("asset resolution attach and rebuild", () => {
           expect(after.mapping).toEqual(before.mapping)
           expect((yield* fetchResolutionJobState({ jobId: staleJobId })).status).toBe("completed")
         }).pipe(Effect.provide(TestLayer))
-      ),
-    15_000
+      )
   )
 
   it.effect(

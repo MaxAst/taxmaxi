@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto"
 import { PgClient } from "@effect/sql-pg"
 import * as Config from "effect/Config"
+import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
+import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
+import * as Scope from "effect/Scope"
 import type { TestProject } from "vitest/node"
 import {
   makePgClientLayerForTests,
@@ -37,16 +41,7 @@ export const prepareTemplateDatabase = <E, R, R2>({
   readonly prepareTemplate: Effect.Effect<void, E, R>
 }) => prepareTemplate.pipe(Effect.onError(() => cleanupTemplate))
 
-/**
- * A full run leaves one database per test file behind, so drop them
- * concurrently to keep teardown short. Note: most of the historical 40s+
- * post-suite hang was not the drops themselves but the checkpoint that the
- * first `DROP DATABASE` triggers, which had to fsync every file the suite
- * created (~130k: table and index files from template clones plus a new
- * file per table and index for every per-test TRUNCATE). That is fixed by
- * the dedicated `db-test` compose service, which runs with `fsync=off`
- * (see compose.yaml).
- */
+/** A full run leaves one database per test file behind; drop them concurrently. */
 export const TEST_DATABASE_DROP_CONCURRENCY = 8
 
 export const cleanupIntegrationTestDatabases = <E, R>({
@@ -73,6 +68,24 @@ const prepareIntegrationTestDatabase = (project: TestProject) =>
     const adminDatabaseUrl = Redacted.make(
       `postgresql://${user}:${passwordValue}@${host}:${port}/postgres`
     )
+
+    // Worker limits apply to one Vitest invocation. Worktrees share this
+    // server, so hold a session lock until teardown to bound their combined
+    // load too. Reserve the connection: an idle pool could evict it and
+    // release the lock halfway through a long suite. Closing the run scope
+    // releases it on setup failure, teardown failure, or normal completion.
+    const runLockContext = yield* Layer.build(
+      makePgClientLayerForTests({ url: adminDatabaseUrl, maxConnections: 1 })
+    )
+    const runLockClient = Context.get(runLockContext, PgClient.PgClient)
+    const runLockConnection = yield* runLockClient.reserve
+    yield* Effect.logInfo({ host, port }, "Acquiring integration database run slot")
+    yield* runLockConnection.executeUnprepared(
+      "SELECT pg_advisory_lock(hashtextextended('taxmaxi:integration-suite', 0))",
+      [],
+      undefined
+    )
+
     const templateDatabaseUrl = Redacted.make(
       `postgresql://${user}:${passwordValue}@${host}:${port}/${migratedTestDatabaseTemplateName}`
     )
@@ -147,15 +160,30 @@ const prepareIntegrationTestDatabase = (project: TestProject) =>
     } as const
   })
 
-export const setup = (project: TestProject) =>
-  Effect.runPromise(prepareIntegrationTestDatabase(project)).then(
-    ({ AdminPgClientLive, cleanupDatabase, cleanupTemplate, listIntegrationTestDatabaseNames }) =>
-      () =>
-        Effect.runPromise(
-          Effect.gen(function* () {
-            const databaseNames = yield* listIntegrationTestDatabaseNames
-            yield* cleanupIntegrationTestDatabases({ databaseNames, cleanupDatabase })
-            yield* cleanupTemplate
-          }).pipe(Effect.provide(AdminPgClientLive), Effect.scoped)
-        )
+export const setup = (project: TestProject) => {
+  const scope = Scope.makeUnsafe()
+  const close = Scope.close(scope, Exit.void)
+
+  return Effect.runPromise(
+    prepareIntegrationTestDatabase(project).pipe(
+      Effect.provideService(Scope.Scope, scope),
+      Effect.onError(() => close),
+      Effect.map(
+        ({
+          AdminPgClientLive,
+          cleanupDatabase,
+          cleanupTemplate,
+          listIntegrationTestDatabaseNames,
+        }) =>
+          () =>
+            Effect.runPromise(
+              Effect.gen(function* () {
+                const databaseNames = yield* listIntegrationTestDatabaseNames
+                yield* cleanupIntegrationTestDatabases({ databaseNames, cleanupDatabase })
+                yield* cleanupTemplate
+              }).pipe(Effect.provide(AdminPgClientLive), Effect.scoped, Effect.ensuring(close))
+            )
+      )
+    )
   )
+}

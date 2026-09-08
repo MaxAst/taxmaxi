@@ -3,10 +3,14 @@ import type { SqlClient } from "effect/unstable/sql/SqlClient"
 import { PgClient } from "@effect/sql-pg"
 import { eq } from "drizzle-orm"
 import * as Config from "effect/Config"
+import * as Deferred from "effect/Deferred"
 import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
+import * as Exit from "effect/Exit"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
-import { inject } from "vitest"
+import * as Scope from "effect/Scope"
+import { afterAll, inject } from "vitest"
 import { drizzle } from "../../src/layers/PgClientLive.ts"
 import {
   makePgClientLayerForTests,
@@ -88,10 +92,31 @@ const PRESERVED_TEST_RESET_TABLES = [
 
 const preservedTestResetTablesSql = PRESERVED_TEST_RESET_TABLES.map(quoteSqlLiteral).join(", ")
 
+/** A lazy real Postgres pool owned by the file, not by individual helper calls. */
+const makeTestPgPool = (options: Parameters<typeof makePgClientLayerForTests>[0]) => {
+  const scope = Scope.makeUnsafe()
+  const context = Effect.runSync(
+    Effect.cached(Layer.buildWithScope(makePgClientLayerForTests(options), scope))
+  )
+
+  return {
+    layer: Layer.effectContext(context),
+    close: Scope.close(scope, Exit.void),
+  }
+}
+
+/**
+ * Real Postgres with one isolated database and pool per file. Calls commit
+ * normally, including across independent HTTP requests and concurrent fibers.
+ * Pools close before database recreation and in the file's afterAll hook.
+ */
 export const makeIntegrationTestDatabaseContext = ({
   databaseNamePrefix,
+  maxConnections = 4,
 }: {
   readonly databaseNamePrefix: string
+  /** Include a connection for lock observers as well as concurrent writers. */
+  readonly maxConnections?: number
 }) => {
   const databaseName = makeIntegrationTestDatabaseName({
     databaseNamePrefix,
@@ -107,13 +132,21 @@ export const makeIntegrationTestDatabaseContext = ({
     `postgresql://${pgUser}:${pgPassword}@${pgHost}:${pgPort}/postgres`
   )
 
-  const TestPgClientLive = makePgClientLayerForTests({
-    url: testDatabaseUrl,
-  })
-
-  const AdminPgClientLive = makePgClientLayerForTests({
+  let testPool = makeTestPgPool({ url: testDatabaseUrl, maxConnections })
+  // Keep this layer value stable for callers that assemble layers before setup.
+  const TestPgClientLive = Layer.unwrap(Effect.sync(() => testPool.layer))
+  const adminPool = makeTestPgPool({
     url: adminDatabaseUrl,
-    maxConnections: 2,
+    maxConnections: 1,
+  })
+  const AdminPgClientLive = adminPool.layer
+
+  const close = () => Effect.all([testPool.close, adminPool.close], { discard: true })
+  afterAll(() => Effect.runPromise(close()))
+
+  const closeTestPool = Effect.gen(function* () {
+    yield* testPool.close
+    testPool = makeTestPgPool({ url: testDatabaseUrl, maxConnections })
   })
 
   const runAdminSql = ({
@@ -137,15 +170,19 @@ export const makeIntegrationTestDatabaseContext = ({
     runDrizzleMigrations({ migrationsFolder }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
 
   const terminateTestDatabaseConnections = () =>
-    runAdminSql({
-      statement: `
+    closeTestPool.pipe(
+      Effect.andThen(
+        runAdminSql({
+          statement: `
         SELECT pg_terminate_backend(pid)
         FROM pg_stat_activity
         WHERE datname = $1
           AND pid <> pg_backend_pid()
       `,
-      params: [databaseName],
-    })
+          params: [databaseName],
+        })
+      )
+    )
 
   const cloneMigratedTemplateDatabase = () =>
     Effect.gen(function* () {
@@ -160,22 +197,33 @@ export const makeIntegrationTestDatabaseContext = ({
       })
     })
 
+  /**
+   * Empty every mutable table before a test. DELETE only the tables that hold
+   * rows: TRUNCATE rewrites the files of all 70 tables and 300+ indexes even
+   * when they are empty, which cost 130-230 ms per test. Replica mode skips
+   * row triggers (append-only guards) and FK checks for this transaction, the
+   * same as TRUNCATE did. The schema has no sequences, so nothing to restart.
+   */
   const resetTestData = () =>
     runSqlUnsafe({
       statement: `
         DO $$
         DECLARE
-          table_list text;
+          t text;
+          has_rows boolean;
         BEGIN
-          SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
-          INTO table_list
-          FROM pg_tables
-          WHERE schemaname = 'public'
-            AND tablename <> ALL(ARRAY[${preservedTestResetTablesSql}]);
+          PERFORM set_config('session_replication_role', 'replica', true);
 
-          IF table_list IS NOT NULL THEN
-            EXECUTE 'TRUNCATE TABLE ' || table_list || ' RESTART IDENTITY CASCADE';
-          END IF;
+          FOR t IN
+            SELECT tablename FROM pg_tables
+            WHERE schemaname = 'public'
+              AND tablename <> ALL(ARRAY[${preservedTestResetTablesSql}])
+          LOOP
+            EXECUTE format('SELECT EXISTS (SELECT 1 FROM public.%I)', t) INTO has_rows;
+            IF has_rows THEN
+              EXECUTE format('DELETE FROM public.%I', t);
+            END IF;
+          END LOOP;
         END $$;
       `,
     }).pipe(Effect.provide(TestPgClientLive), Effect.asVoid, Effect.scoped)
@@ -222,36 +270,69 @@ export const makeIntegrationTestDatabaseContext = ({
   const runPg = <A, E>(effect: Effect.Effect<A, E, SyncEngineRepositoryTestRuntime>) =>
     Effect.runPromise(effect.pipe(Effect.provide(TestPgClientLive), Effect.scoped))
 
-  const waitForQueryBlockedOnLock = ({ queryIncludes }: { readonly queryIncludes: string }) =>
+  /** Wait on this database's actual lock state, bounded by the live clock. */
+  const waitForQueryBlockedOnLock = ({
+    queryIncludes,
+    minimumWaiters = 1,
+  }: {
+    readonly queryIncludes: string
+    readonly minimumWaiters?: number
+  }) =>
     runPg(
       Effect.gen(function* () {
         const sql = yield* PgClient.PgClient
 
-        for (let attempt = 0; attempt < 500; attempt += 1) {
-          const [activity] = yield* sql<{ readonly isWaiting: boolean }>`
-            select exists (
-              select 1
-              from pg_stat_activity
-              where datname = current_database()
-                and pid <> pg_backend_pid()
-                and state = 'active'
-                and wait_event_type = 'Lock'
-                and position(${queryIncludes} in query) > 0
-            ) as "isWaiting"
+        while (true) {
+          const [activity] = yield* sql<{ readonly count: number }>`
+            select count(*)::int as count
+            from pg_stat_activity
+            where datname = current_database()
+              and pid <> pg_backend_pid()
+              and state = 'active'
+              and wait_event_type = 'Lock'
+              and position(${queryIncludes} in query) > 0
           `
 
-          if (activity?.isWaiting === true) {
-            return
-          }
-
+          if (activity !== undefined && activity.count >= minimumWaiters) return
           yield* Effect.sleep("10 millis")
         }
-
-        return yield* Effect.die(
-          `Timed out waiting for a database lock wait containing ${queryIncludes}`
-        )
-      })
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: "2 seconds",
+          orElse: () =>
+            Effect.die(
+              `Timed out waiting for ${minimumWaiters} lock waiter(s) containing ${queryIncludes} in ${databaseName}`
+            ),
+        })
+      )
     )
+
+  /** Hold a real transaction lock until released, also releasing on scope exit. */
+  const holdAdvisoryLock = ({ key }: { readonly key: string }) =>
+    Effect.gen(function* () {
+      const acquired = yield* Deferred.make<void>()
+      const released = yield* Deferred.make<void>()
+      const holder = yield* Effect.gen(function* () {
+        const sql = yield* PgClient.PgClient
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`
+            yield* Deferred.succeed(acquired, undefined)
+            yield* Deferred.await(released)
+          })
+        )
+      }).pipe(Effect.provide(TestPgClientLive), Effect.forkScoped)
+      yield* Effect.addFinalizer(() => Deferred.succeed(released, undefined))
+      // Surface acquisition errors instead of waiting forever for the signal.
+      yield* Effect.raceFirst(Deferred.await(acquired), Fiber.join(holder))
+
+      return {
+        release: Deferred.succeed(released, undefined).pipe(
+          Effect.andThen(Fiber.join(holder)),
+          Effect.orDie
+        ),
+      }
+    })
 
   const runWithLayer = <A, E, R, LE>({
     effect,
@@ -269,6 +350,8 @@ export const makeIntegrationTestDatabaseContext = ({
     runPg,
     runWithLayer,
     waitForQueryBlockedOnLock,
+    holdAdvisoryLock,
+    close,
   }
 }
 

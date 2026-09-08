@@ -4034,64 +4034,61 @@ describe("SourceNormalizationRepositoryLive", () => {
     })
   )
 
-  it.effect(
-    "reuses one provider decision view through derivation and final preflight",
-    () =>
-      Effect.gen(function* () {
-        const occurredAt = DateTime.toDateUtc(DateTime.makeUnsafe("2025-02-01T10:20:00.000Z"))
-        yield* Effect.promise(() => seedProviderDecisionFixture(occurredAt))
-        const decisionResolved = yield* Latch.make()
-        const releaseDerivation = yield* Latch.make()
-        const sourceWrite = yield* Effect.forkChild(
-          Effect.promise(() =>
-            persistProviderDecisionArtifacts({
-              occurredAt,
-              externalId: "provider-decision-snapshot-during-derivation",
-              legs: [
-                {
-                  externalId: "provider-decision-snapshot-during-derivation-leg",
-                  providerAssetRowId: PROVIDER_ASSET_ROW_A_ID,
-                },
-              ],
-              afterProviderDecision: decisionResolved.open.pipe(
-                Effect.andThen(releaseDerivation.await)
-              ),
-            })
-          )
-        )
-
-        yield* decisionResolved.await
-        yield* Effect.promise(() =>
-          runPg(
-            Effect.gen(function* () {
-              const db = yield* drizzle
-              yield* db
-                .update(schema.providerAssets)
-                .set({ exponent: null })
-                .where(eq(schema.providerAssets.id, PROVIDER_ASSET_ROW_A_ID))
-            })
-          )
-        )
-        yield* releaseDerivation.open
-
-        const first = yield* Fiber.join(sourceWrite)
-        const later = yield* Effect.promise(() =>
+  it.effect("reuses one provider decision view through derivation and final preflight", () =>
+    Effect.gen(function* () {
+      const occurredAt = DateTime.toDateUtc(DateTime.makeUnsafe("2025-02-01T10:20:00.000Z"))
+      yield* Effect.promise(() => seedProviderDecisionFixture(occurredAt))
+      const decisionResolved = yield* Latch.make()
+      const releaseDerivation = yield* Latch.make()
+      const sourceWrite = yield* Effect.forkChild(
+        Effect.promise(() =>
           persistProviderDecisionArtifacts({
             occurredAt,
-            externalId: "provider-decision-after-reference-change",
+            externalId: "provider-decision-snapshot-during-derivation",
             legs: [
               {
-                externalId: "provider-decision-after-reference-change-leg",
+                externalId: "provider-decision-snapshot-during-derivation-leg",
                 providerAssetRowId: PROVIDER_ASSET_ROW_A_ID,
               },
             ],
+            afterProviderDecision: decisionResolved.open.pipe(
+              Effect.andThen(releaseDerivation.await)
+            ),
           })
         )
+      )
 
-        expect(first.legs).toHaveLength(1)
-        expect(later.legs).toEqual([])
-      }),
-    15_000
+      yield* decisionResolved.await
+      yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .update(schema.providerAssets)
+              .set({ exponent: null })
+              .where(eq(schema.providerAssets.id, PROVIDER_ASSET_ROW_A_ID))
+          })
+        )
+      )
+      yield* releaseDerivation.open
+
+      const first = yield* Fiber.join(sourceWrite)
+      const later = yield* Effect.promise(() =>
+        persistProviderDecisionArtifacts({
+          occurredAt,
+          externalId: "provider-decision-after-reference-change",
+          legs: [
+            {
+              externalId: "provider-decision-after-reference-change-leg",
+              providerAssetRowId: PROVIDER_ASSET_ROW_A_ID,
+            },
+          ],
+        })
+      )
+
+      expect(first.legs).toHaveLength(1)
+      expect(later.legs).toEqual([])
+    })
   )
 
   it.effect("withholds all accounting legs when a principal exclusion applies", () =>

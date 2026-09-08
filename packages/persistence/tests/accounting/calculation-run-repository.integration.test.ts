@@ -1,6 +1,5 @@
 import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
-import { PgClient } from "@effect/sql-pg"
 import type { TaxAccountingResult } from "@my/accounting"
 import {
   AccountingChoiceId,
@@ -574,25 +573,8 @@ const removeCalculationRunTestTriggers = () =>
   )
 
 const waitForCalculationRunLockWaiter = () =>
-  runPgEffect(
-    Effect.gen(function* () {
-      const client = yield* PgClient.PgClient
-
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        const [locks] = yield* client<{ readonly isWaiting: boolean }>`
-          select exists (
-            select 1
-            from pg_locks
-            where granted = false
-          ) as "isWaiting"
-        `
-
-        if (locks?.isWaiting === true) return
-        yield* Effect.sleep("10 millis")
-      }
-
-      return yield* Effect.die("Timed out waiting for the older calculation run")
-    })
+  Effect.promise(() =>
+    context.waitForQueryBlockedOnLock({ queryIncludes: 'insert into "calculation_runs"' })
   )
 
 beforeEach(() =>
@@ -2207,16 +2189,14 @@ describe("CalculationRunRepositoryLive", () => {
     })
   )
 
-  it.effect(
-    "keeps a concurrently delayed older run durable but inactive",
-    () =>
-      Effect.gen(function* () {
-        yield* runPgEffect(seedCalculationRunFixture({ includeOtherPrincipal: true }))
-        yield* runPgEffect(
-          Effect.gen(function* () {
-            const db = yield* drizzle
-            yield* db.execute(
-              sql.raw(`
+  it.effect("keeps a concurrently delayed older run durable but inactive", () =>
+    Effect.gen(function* () {
+      yield* runPgEffect(seedCalculationRunFixture({ includeOtherPrincipal: true }))
+      yield* runPgEffect(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db.execute(
+            sql.raw(`
               create function pause_test_older_run() returns trigger as $$
               begin
                 if new.id = '${RUN_ID}' then
@@ -2229,75 +2209,74 @@ describe("CalculationRunRepositoryLive", () => {
               end;
               $$ language plpgsql
             `)
-            )
-            yield* db.execute(
-              sql.raw(`
+          )
+          yield* db.execute(
+            sql.raw(`
               create trigger pause_test_older_run
               before insert on calculation_runs
               for each row execute function pause_test_older_run()
             `)
-            )
-          })
-        )
-        const lockAcquired = yield* Deferred.make<void>()
-        const releaseLock = yield* Deferred.make<void>()
-        const heldLock = runPg(
-          Effect.gen(function* () {
-            const db = yield* drizzle
-            yield* db.transaction((tx) =>
-              Effect.gen(function* () {
-                yield* tx
-                  .select({ id: schema.principals.id })
-                  .from(schema.principals)
-                  .where(eq(schema.principals.id, OTHER_PRINCIPAL_ID))
-                  .for("update")
-                yield* Deferred.succeed(lockAcquired, undefined)
-                yield* Deferred.await(releaseLock)
-              })
-            )
-          })
-        )
-
-        yield* Deferred.await(lockAcquired)
-        const { newer, older } = yield* Effect.gen(function* () {
-          const olderRun = yield* Effect.forkChild(
-            runRepository(persistResult({ id: RUN_ID, inputSequence: "10" }))
           )
-          yield* waitForCalculationRunLockWaiter()
-          const newer = yield* runRepository(
-            persistResult({ id: SECOND_RUN_ID, inputSequence: "20" })
-          )
-          yield* Deferred.succeed(releaseLock, undefined)
-          const older = yield* Fiber.join(olderRun)
-
-          return { newer, older }
-        }).pipe(Effect.ensuring(Deferred.succeed(releaseLock, undefined)))
-        yield* Effect.promise(() => heldLock)
-        yield* removeCalculationRunTestTriggers()
-
-        const stored = yield* runPgEffect(
-          Effect.gen(function* () {
-            const db = yield* drizzle
-            const runs = yield* db
-              .select({ id: schema.calculationRuns.id })
-              .from(schema.calculationRuns)
-              .orderBy(asc(schema.calculationRuns.id))
-            const [active] = yield* db
-              .select({ runId: schema.activeCalculationRuns.runId })
-              .from(schema.activeCalculationRuns)
-
-            return { runs, active }
-          })
-        )
-
-        expect(newer.activated).toBe(true)
-        expect(older.activated).toBe(false)
-        expect(stored).toEqual({
-          runs: [{ id: RUN_ID }, { id: SECOND_RUN_ID }],
-          active: { runId: SECOND_RUN_ID },
         })
-      }),
-    10_000
+      )
+      const lockAcquired = yield* Deferred.make<void>()
+      const releaseLock = yield* Deferred.make<void>()
+      const heldLock = runPg(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db.transaction((tx) =>
+            Effect.gen(function* () {
+              yield* tx
+                .select({ id: schema.principals.id })
+                .from(schema.principals)
+                .where(eq(schema.principals.id, OTHER_PRINCIPAL_ID))
+                .for("update")
+              yield* Deferred.succeed(lockAcquired, undefined)
+              yield* Deferred.await(releaseLock)
+            })
+          )
+        })
+      )
+
+      yield* Deferred.await(lockAcquired)
+      const { newer, older } = yield* Effect.gen(function* () {
+        const olderRun = yield* Effect.forkChild(
+          runRepository(persistResult({ id: RUN_ID, inputSequence: "10" }))
+        )
+        yield* waitForCalculationRunLockWaiter()
+        const newer = yield* runRepository(
+          persistResult({ id: SECOND_RUN_ID, inputSequence: "20" })
+        )
+        yield* Deferred.succeed(releaseLock, undefined)
+        const older = yield* Fiber.join(olderRun)
+
+        return { newer, older }
+      }).pipe(Effect.ensuring(Deferred.succeed(releaseLock, undefined)))
+      yield* Effect.promise(() => heldLock)
+      yield* removeCalculationRunTestTriggers()
+
+      const stored = yield* runPgEffect(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const runs = yield* db
+            .select({ id: schema.calculationRuns.id })
+            .from(schema.calculationRuns)
+            .orderBy(asc(schema.calculationRuns.id))
+          const [active] = yield* db
+            .select({ runId: schema.activeCalculationRuns.runId })
+            .from(schema.activeCalculationRuns)
+
+          return { runs, active }
+        })
+      )
+
+      expect(newer.activated).toBe(true)
+      expect(older.activated).toBe(false)
+      expect(stored).toEqual({
+        runs: [{ id: RUN_ID }, { id: SECOND_RUN_ID }],
+        active: { runId: SECOND_RUN_ID },
+      })
+    })
   )
 
   it.effect("keeps active pointers isolated across tax-year and principal scopes", () =>

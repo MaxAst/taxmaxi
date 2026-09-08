@@ -740,11 +740,11 @@ const make = Effect.gen(function* () {
    * A fresh id and one-time code for a verification request.
    */
   const generateEmailVerificationIdAndCode = Effect.gen(function* () {
-    const id = EmailVerificationRequestId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie))
-    const codeBytes = yield* crypto.randomBytes(8).pipe(Effect.orDie)
+    const id = EmailVerificationRequestId.make(yield* crypto.randomUUIDv4)
+    const codeBytes = yield* crypto.randomBytes(8)
 
     return { id, code: generateEmailVerificationCode(codeBytes) }
-  })
+  }).pipe(Effect.orDie)
 
   /**
    * Reuse the user's active request or start a fresh one. The repository does

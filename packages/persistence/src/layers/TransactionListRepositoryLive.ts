@@ -730,9 +730,7 @@ const make = Effect.gen(function* () {
                 .limit(1)
                 .pipe(wrapSqlError("transactionListRepository.list.source"))
               if (sources.length === 0) {
-                return yield* Effect.fail(
-                  new TransactionListSourceNotFoundError({ sourceId: scope.sourceId })
-                )
+                return yield* new TransactionListSourceNotFoundError({ sourceId: scope.sourceId })
               }
             }
             const totalCount = yield* loadTotalCount(tx, scope)

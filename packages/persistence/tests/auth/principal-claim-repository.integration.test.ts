@@ -309,7 +309,8 @@ describe("PrincipalClaimRepositoryLive", () => {
       yield* Effect.promise(() =>
         context.waitForQueryBlockedOnLock({ queryIncludes: 'update "sources"' })
       )
-      const completion = Effect.runPromise(
+      const services = yield* Effect.context<never>()
+      const completion = Effect.runPromiseWith(services)(
         context.runWithLayer({
           layer: SourceSyncJobRepositoryLive,
           effect: Effect.flatMap(SourceSyncJobRepository, (repository) =>

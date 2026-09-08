@@ -45,6 +45,9 @@ export default defineConfig({
           ],
           exclude: ["**/node_modules/**"],
           name: { label: "integration", color: "magenta" },
+          // Bound database contention independently of the host's CPU count.
+          maxWorkers: 4,
+          sequence: { groupOrder: 1 },
           env: loadEnv("test", "./apps/server", ""),
           globalSetup: ["./packages/persistence/tests/support/vitest.integration.setup.ts"],
         },

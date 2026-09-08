@@ -1020,7 +1020,7 @@ const installClaimPointerPause = Effect.gen(function* () {
     create function pause_claim_pointer_fence() returns trigger as $$
     begin
       if new.run_id is null then
-        perform pg_sleep(0.5);
+        perform pg_advisory_xact_lock(hashtextextended('test:claim-pointer', 0));
       end if;
       return new;
     end;
@@ -1028,34 +1028,9 @@ const installClaimPointerPause = Effect.gen(function* () {
   `)
   yield* db.execute(sql`
     create trigger pause_claim_pointer_fence
-    before insert or update on active_calculation_runs
+    before insert on active_calculation_runs
     for each row execute function pause_claim_pointer_fence()
   `)
-})
-
-const waitForClaimPointerPause = Effect.gen(function* () {
-  const db = yield* drizzle
-
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const [activity] = yield* db
-      .select({
-        isPaused: sql<boolean>`exists (
-          select 1
-          from pg_stat_activity
-          where datname = current_database()
-            and pid <> pg_backend_pid()
-            and wait_event = 'PgSleep'
-            and query like 'insert into "active_calculation_runs"%'
-        )`,
-      })
-      .from(schema.principals)
-      .limit(1)
-
-    if (activity?.isPaused === true) return
-    yield* db.execute(sql`select pg_sleep(0.01)`)
-  }
-
-  return yield* Effect.die("Timed out waiting for the claim pointer fence")
 })
 
 const removeClaimPointerPause = Effect.gen(function* () {
@@ -4547,36 +4522,56 @@ describe("SourcesApiLive", () => {
 
       const authenticatedClient = yield* makeAuthenticatedClient({ userId })
       yield* installClaimPointerPause
-      const claimFiber = yield* Effect.forkChild(
-        authenticatedClient.principals.claimPrincipal({
-          payload: {
-            requestId: created.claim.requestId,
-            claimToken: null,
-            siwxProof: makeTestSiwxProof({
-              chainType: "solana",
-              walletAddress: TEST_PAYER_WALLET,
-              nonce: created.claim.requestId,
-            }),
-          },
-        })
-      )
-      yield* waitForClaimPointerPause
-      const overlappingRevision = yield* captureClaimInputLedgerRevision({
-        principalId: created.source.principalId,
-        visibleTransactionId: calculationGraph.transactionId,
+      yield* Effect.addFinalizer(() => removeClaimPointerPause.pipe(Effect.orDie))
+      const { release: releaseClaimPause } = yield* context.holdAdvisoryLock({
+        key: "test:claim-pointer",
       })
-      const overlappingRunId = nextTestUuid()
-      const persistFiber = yield* Effect.forkChild(
-        persistClaimRaceRun({
-          inputLedgerRevision: preClaimRevision,
-          principalId: created.source.principalId,
-          runId: lateRunId,
-          taxYear: calculationGraph.taxYear,
-        })
-      )
-      const claimResponse = yield* Fiber.join(claimFiber)
-      const staleWrite = yield* Fiber.join(persistFiber)
-      yield* removeClaimPointerPause
+      const claim = created.claim
+      const { claimResponse, staleWrite, overlappingRevision, overlappingRunId } =
+        yield* Effect.gen(function* () {
+          const claimFiber = yield* Effect.forkChild(
+            authenticatedClient.principals.claimPrincipal({
+              payload: {
+                requestId: claim.requestId,
+                claimToken: null,
+                siwxProof: makeTestSiwxProof({
+                  chainType: "solana",
+                  walletAddress: TEST_PAYER_WALLET,
+                  nonce: claim.requestId,
+                }),
+              },
+            })
+          )
+          yield* Effect.promise(() =>
+            context.waitForQueryBlockedOnLock({
+              queryIncludes: 'insert into "active_calculation_runs"',
+            })
+          )
+          const overlappingRevision = yield* captureClaimInputLedgerRevision({
+            principalId: created.source.principalId,
+            visibleTransactionId: calculationGraph.transactionId,
+          })
+          const overlappingRunId = nextTestUuid()
+          const persistFiber = yield* Effect.forkChild(
+            persistClaimRaceRun({
+              inputLedgerRevision: preClaimRevision,
+              principalId: created.source.principalId,
+              runId: lateRunId,
+              taxYear: calculationGraph.taxYear,
+            })
+          )
+          yield* Effect.promise(() =>
+            context.waitForQueryBlockedOnLock({
+              queryIncludes: "calculation_runs",
+              minimumWaiters: 2,
+            })
+          )
+          yield* releaseClaimPause
+          const claimResponse = yield* Fiber.join(claimFiber)
+          const staleWrite = yield* Fiber.join(persistFiber)
+
+          return { claimResponse, staleWrite, overlappingRevision, overlappingRunId }
+        }).pipe(Effect.ensuring(releaseClaimPause))
 
       expect(claimResponse.sourceId).toBe(created.source.id)
       yield* assertClaimMovementOwnership({
