@@ -243,6 +243,66 @@
       "submit": "Wallet hinzufügen",
       "error": "Fehler beim Hinzufügen."
     },
+    "firstSync": {
+      "announcements": "Neuigkeiten zum ersten Sync",
+      "stepsLabel": "Einrichtungsschritte",
+      "stepProgress": "Schritt {current} von {total}: {label}",
+      "steps": {
+        "welcome": "Willkommen",
+        "connect": "Quelle verbinden",
+        "plan": "Tarif und Credits",
+        "sync": "Erster Sync",
+        "done": "Fertig"
+      },
+      "connected": "{sourceName} verbunden",
+      "credits": {
+        "one": "1 Credit verfügbar",
+        "many": "{count} Credits verfügbar"
+      },
+      "needsSource": {
+        "headline": "Verbinde deine erste Quelle",
+        "body": "Gib eine Wallet-Adresse ein und TaxMaxi legt dafür eine Quelle an. Es wird nichts importiert, bis du den ersten Sync selbst startest."
+      },
+      "needsCredits": {
+        "headlinePlan": "Wähle einen Tarif, um den Import freizuschalten",
+        "headlineTopUp": "Lade Credits auf, um den Import freizuschalten",
+        "body": "Der Import deiner Historie verbraucht Transaktions-Credits, ein Credit pro Transaktion.",
+        "noPlan": "Du hast noch keinen Tarif, also gibt es keine Credits zum Ausgeben.",
+        "noCredits": "Dein Tarif ist aktiv, aber es sind keine Credits mehr übrig. Lade vor dem ersten Sync auf.",
+        "choosePlan": "Tarif wählen",
+        "buyCredits": "Credits kaufen"
+      },
+      "billingUnknown": {
+        "headline": "Wir konnten deinen Tarif nicht prüfen",
+        "body": "Wir konnten deinen Tarifstatus nicht laden und wissen deshalb noch nicht, ob ein Sync starten kann.",
+        "retry": "Erneut versuchen",
+        "retrying": "Wird geprüft…"
+      },
+      "ready": {
+        "headline": "Bereit, wenn du es bist",
+        "body": "Das reicht, um deine {sourceName}-Historie zu importieren. Es startet nichts, bevor du es sagst.",
+        "start": "Meinen ersten Sync starten"
+      },
+      "syncing": {
+        "headline": "Deine {sourceName}-Historie wird importiert",
+        "body": "Der Fortschritt wird oben auf der Seite angezeigt. Du kannst die Seite verlassen und später zurückkommen."
+      },
+      "paused": {
+        "headline": "Sync pausiert — mehr Credits nötig",
+        "body": "Deine Credits sind mitten im Import ausgegangen. Alles bisher Geladene bleibt erhalten, und der Sync macht dort weiter, wo er aufgehört hat.",
+        "hint": "Füge Credits über den Hinweis oben auf der Seite hinzu."
+      },
+      "resumable": {
+        "headline": "Bereit zum Fortsetzen",
+        "body": "Das reicht, um den Import abzuschließen. Er macht dort weiter, wo er aufgehört hat, und nichts wird doppelt berechnet.",
+        "continue": "Meinen ersten Sync fortsetzen"
+      },
+      "failed": {
+        "headline": "Dein erster Sync wurde nicht abgeschlossen",
+        "body": "Beim Import ist auf unserer Seite etwas schiefgelaufen. Es ist nichts verloren gegangen, und du kannst es jetzt erneut versuchen.",
+        "tryAgain": "Erneut versuchen"
+      }
+    },
     "dashboard": {
       "tabs": {
         "assets": "Assets",

@@ -6,20 +6,24 @@ import {
   QueryClient,
   QueryClientProvider,
   QueryObserver,
+  useQuery,
 } from "@tanstack/react-query"
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import type { ReactNode } from "react"
 import {
   TaxMaxi,
+  type BillingStatus,
   type PortfolioAssets,
+  type SourceOverview,
   type TransactionDetail,
   type TransactionListInput,
 } from "taxmaxi"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { Dashboard } from "#/components/dashboard"
-import { queryKeys } from "#/integrations/taxmaxi/queries"
-import type { SourceSyncSeed } from "#/lib/dashboard-types"
+import type { SourceSyncIslandItem } from "#/components/source-sync-island"
+import { queryKeys, queries } from "#/integrations/taxmaxi/queries"
+import type { Account, SourceSyncSeed } from "#/lib/dashboard-types"
 
 beforeEach(() => {
   Object.defineProperty(window, "matchMedia", {
@@ -31,7 +35,9 @@ beforeEach(() => {
 })
 
 const syncState = vi.hoisted(() => ({
+  activeSyncs: [] as ReadonlyArray<SourceSyncIslandItem & { jobId?: string }>,
   onCompleted: undefined as undefined | ((sourceId: string) => void | Promise<void>),
+  onSourceSync: vi.fn(),
   onUnauthorized: undefined as undefined | (() => void | Promise<void>),
   seeds: undefined as undefined | ReadonlyArray<SourceSyncSeed>,
 }))
@@ -40,10 +46,84 @@ let testTaxMaxi: TaxMaxi
 
 type TransactionListResponse = Awaited<ReturnType<TaxMaxi["transactions"]["list"]>>
 
+const SOURCE_A = "00000000-0000-4000-8000-000000000201"
+
+const sourceOverview = (
+  latestSync: Partial<SourceOverview["latestSync"]> = {},
+  sourceId = SOURCE_A
+): SourceOverview => ({
+  calculationRunId: null,
+  source: {
+    id: sourceId,
+    principalId: "00000000-0000-4000-8000-000000000002",
+    name: "Coinbase",
+    providerKey: "coinbase",
+    sourceRef: { _tag: "cex", cexAccountId: "00000000-0000-4000-8000-000000000003" },
+    createdAt: { epochMillis: 1_735_689_600_000 },
+  },
+  latestSync: {
+    jobId: null,
+    status: null,
+    mode: null,
+    queuedAt: null,
+    startedAt: null,
+    completedAt: null,
+    lastSyncedAt: null,
+    lastErrorMessage: null,
+    fetchedRecords: null,
+    normalizedRecords: null,
+    failedRecords: null,
+    ...latestSync,
+  },
+  totals: {
+    transactionCount: 0,
+    legCount: 0,
+    assetCount: 0,
+    fifoLotCount: 0,
+    disposalCount: 0,
+    incomeCount: 0,
+    feeCount: 0,
+    realizedGainLoss: "0",
+    incomeTotal: "0",
+    currency: null,
+  },
+  review: { status: "ok", needsReviewCount: 0, blockingIssueCount: 0, issues: [] },
+})
+
+/** A source that has completed a sync: the normal dashboard, no wizard. */
+const syncedOverviews: ReadonlyArray<SourceOverview> = [
+  sourceOverview({ lastSyncedAt: "2025-03-10T12:00:00.000Z", status: "completed" }),
+]
+
+const toAccount = (overview: SourceOverview): Account => ({
+  id: overview.source.id,
+  name: overview.source.name,
+  kind: "exchange",
+  importedTransactions: 0,
+  unresolvedItems: 0,
+  lastSync: overview.latestSync.lastSyncedAt ?? "Never synced",
+  ...(overview.latestSync.lastSyncedAt === null
+    ? {}
+    : { lastSyncedAt: overview.latestSync.lastSyncedAt }),
+})
+
+const billingStatus = (
+  credits: number,
+  subscriptionStatus: string | null = null
+): BillingStatus => ({
+  credits,
+  subscriptionStatus,
+  currentPeriodEnd: null,
+  cancelAtPeriodEnd: false,
+})
+
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>()
   return {
     ...actual,
+    Link: ({ children, to }: { readonly children: ReactNode; readonly to: string }) => (
+      <a href={to}>{children}</a>
+    ),
     useRouteContext: ({ select }: { readonly select: (context: unknown) => unknown }) =>
       select({ taxmaxi: () => testTaxMaxi }),
   }
@@ -73,8 +153,31 @@ vi.mock("#/components/source-cards", () => ({
   ),
 }))
 
+// Mirrors the real island's Retry rule: a failed item offers Retry when a
+// handler exists and `canRetry` (default yes) allows it.
 vi.mock("#/components/source-sync-island", () => ({
-  SourceSyncIsland: () => null,
+  SourceSyncIsland: ({
+    canRetry,
+    items,
+    onRetry,
+  }: {
+    readonly canRetry?: (item: SourceSyncIslandItem) => boolean
+    readonly items: ReadonlyArray<SourceSyncIslandItem>
+    readonly onRetry?: (item: SourceSyncIslandItem) => void
+  }) => (
+    <div data-testid="sync-island">
+      {items.map((item) => (
+        <span key={item.id}>
+          {item.status}
+          {item.status === "failed" && onRetry && (canRetry?.(item) ?? true) ? (
+            <button onClick={() => onRetry(item)} type="button">
+              Retry
+            </button>
+          ) : null}
+        </span>
+      ))}
+    </div>
+  ),
 }))
 
 vi.mock("#/components/ui/tabs", () => ({
@@ -98,10 +201,10 @@ vi.mock("#/hooks/use-source-syncs", () => ({
     syncState.onUnauthorized = onUnauthorized
     syncState.seeds = seeds
     return {
-      activeSyncs: [],
+      activeSyncs: syncState.activeSyncs,
       onDismissSync: vi.fn(),
       onRetrySync: vi.fn(),
-      onSourceSync: vi.fn(),
+      onSourceSync: syncState.onSourceSync,
       syncingSourceIds: new Set<string>(),
     }
   },
@@ -170,6 +273,7 @@ describe("Dashboard transaction pagination", () => {
           onSourceSyncCompleted={async () => {
             await queryClient.invalidateQueries({ queryKey: queryKeys.transactions() })
           }}
+          sourceOverviews={syncedOverviews}
         />
       </QueryClientProvider>
     )
@@ -228,7 +332,7 @@ describe("Dashboard sync reconnect", () => {
 
     render(
       <QueryClientProvider client={queryClient}>
-        <Dashboard accounts={[]} sourceSyncSeeds={seeds} />
+        <Dashboard accounts={[]} sourceOverviews={syncedOverviews} sourceSyncSeeds={seeds} />
       </QueryClientProvider>
     )
 
@@ -320,7 +424,11 @@ describe("Dashboard calculation refresh", () => {
   const mount = (onUnauthorized?: () => void) =>
     render(
       <QueryClientProvider client={queryClient}>
-        <Dashboard accounts={[]} onUnauthorized={onUnauthorized} />
+        <Dashboard
+          accounts={[]}
+          onUnauthorized={onUnauthorized}
+          sourceOverviews={syncedOverviews}
+        />
       </QueryClientProvider>
     )
 
@@ -933,5 +1041,486 @@ describe("Dashboard calculation refresh", () => {
     await tick()
     expect(updates).toHaveLength(1)
     observer.disconnect()
+  })
+})
+
+describe("Dashboard first-sync body (#108 T05)", () => {
+  let queryClient: QueryClient
+  let billingReads: number
+  let respondBilling: () => Promise<BillingStatus>
+
+  beforeEach(() => {
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    billingReads = 0
+    respondBilling = async () => billingStatus(1)
+    syncState.activeSyncs = []
+    testTaxMaxi = {
+      billing: {
+        status: vi.fn(async () => {
+          billingReads += 1
+          return respondBilling()
+        }),
+      },
+      portfolio: {
+        listAssets: vi.fn(async () => ({ assets: [], summary: undefined })),
+      },
+      transactions: {
+        list: vi.fn(async () => ({
+          transactions: [],
+          totalCount: 0,
+          page: { hasMore: false, nextCursor: null },
+        })),
+      },
+    } as unknown as TaxMaxi
+  })
+
+  afterEach(() => {
+    cleanup()
+    queryClient.clear()
+    syncState.activeSyncs = []
+    syncState.onCompleted = undefined
+    vi.clearAllMocks()
+  })
+
+  const mount = (overviews: ReadonlyArray<SourceOverview>) =>
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Dashboard
+          accounts={overviews.map(toAccount)}
+          createWalletSource={vi.fn()}
+          sourceOverviews={overviews}
+        />
+      </QueryClientProvider>
+    )
+
+  const assetsTab = () => screen.queryByRole("button", { name: "Assets" })
+
+  it("shows the wizard instead of the tabs while no source has synced", async () => {
+    mount([sourceOverview()])
+
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(assetsTab()).toBeNull()
+    expect(screen.queryByRole("region", { name: "Portfolio calculation" })).toBeNull()
+    expect(billingReads).toBe(1)
+  })
+
+  it("shows the tabs and no wizard once a source has synced, without reading billing", async () => {
+    mount(syncedOverviews)
+
+    expect(await screen.findByText("No transactions yet.")).toBeTruthy()
+    expect(assetsTab()).toBeTruthy()
+    expect(screen.queryByRole("status", { name: "First sync updates" })).toBeNull()
+    expect(billingReads).toBe(0)
+  })
+
+  it("asks for a source when there is none", async () => {
+    mount([])
+
+    expect(await screen.findByRole("heading", { name: "Connect your first source" })).toBeTruthy()
+    expect(screen.getByRole("textbox", { name: "Crypto wallet address" })).toBeTruthy()
+    expect(assetsTab()).toBeNull()
+  })
+
+  it("keeps the island mounted above the wizard while the first sync runs", async () => {
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "running", progress: 18 },
+    ]
+    mount([sourceOverview()])
+
+    const heading = await screen.findByRole("heading", { name: "Importing your Coinbase history" })
+    const island = screen.getByTestId("sync-island")
+    expect(island.textContent).toBe("running")
+    expect(island.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryAllByRole("button")).toEqual([])
+  })
+
+  it("never renders lastErrorMessage or a job message after a failed first sync", async () => {
+    const overviewError = "HTTP 502 from provider: upstream connect error (job 8f3c)"
+    const jobMessage = "ECONNRESET while fetching page 4"
+    syncState.activeSyncs = [
+      {
+        id: SOURCE_A,
+        sourceName: "Coinbase",
+        status: "failed",
+        progress: 100,
+        message: jobMessage,
+      },
+    ]
+    mount([sourceOverview({ status: "failed", lastErrorMessage: overviewError })])
+
+    expect(
+      await screen.findByRole("heading", { name: "Your first sync didn't finish" })
+    ).toBeTruthy()
+    expect(document.body.textContent).not.toContain(overviewError)
+    expect(document.body.textContent).not.toContain(jobMessage)
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }))
+    expect(syncState.onSourceSync).toHaveBeenCalledTimes(1)
+    expect(syncState.onSourceSync.mock.calls[0]?.[0]).toMatchObject({ id: SOURCE_A })
+  })
+
+  it("leaves Try again as the only retry for the wizard's source while the island keeps Retry for others", async () => {
+    const SOURCE_B = "00000000-0000-4000-8000-000000000202"
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "failed", progress: 100 },
+      { id: SOURCE_B, sourceName: "Kraken", status: "failed", progress: 100 },
+    ]
+    mount([sourceOverview({ status: "failed" }), sourceOverview({ status: "failed" }, SOURCE_B)])
+
+    expect(
+      await screen.findByRole("heading", { name: "Your first sync didn't finish" })
+    ).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy()
+    const island = screen.getByTestId("sync-island")
+    expect(within(island).getAllByRole("button", { name: "Retry" })).toHaveLength(1)
+    // Source A (the wizard's target) shows no Retry; source B keeps it.
+    expect(island.children[0]?.textContent).toBe("failed")
+    expect(island.children[1]?.textContent).toBe("failedRetry")
+  })
+
+  it("lets the island offer Retry for a failed sync once the wizard is gone", async () => {
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "failed", progress: 100 },
+    ]
+    mount(syncedOverviews)
+
+    expect(await screen.findByRole("button", { name: "Assets" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull()
+    const island = screen.getByTestId("sync-island")
+    expect(within(island).getByRole("button", { name: "Retry" })).toBeTruthy()
+  })
+
+  it("shows billing_unknown with a retry when billing fails, then recovers", async () => {
+    respondBilling = async () => {
+      throw new Error("Stripe is unavailable")
+    }
+    mount([sourceOverview()])
+
+    expect(await screen.findByRole("heading", { name: "We couldn't check your plan" })).toBeTruthy()
+    // While the read is still in flight the retry waits as "Checking…"; the
+    // enabled Retry appears once the failure has landed.
+    const retry = await screen.findByRole("button", { name: "Retry" })
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+    expect(document.body.textContent).not.toContain("Stripe is unavailable")
+
+    respondBilling = async () => billingStatus(1)
+    fireEvent.click(retry)
+
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(billingReads).toBe(2)
+  })
+
+  it("shows billing_unknown when a billing refresh fails even though older credits are cached", async () => {
+    respondBilling = async () => billingStatus(5)
+    mount([sourceOverview()])
+
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(screen.getByText("5 credits available")).toBeTruthy()
+
+    respondBilling = async () => {
+      throw new Error("Stripe is unavailable")
+    }
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: queries.billingStatus(testTaxMaxi).queryKey })
+    })
+
+    expect(await screen.findByRole("heading", { name: "We couldn't check your plan" })).toBeTruthy()
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+    expect(screen.queryByText("5 credits available")).toBeNull()
+    expect(queryClient.getQueryData(queries.billingStatus(testTaxMaxi).queryKey)).toMatchObject({
+      credits: 5,
+    })
+    expect(billingReads).toBe(2)
+  })
+
+  // A fresh element per render, so React re-renders the dashboard and the
+  // hook mock hands over the changed items.
+  const dashboardTree = (overviews: ReadonlyArray<SourceOverview>) => (
+    <QueryClientProvider client={queryClient}>
+      <Dashboard
+        accounts={overviews.map(toAccount)}
+        createWalletSource={vi.fn()}
+        sourceOverviews={overviews}
+      />
+    </QueryClientProvider>
+  )
+
+  const billingKey = () => queries.billingStatus(testTaxMaxi).queryKey
+  const pausedHeading = () =>
+    screen.queryByRole("heading", { name: "Sync paused — more credits needed" })
+  const continueButton = () => screen.queryByRole("button", { name: "Continue my first sync" })
+
+  /** Runs a first sync that stops for credits while the cache still says `credits: 1`. */
+  const stopForCredits = async (creditsAfterStop: number) => {
+    const overviews = [sourceOverview()]
+    const view = render(dashboardTree(overviews))
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(queryClient.getQueryData(billingKey())).toMatchObject({ credits: 1 })
+
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "running", progress: 40 },
+    ]
+    view.rerender(dashboardTree(overviews))
+    expect(screen.getByRole("heading", { name: "Importing your Coinbase history" })).toBeTruthy()
+
+    // The sync spends the last credit; the server pauses the job.
+    respondBilling = async () => billingStatus(creditsAfterStop)
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "credit_required", progress: 100 },
+    ]
+    view.rerender(dashboardTree(overviews))
+
+    // The cache still says 1 credit, but the wizard does not offer Continue
+    // from it: billing is re-read first.
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+    expect(screen.getByText("Add credits from the notice at the top of the page.")).toBeTruthy()
+    await waitFor(() => expect(billingReads).toBe(2))
+    await waitFor(() =>
+      expect(queryClient.getQueryData(billingKey())).toMatchObject({ credits: creditsAfterStop })
+    )
+    return view
+  }
+
+  it("re-reads billing when the sync stops for credits and stays paused when none are left", async () => {
+    await stopForCredits(0)
+
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+  })
+
+  it("offers Continue only after the re-read billing shows credits", async () => {
+    await stopForCredits(3)
+
+    expect(await screen.findByRole("heading", { name: "Ready to continue" })).toBeTruthy()
+    expect(screen.getByText("3 credits available")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Continue my first sync" }))
+    expect(syncState.onSourceSync).toHaveBeenCalledTimes(1)
+    expect(syncState.onSourceSync.mock.calls[0]?.[0]).toMatchObject({ id: SOURCE_A })
+  })
+
+  it("offers the billing action itself once the island's credit_required item is dismissed", async () => {
+    queryClient.setQueryData(billingKey(), billingStatus(0))
+    respondBilling = async () => billingStatus(0)
+    const overviews = [sourceOverview({ jobId: "job-1", status: "credit_required" })]
+    syncState.activeSyncs = [
+      {
+        id: SOURCE_A,
+        jobId: "job-1",
+        sourceName: "Coinbase",
+        status: "credit_required",
+        progress: 100,
+      },
+    ]
+    const view = render(dashboardTree(overviews))
+
+    expect(await screen.findByRole("heading", { name: "Sync paused — more credits needed" }))
+    expect(screen.getByText("Add credits from the notice at the top of the page.")).toBeTruthy()
+    expect(screen.queryByRole("link", { name: "Choose a plan" })).toBeNull()
+    await waitFor(() => expect(billingReads).toBe(1))
+
+    // The user dismisses the island's notice; the hook drops the item.
+    syncState.activeSyncs = []
+    view.rerender(dashboardTree(overviews))
+
+    expect(pausedHeading()).toBeTruthy()
+    expect(screen.getByRole("link", { name: "Choose a plan" }).getAttribute("href")).toBe(
+      "/app/billing"
+    )
+    expect(screen.queryByText("Add credits from the notice at the top of the page.")).toBeNull()
+    expect(screen.queryAllByRole("button")).toEqual([])
+    // The seeded stop re-read billing once for job-1; the dismissal and the
+    // overview naming the same job add no second read.
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(billingReads).toBe(1)
+  })
+
+  /**
+   * Reloads onto a job already paused for credits while the cache still says
+   * `credits: 3`, holding the re-read open until the test releases it.
+   */
+  const reloadOntoCreditStop = () => {
+    queryClient.setQueryData(billingKey(), billingStatus(3))
+    let release: ((billing: BillingStatus) => void) | undefined
+    respondBilling = () =>
+      new Promise<BillingStatus>((resolve) => {
+        release = resolve
+      })
+    const overviews = [sourceOverview({ jobId: "job-1", status: "credit_required" })]
+    syncState.activeSyncs = [
+      {
+        id: SOURCE_A,
+        jobId: "job-1",
+        sourceName: "Coinbase",
+        status: "credit_required",
+        progress: 100,
+      },
+    ]
+    const view = render(dashboardTree(overviews))
+
+    // The cached 3 credits are fresh but predate the stop: paused, no Continue.
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+    return {
+      view,
+      overviews,
+      release: (billing: BillingStatus) => {
+        if (release === undefined) throw new Error("billing re-read has not started")
+        release(billing)
+      },
+    }
+  }
+
+  it("re-reads billing once for a seeded credit_required job and stays paused until it settles", async () => {
+    const { overviews, release, view } = reloadOntoCreditStop()
+
+    await waitFor(() => expect(billingReads).toBe(1))
+    view.rerender(dashboardTree(overviews))
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+
+    release(billingStatus(3))
+    expect(await screen.findByRole("heading", { name: "Ready to continue" })).toBeTruthy()
+    expect(screen.getByText("3 credits available")).toBeTruthy()
+    view.rerender(dashboardTree(overviews))
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(billingReads).toBe(1)
+  })
+
+  it("keeps a seeded credit_required job paused when the re-read shows no credits", async () => {
+    const { release } = reloadOntoCreditStop()
+
+    await waitFor(() => expect(billingReads).toBe(1))
+    release(billingStatus(0))
+    await waitFor(() =>
+      expect(queryClient.getQueryData(billingKey())).toMatchObject({ credits: 0 })
+    )
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(pausedHeading()).toBeTruthy()
+    expect(continueButton()).toBeNull()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+    expect(billingReads).toBe(1)
+  })
+
+  it("derives syncing from a processing overview job on the first render, before the hook has an item", () => {
+    queryClient.setQueryData(queries.billingStatus(testTaxMaxi).queryKey, billingStatus(5))
+
+    mount([sourceOverview({ jobId: "job-1", status: "processing" })])
+
+    expect(screen.getByRole("heading", { name: "Importing your Coinbase history" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+    expect(screen.queryAllByRole("button")).toEqual([])
+    expect(assetsTab()).toBeNull()
+  })
+
+  // Mirrors the `/app` route: accounts and overviews come from the overview
+  // query, and a completed sync invalidates that query.
+  const OverviewHarness = ({ readOverview }: { readOverview: () => Promise<SourceOverview> }) => {
+    const overview = useQuery({
+      queryKey: queryKeys.sourceOverview(SOURCE_A),
+      queryFn: readOverview,
+      staleTime: Infinity,
+    }).data
+    if (overview === undefined) return null
+    return (
+      <Dashboard
+        accounts={[toAccount(overview)]}
+        onSourceSyncCompleted={async (sourceId) => {
+          await queryClient.invalidateQueries({
+            exact: true,
+            queryKey: queryKeys.sourceOverview(sourceId),
+          })
+        }}
+        sourceOverviews={[overview]}
+      />
+    )
+  }
+
+  it("keeps syncing after the completed item is gone until the overview refetch confirms it", async () => {
+    let overviewReads = 0
+    let releaseOverview: ((overview: SourceOverview) => void) | undefined
+    const readOverview = async () => {
+      overviewReads += 1
+      if (overviewReads === 1) return sourceOverview()
+      return new Promise<SourceOverview>((resolve) => {
+        releaseOverview = resolve
+      })
+    }
+    // A fresh element per render, so React re-renders the dashboard and the
+    // hook mock hands over the changed items.
+    const tree = () => (
+      <QueryClientProvider client={queryClient}>
+        <OverviewHarness readOverview={readOverview} />
+      </QueryClientProvider>
+    )
+
+    const view = render(tree())
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+
+    syncState.activeSyncs = [
+      { id: SOURCE_A, sourceName: "Coinbase", status: "completed", progress: 100 },
+    ]
+    view.rerender(tree())
+    expect(screen.getByRole("heading", { name: "Importing your Coinbase history" })).toBeTruthy()
+
+    // The job completes: the refetch starts but has not resolved yet, and the
+    // hook drops its completed item in the meantime.
+    await act(async () => {
+      void syncState.onCompleted?.(SOURCE_A)
+    })
+    expect(overviewReads).toBe(2)
+    syncState.activeSyncs = []
+    view.rerender(tree())
+
+    expect(screen.getByRole("heading", { name: "Importing your Coinbase history" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Start my first sync" })).toBeNull()
+    expect(assetsTab()).toBeNull()
+
+    await act(async () => {
+      releaseOverview?.(
+        sourceOverview({ lastSyncedAt: "2025-03-10T12:00:00.000Z", status: "completed" })
+      )
+    })
+
+    expect(await screen.findByRole("button", { name: "Assets" })).toBeTruthy()
+    expect(screen.queryByRole("heading", { name: "Importing your Coinbase history" })).toBeNull()
+  })
+
+  it("moves from the wizard to the tabs when the completed sync refreshes the overview", async () => {
+    let overviewReads = 0
+    const readOverview = async () => {
+      overviewReads += 1
+      return overviewReads === 1
+        ? sourceOverview()
+        : sourceOverview({ lastSyncedAt: "2025-03-10T12:00:00.000Z", status: "completed" })
+    }
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <OverviewHarness readOverview={readOverview} />
+      </QueryClientProvider>
+    )
+
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(assetsTab()).toBeNull()
+    expect(syncState.onSourceSync).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole("button", { name: "Start my first sync" }))
+    expect(syncState.onSourceSync).toHaveBeenCalledTimes(1)
+    expect(syncState.onSourceSync.mock.calls[0]?.[0]).toMatchObject({ id: SOURCE_A })
+
+    await act(async () => {
+      await syncState.onCompleted?.(SOURCE_A)
+    })
+
+    expect(await screen.findByRole("button", { name: "Assets" })).toBeTruthy()
+    expect(screen.queryByRole("heading", { name: "Ready when you are" })).toBeNull()
+    expect(screen.queryByRole("status", { name: "First sync updates" })).toBeNull()
+    expect(overviewReads).toBe(2)
+    expect(queryClient.getQueryData(queries.billingStatus(testTaxMaxi).queryKey)).toBeDefined()
+    // The completed sync spent credits, so the completion re-reads billing.
+    await waitFor(() => expect(billingReads).toBe(2))
   })
 })

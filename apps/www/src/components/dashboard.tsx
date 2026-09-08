@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { useRouteContext } from "@tanstack/react-router"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import { Ellipsis, RotateCcw } from "lucide-react"
 import {
   isTaxMaxiUnauthorizedError,
+  type SourceOverview,
   type SourceSyncJob,
   type SourceSyncJobInput,
   type SourceSyncStart,
@@ -14,6 +15,7 @@ import {
 import { appSurfaceClassName } from "#/components/app-workspace"
 import { CalculationStatus } from "#/components/calculation-status"
 import { AssetsTable } from "#/components/assets-table"
+import { FirstSyncWizard } from "#/components/first-sync-wizard"
 import { SourceCards } from "#/components/source-cards"
 import { Button } from "#/components/ui/button"
 import {
@@ -29,6 +31,7 @@ import { m } from "#/paraglide/messages"
 
 import { accounts as mockAccounts, taxYearAccountSummaries } from "#/fixtures/dashboard-data"
 import { formatCurrency, formatPercent, formatSignedCurrency } from "#/lib/dashboard-format"
+import { getFirstSyncState } from "#/lib/first-sync-state"
 import {
   ALL_ACCOUNTS,
   type Account,
@@ -40,7 +43,7 @@ import {
 import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 import { TRANSACTION_PAGE_SIZE, TransactionsTable } from "./transactions-table"
 import { TransactionInspector } from "./transaction-inspector"
-import { SourceSyncIsland } from "./source-sync-island"
+import { SourceSyncIsland, type SourceSyncIslandItem } from "./source-sync-island"
 
 type DashboardSummary = {
   currentBalance: string | null
@@ -55,6 +58,86 @@ type DashboardSummary = {
   unresolvedItems: number
 }
 
+const NO_OVERVIEWS: ReadonlyArray<SourceOverview> = []
+
+/**
+ * A source whose sync completed while its overview refetch has not resolved
+ * successfully yet. `dataUpdateCount` is the overview query's count at the
+ * moment of completion; a later successful fetch raises it.
+ */
+type PendingCompletion = {
+  readonly sourceId: AccountId
+  readonly dataUpdateCount: number
+}
+
+function getOverviewDataUpdateCount(queryClient: QueryClient, sourceId: AccountId): number {
+  return queryClient.getQueryState(queryKeys.sourceOverview(sourceId))?.dataUpdateCount ?? 0
+}
+
+function isCompletionConfirmed(queryClient: QueryClient, pending: PendingCompletion): boolean {
+  const state = queryClient.getQueryState(queryKeys.sourceOverview(pending.sourceId))
+  return state?.status === "success" && state.dataUpdateCount > pending.dataUpdateCount
+}
+
+/** The sync hook's item statuses by source id, as one render saw them. */
+type ItemStatuses = ReadonlyMap<string, SourceSyncJob["status"]>
+
+const NO_ITEM_STATUSES: ItemStatuses = new Map()
+
+function toItemStatuses(items: ReadonlyArray<{ id: string; status: SourceSyncJob["status"] }>) {
+  return new Map(items.map((item) => [item.id, item.status]))
+}
+
+function sameItemStatuses(previous: ItemStatuses, next: ItemStatuses): boolean {
+  return (
+    previous.size === next.size &&
+    [...previous].every(([sourceId, status]) => next.get(sourceId) === status)
+  )
+}
+
+/**
+ * True when an item the previous render showed in another status is now
+ * `credit_required`: the sync ran out of credits, or a start was refused
+ * before any job existed. This catches every live stop, including one
+ * without a job id.
+ */
+function movedIntoCreditRequired(previous: ItemStatuses, next: ItemStatuses): boolean {
+  return [...next].some(([sourceId, status]) => {
+    const before = previous.get(sourceId)
+    return status === "credit_required" && before !== undefined && before !== "credit_required"
+  })
+}
+
+const NO_JOB_IDS: ReadonlySet<string> = new Set()
+
+/**
+ * The job ids of `credit_required` jobs whose billing re-read has not been
+ * triggered yet. A live stop, a reload seed that arrives already paused, and
+ * the overview's paused job before the seed lands all name the same job, so
+ * one id means one re-read however the stop reached the page (#108 D03, T05
+ * review). A fresh-but-stale cached balance never decides `resumable`.
+ */
+function findUnreadCreditStops({
+  items,
+  overviews,
+  readJobIds,
+}: {
+  items: ReadonlyArray<{ status: SourceSyncJob["status"]; jobId?: string }>
+  overviews: ReadonlyArray<SourceOverview>
+  readJobIds: ReadonlySet<string>
+}): ReadonlyArray<string> {
+  const jobIds = new Set<string>()
+  for (const item of items) {
+    if (item.status === "credit_required" && item.jobId !== undefined) jobIds.add(item.jobId)
+  }
+  for (const { latestSync } of overviews) {
+    if (latestSync.status === "credit_required" && latestSync.jobId !== null) {
+      jobIds.add(latestSync.jobId)
+    }
+  }
+  return [...jobIds].filter((jobId) => !readJobIds.has(jobId))
+}
+
 export function Dashboard({
   accounts = mockAccounts,
   createWalletSource,
@@ -63,6 +146,7 @@ export function Dashboard({
   onUnauthorized,
   replaySourceSync,
   resolveName,
+  sourceOverviews = NO_OVERVIEWS,
   sourceSyncSeeds,
   startSourceSync,
 }: {
@@ -73,6 +157,12 @@ export function Dashboard({
   onUnauthorized?: () => void | Promise<void>
   replaySourceSync?: (sourceId: AccountId) => Promise<SourceSyncStart>
   resolveName?: (name: string) => Promise<{ name: string; resolvedAddress: string }>
+  /**
+   * The source overviews the page loaded, in source order. The first-sync
+   * state reads `latestSync` from them (#108 D03); the wizard owns the body
+   * until one of them reports a `lastSyncedAt`.
+   */
+  sourceOverviews?: ReadonlyArray<SourceOverview>
   /** Jobs still running or paused on the server when the page loaded; the island reconnects to them. */
   sourceSyncSeeds?: ReadonlyArray<SourceSyncSeed>
   startSourceSync?: (sourceId: AccountId) => Promise<SourceSyncStart>
@@ -109,6 +199,7 @@ export function Dashboard({
   )
   const [syncCompletedAt, setSyncCompletedAt] = useState<number | null>(null)
   const [fastRefresh, setFastRefresh] = useState(false)
+  const [pendingCompletions, setPendingCompletions] = useState<ReadonlyArray<PendingCompletion>>([])
   const observedRunIds = useRef(new Set<string | null>())
   const dependentReadsAllowed = useRef(false)
 
@@ -229,14 +320,26 @@ export function Dashboard({
     void refreshDependentReads()
   }, [activeRunId, authenticationLost, hasPortfolio, queryClient])
 
+  // Billing is only needed while the first-sync wizard can show. It is read
+  // through the query cache so a billing overlay refresh moves the wizard
+  // without a reload (#108 D07); the `/app` loader seeds it when it can.
+  const anySourceSynced = sourceOverviews.some(
+    (overview) => overview.latestSync.lastSyncedAt !== null
+  )
+  const billingQuery = useQuery({
+    ...queries.billingStatus(taxmaxi),
+    enabled: !authenticationLost && !anySourceSynced,
+  })
+
   useEffect(() => {
     if (
       isTaxMaxiUnauthorizedError(portfolioQuery.error) ||
-      isTaxMaxiUnauthorizedError(transactionQuery.error)
+      isTaxMaxiUnauthorizedError(transactionQuery.error) ||
+      isTaxMaxiUnauthorizedError(billingQuery.error)
     ) {
       void handleUnauthorized()
     }
-  }, [handleUnauthorized, portfolioQuery.error, transactionQuery.error])
+  }, [billingQuery.error, handleUnauthorized, portfolioQuery.error, transactionQuery.error])
 
   const goToNextTransactionPage = () => {
     const nextCursor = transactionQuery.data?.page.nextCursor
@@ -253,10 +356,42 @@ export function Dashboard({
       setTransactionCursors([null])
       setSyncCompletedAt(Date.now())
       setFastRefresh(true)
+      // The hook drops the completed item after a short delay. The wizard
+      // keeps saying "underway" until the overview refetch below has resolved
+      // successfully, so it never falls through to a second Start (#108 D03).
+      setPendingCompletions((current) => [
+        ...current.filter((pending) => pending.sourceId !== sourceId),
+        { sourceId, dataUpdateCount: getOverviewDataUpdateCount(queryClient, sourceId) },
+      ])
       void queryClient.invalidateQueries({ queryKey: ["taxmaxi", "portfolio"] })
+      // The sync spent credits; the cached balance is behind (#108 D03, T05 review).
+      void queryClient.invalidateQueries({ queryKey: queryKeys.billingStatus() })
       await onSourceSyncCompleted?.(sourceId)
     },
     [onSourceSyncCompleted, queryClient]
+  )
+
+  // A pending completion clears once its overview query has fetched
+  // successfully after the completion. A failed refetch keeps it pending; the
+  // calculation refresh above invalidates the overview again on a changed run.
+  useEffect(() => {
+    if (pendingCompletions.length === 0) return
+    const clearConfirmed = () => {
+      const confirmed = pendingCompletions.filter((pending) =>
+        isCompletionConfirmed(queryClient, pending)
+      )
+      if (confirmed.length === 0) return
+      setPendingCompletions((current) => current.filter((pending) => !confirmed.includes(pending)))
+    }
+    clearConfirmed()
+    return queryClient.getQueryCache().subscribe((event) => {
+      if (event.type === "updated" && event.action.type === "success") clearConfirmed()
+    })
+  }, [pendingCompletions, queryClient])
+
+  const pendingCompletionSourceIds = useMemo(
+    () => new Set(pendingCompletions.map((pending) => pending.sourceId)),
+    [pendingCompletions]
   )
 
   const summary = useMemo<DashboardSummary>(() => {
@@ -328,6 +463,47 @@ export function Dashboard({
     startSourceSync,
   })
 
+  // A `credit_required` job means the sync spent the balance the cache still
+  // shows, whether the stop happened live or before this page loaded. Billing
+  // is re-read once per such job before the wizard may offer Continue, and the
+  // stop is caught during render so no frame derives `resumable` from the old
+  // balance (#108 D03, T05 review). React re-runs the render right away when
+  // state is set here, before anything is shown.
+  const [seenItemStatuses, setSeenItemStatuses] = useState(NO_ITEM_STATUSES)
+  const [readCreditStopJobIds, setReadCreditStopJobIds] = useState(NO_JOB_IDS)
+  const [billingRefreshPending, setBillingRefreshPending] = useState(false)
+  const itemStatuses = useMemo(() => toItemStatuses(activeSyncs), [activeSyncs])
+  if (!sameItemStatuses(seenItemStatuses, itemStatuses)) {
+    setSeenItemStatuses(itemStatuses)
+    if (movedIntoCreditRequired(seenItemStatuses, itemStatuses)) {
+      setBillingRefreshPending(true)
+    }
+  }
+  const unreadCreditStops = anySourceSynced
+    ? []
+    : findUnreadCreditStops({
+        items: activeSyncs,
+        overviews: sourceOverviews,
+        readJobIds: readCreditStopJobIds,
+      })
+  if (unreadCreditStops.length > 0) {
+    setReadCreditStopJobIds(new Set([...readCreditStopJobIds, ...unreadCreditStops]))
+    setBillingRefreshPending(true)
+  }
+
+  useEffect(() => {
+    if (!billingRefreshPending) return
+    let subscribed = true
+    // Resolves once the refetch has settled, with a result or a failure; a
+    // failure then shows as `billing_unknown` through the error state below.
+    void queryClient.invalidateQueries({ queryKey: queryKeys.billingStatus() }).then(() => {
+      if (subscribed) setBillingRefreshPending(false)
+    })
+    return () => {
+      subscribed = false
+    }
+  }, [billingRefreshPending, queryClient])
+
   // The replay block only makes sense for a selected source that has synced
   // at least once; before that there is no cached raw data to replay.
   const replayAccount = useMemo(() => {
@@ -351,99 +527,179 @@ export function Dashboard({
     [createWalletSource, onSourceSync]
   )
 
+  // A billing read that is still pending, or whose latest attempt failed for
+  // a non-401 reason, counts as not loaded even when an older result is still
+  // cached: the wizard then shows `billing_unknown` with a retry instead of
+  // guessing at credits (#108 D03, D08). A 401 is handled above.
+  const billingFailed = billingQuery.isError && !isTaxMaxiUnauthorizedError(billingQuery.error)
+  const billing = billingFailed ? null : (billingQuery.data ?? null)
+  const firstSync = useMemo(
+    () =>
+      getFirstSyncState({
+        billing,
+        billingRefreshPending,
+        items: activeSyncs,
+        overviews: sourceOverviews,
+        pendingCompletionSourceIds,
+      }),
+    [activeSyncs, billing, billingRefreshPending, pendingCompletionSourceIds, sourceOverviews]
+  )
+  const firstSyncTarget =
+    firstSync.targetSourceId === null ? undefined : accountsById.get(firstSync.targetSourceId)
+  // While the island shows an item for the target, it owns the billing action
+  // in `paused`; after a dismissal the wizard offers it (#108 D06, D03 T05 review).
+  const islandShowsTarget =
+    firstSync.targetSourceId !== null && itemStatuses.has(firstSync.targetSourceId)
+
+  // Start, Continue, and Try again all go through the hook's start function
+  // for the target source (#108 D06); the hook ignores a second click while
+  // that source is already syncing.
+  const startFirstSync = useCallback(() => {
+    if (firstSyncTarget !== undefined) {
+      void onSourceSync(firstSyncTarget)
+    }
+  }, [firstSyncTarget, onSourceSync])
+
+  // While the wizard shows, its Try again is the single retry control for the
+  // target source; the island keeps Retry for every other source and for the
+  // target once the wizard is gone (#108 D06, T05 review).
+  const canRetryFromIsland = useCallback(
+    (item: SourceSyncIslandItem) =>
+      firstSync.state === "done" || item.id !== firstSync.targetSourceId,
+    [firstSync.state, firstSync.targetSourceId]
+  )
+
+  // Connecting a wallet from the wizard only creates the source. The first
+  // sync stays an explicit click on the next step (#108 D03).
+  const connectWalletSource = useCallback(
+    async (walletAddress: string) => {
+      await createWalletSource?.(walletAddress)
+    },
+    [createWalletSource]
+  )
+
+  // The island stays mounted above whichever body shows, so a first sync's
+  // progress is visible over the wizard and over the tabs alike (#108 D06).
+  const body =
+    firstSync.state === "done" ? null : (
+      <FirstSyncWizard
+        billing={billing}
+        billingRefreshing={billingQuery.isFetching}
+        createWalletSource={createWalletSource === undefined ? undefined : connectWalletSource}
+        islandItemShown={islandShowsTarget}
+        onRetryBilling={() => void billingQuery.refetch()}
+        onStart={startFirstSync}
+        resolveName={resolveName}
+        sourceName={firstSyncTarget?.name ?? null}
+        state={firstSync.state}
+      />
+    )
+
   return (
     <div className="text-marketing-foreground flex min-h-screen flex-col pt-28 pb-8 sm:pt-32">
-      <SourceSyncIsland items={activeSyncs} onDismiss={onDismissSync} onRetry={onRetrySync} />
-      <SourceCards
-        contentClassName={appSurfaceClassName}
-        onAddWallet={createWalletSource === undefined ? undefined : handleAddWallet}
-        onResolveName={resolveName}
-        onSelectedSourceIdChange={(sourceId) => onAccountScopeChange(sourceId ?? ALL_ACCOUNTS)}
-        onSourceSync={onSourceSync}
-        selectedSourceId={accountScope === ALL_ACCOUNTS ? undefined : accountScope}
-        syncingSourceIds={syncingSourceIds}
-        sources={accounts}
-      >
-        <div aria-busy={isSwitchingPortfolio} className="flex min-w-0 flex-col gap-8 py-6 sm:py-8">
-          <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
-            <div className="min-w-0 space-y-3">
-              <PortfolioOverview key={selectedSourceId ?? ALL_ACCOUNTS} summary={summary} />
-              <CalculationStatus
-                portfolio={portfolioQuery.data}
-                requestFailed={portfolioQuery.isError}
-                refreshing={portfolioQuery.isFetching}
-                disabled={authenticationLost}
-                onRefresh={() => void portfolioQuery.refetch()}
-                postSyncNotice={
-                  syncCompletedAt === null ? null : fastRefresh ? "checking" : "unconfirmed"
-                }
-              />
-            </div>
-            <SelectedSourceMenu
-              account={replayAccount}
-              isSyncing={replayAccount !== undefined && syncingSourceIds.has(replayAccount.id)}
-              onReplay={onSourceReplay}
-            />
-          </div>
-
-          <Tabs defaultValue="assets" className="gap-y-8">
-            <TabsList>
-              <TabsTrigger value="assets">{m["app.dashboard.tabs.assets"]()}</TabsTrigger>
-              <TabsTrigger value="transactions">
-                {m["app.dashboard.tabs.transactions"]()}
-              </TabsTrigger>
-              <TabsTrigger value="taxes">{m["app.dashboard.tabs.taxes"]()}</TabsTrigger>
-            </TabsList>
-            <TabsContent value="assets">
-              {portfolioQuery.data?.activeRun === null ? (
-                <p className="rounded-lg border border-border p-6 text-sm text-muted-foreground">
-                  {m["app.calculation.positionsUnavailable"]()}
-                </p>
-              ) : (
-                <AssetsTable
-                  currency={portfolioQuery.data?.currency ?? "EUR"}
-                  error={portfolioQuery.isError && portfolioQuery.data === undefined}
-                  holdings={activeHoldings}
-                  loading={portfolioQuery.isPending && portfolioQuery.data === undefined}
-                />
-              )}
-            </TabsContent>
-            <TabsContent value="transactions">
-              <div
-                ref={transactionListRef}
-                tabIndex={-1}
-                role="region"
-                aria-label={m["app.dashboard.tabs.transactions"]()}
-              >
-                <TransactionsTable
-                  disabled={authenticationLost}
-                  onSelect={selectTransaction}
-                  selectedTransactionId={selectedTransaction?.transactionId ?? null}
-                  error={transactionQuery.isError}
-                  hasNextPage={transactionQuery.data?.page.hasMore ?? false}
-                  loading={transactionQuery.isFetching}
-                  onNextPage={goToNextTransactionPage}
-                  onPreviousPage={goToPreviousTransactionPage}
-                  onRetry={() => void transactionQuery.refetch()}
-                  pageIndex={transactionCursors.length - 1}
-                  totalCount={transactionQuery.data?.totalCount ?? 0}
-                  transactions={transactionQuery.data?.transactions ?? []}
+      <SourceSyncIsland
+        canRetry={canRetryFromIsland}
+        items={activeSyncs}
+        onDismiss={onDismissSync}
+        onRetry={onRetrySync}
+      />
+      {body ?? (
+        <>
+          <SourceCards
+            contentClassName={appSurfaceClassName}
+            onAddWallet={createWalletSource === undefined ? undefined : handleAddWallet}
+            onResolveName={resolveName}
+            onSelectedSourceIdChange={(sourceId) => onAccountScopeChange(sourceId ?? ALL_ACCOUNTS)}
+            onSourceSync={onSourceSync}
+            selectedSourceId={accountScope === ALL_ACCOUNTS ? undefined : accountScope}
+            syncingSourceIds={syncingSourceIds}
+            sources={accounts}
+          >
+            <div
+              aria-busy={isSwitchingPortfolio}
+              className="flex min-w-0 flex-col gap-8 py-6 sm:py-8"
+            >
+              <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+                <div className="min-w-0 space-y-3">
+                  <PortfolioOverview key={selectedSourceId ?? ALL_ACCOUNTS} summary={summary} />
+                  <CalculationStatus
+                    portfolio={portfolioQuery.data}
+                    requestFailed={portfolioQuery.isError}
+                    refreshing={portfolioQuery.isFetching}
+                    disabled={authenticationLost}
+                    onRefresh={() => void portfolioQuery.refetch()}
+                    postSyncNotice={
+                      syncCompletedAt === null ? null : fastRefresh ? "checking" : "unconfirmed"
+                    }
+                  />
+                </div>
+                <SelectedSourceMenu
+                  account={replayAccount}
+                  isSyncing={replayAccount !== undefined && syncingSourceIds.has(replayAccount.id)}
+                  onReplay={onSourceReplay}
                 />
               </div>
-            </TabsContent>
-            <TabsContent value="taxes"></TabsContent>
-          </Tabs>
-        </div>
-      </SourceCards>
-      <TransactionInspector
-        selection={selectedTransaction}
-        taxmaxi={taxmaxi}
-        disabled={authenticationLost}
-        onUnauthorized={handleUnauthorized}
-        onClose={() => setSelectedTransaction(null)}
-        returnFocusRef={transactionOpenerRef}
-        fallbackFocusRef={transactionListRef}
-      />
+
+              <Tabs defaultValue="assets" className="gap-y-8">
+                <TabsList>
+                  <TabsTrigger value="assets">{m["app.dashboard.tabs.assets"]()}</TabsTrigger>
+                  <TabsTrigger value="transactions">
+                    {m["app.dashboard.tabs.transactions"]()}
+                  </TabsTrigger>
+                  <TabsTrigger value="taxes">{m["app.dashboard.tabs.taxes"]()}</TabsTrigger>
+                </TabsList>
+                <TabsContent value="assets">
+                  {portfolioQuery.data?.activeRun === null ? (
+                    <p className="rounded-lg border border-border p-6 text-sm text-muted-foreground">
+                      {m["app.calculation.positionsUnavailable"]()}
+                    </p>
+                  ) : (
+                    <AssetsTable
+                      currency={portfolioQuery.data?.currency ?? "EUR"}
+                      error={portfolioQuery.isError && portfolioQuery.data === undefined}
+                      holdings={activeHoldings}
+                      loading={portfolioQuery.isPending && portfolioQuery.data === undefined}
+                    />
+                  )}
+                </TabsContent>
+                <TabsContent value="transactions">
+                  <div
+                    ref={transactionListRef}
+                    tabIndex={-1}
+                    role="region"
+                    aria-label={m["app.dashboard.tabs.transactions"]()}
+                  >
+                    <TransactionsTable
+                      disabled={authenticationLost}
+                      onSelect={selectTransaction}
+                      selectedTransactionId={selectedTransaction?.transactionId ?? null}
+                      error={transactionQuery.isError}
+                      hasNextPage={transactionQuery.data?.page.hasMore ?? false}
+                      loading={transactionQuery.isFetching}
+                      onNextPage={goToNextTransactionPage}
+                      onPreviousPage={goToPreviousTransactionPage}
+                      onRetry={() => void transactionQuery.refetch()}
+                      pageIndex={transactionCursors.length - 1}
+                      totalCount={transactionQuery.data?.totalCount ?? 0}
+                      transactions={transactionQuery.data?.transactions ?? []}
+                    />
+                  </div>
+                </TabsContent>
+                <TabsContent value="taxes"></TabsContent>
+              </Tabs>
+            </div>
+          </SourceCards>
+          <TransactionInspector
+            selection={selectedTransaction}
+            taxmaxi={taxmaxi}
+            disabled={authenticationLost}
+            onUnauthorized={handleUnauthorized}
+            onClose={() => setSelectedTransaction(null)}
+            returnFocusRef={transactionOpenerRef}
+            fallbackFocusRef={transactionListRef}
+          />
+        </>
+      )}
     </div>
   )
 }
