@@ -21,6 +21,8 @@ Done when every changed file is read and you can say, for each one, why it chang
 
 ## 3. Write in plain speech
 
+Apply `AGENTS.md` "Communication": respect the reader's stated knowledge and use the running example to explain how the relevant parts relate, not just what each term means. Establish that relationship before the change and its consequences.
+
 The reviewer may not have touched this subsystem for weeks, and the issue behind the PR is often newer than anything in their head. Write the whole briefing for a reader who knows the product but has none of the subsystem's vocabulary loaded. Defining a term once does not license using it afterwards — a definition read once does not stick.
 
 Rules:

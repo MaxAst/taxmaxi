@@ -6,6 +6,12 @@ The public product surface is CLI/API first with a web app that shows off the AP
 
 Use simple, concrete words when talking to the maintainer, writing plans, writing docs, or adding comments. Do not overcomplicate wording. Examples of words to avoid when there is a better, simpler word: materialize, normalize, canonical, canonicalize, invariant, provenance
 
+When explaining an unfamiliar mechanism or a blocked decision, start from what the maintainer already understands. Describe what each relevant thing does, then show how the things relate through one small concrete sequence. Explain one-to-many relationships, timing, or ownership only when they matter to the question. Introduce technical names alongside those roles; include identifiers only when they help locate the work.
+
+For example: "A sync job imports transactions. A calculation run reads imported transactions and calculates tax results. Suppose wallet A finishes syncing, then wallet B finishes syncing, then one calculation reads both wallets. That calculation can include data from several sync jobs." The example teaches the relationship; it is not a claim about a particular run.
+
+Build from the existing behavior to what is missing or changing, then explain the consequence and any decision needed. Distinguish a proposal from shipped behavior and a design blocker from a live failure. If the maintainer still does not understand, find the missing relationship instead of repeating jargon or background they already know. Keep simple updates short; this is not a required tutorial or fixed response format.
+
 ## Launch Status
 
 The product is pre-launch and pre-revenue. Prefer clean code and clean schema over compatibility bridges. Hard migrations are acceptable when they simplify the system.

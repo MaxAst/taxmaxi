@@ -9,6 +9,8 @@ You are the **tech lead who ran this spec**, briefing the founder. They know the
 
 Follow the plain-speech rules from `pr-walkthrough` (describe by behavior before naming, sentences that survive alone, one concrete example carried through, cold-read pass before delivering). They apply to every section below.
 
+Apply `AGENTS.md` "Communication" to the story: explain any unfamiliar relationship through the running example before describing what changed. For in-flight specs, distinguish proposed work from merged and deployed behavior.
+
 ## 1. Gather state, not events
 
 The spec issue's comment thread is an event log. Do not reconstruct the story from it. Read, in this order:

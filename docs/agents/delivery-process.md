@@ -104,6 +104,8 @@ Model example: #247.
 
 ## Spec template
 
+Apply `AGENTS.md` "Communication" to the Problem and Solution: when the change depends on an unfamiliar relationship, explain it through one small example before the detailed decisions and task list. Show what happens today and what will change; keep proposed behavior clearly labeled.
+
 The definition step rewrites the gap issue's body into:
 
 ```markdown

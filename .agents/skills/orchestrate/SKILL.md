@@ -18,6 +18,8 @@ Adopt the orchestrator role for one epic and run it to completion. This replaces
 
 Follow the loaded template exactly: pickup audits, worker spawns, review judgment from the durable rule homes, merges, stop conditions. The newest recorded decision on the tracker always wins over the template and over this skill.
 
+For explanations and blocked decisions, follow `AGENTS.md` "Communication" and the template's "How to communicate" section. Make the relationship and consequence clear before presenting the decision the maintainer needs to make.
+
 ## Improving the templates
 
 The templates in this directory are the durable home of everything the epics teach about execution. When a running epic surfaces a lesson that belongs in every future epic, edit the template here — not only the running session's behavior — and note it in the spec's Harvest log.

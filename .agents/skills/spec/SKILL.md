@@ -8,6 +8,8 @@ Upgrade one gap issue into a spec by rewriting its body. The issue number is the
 
 Do NOT interview the user. Synthesize from what already exists: the conversation, the gap issue, research notes, grilling outcomes, and the codebase.
 
+Apply `AGENTS.md` "Communication" when writing the body or explaining a seam: establish unfamiliar roles and relationships with one small example before asking the maintainer to assess the design. Keep the glossary's names precise without assuming the names explain how the parts work together.
+
 ## Process
 
 1. **Gather.** Read the gap issue (`gh issue view <NNN> --comments`), the conversation context, and any research or grilling outcomes it references. If one-way-door decisions are still open — questions whose answer only the maintainer can give and that are expensive to reverse — stop and list them; the grill happens before the spec, not inside it.
