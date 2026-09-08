@@ -8,6 +8,7 @@ import {
   JurisdictionCode,
   TaxYear,
 } from "@my/core/accounting"
+import { AuthUserId } from "@my/core/authentication"
 import { CurrencyCode } from "@my/core/currency"
 import { PrincipalId } from "@my/core/ownership"
 import { and, asc, eq, sql } from "drizzle-orm"
@@ -17,6 +18,8 @@ import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Path from "effect/Path"
 import { CalculationRunRepositoryLive } from "../../src/layers/CalculationRunRepositoryLive.ts"
+import { UserRepositoryLive } from "../../src/layers/UserRepositoryLive.ts"
+import { UserRepository } from "../../src/services/UserRepository.ts"
 import { drizzle } from "../../src/layers/PgClientLive.ts"
 import { schema } from "../../src/schema/index.ts"
 import {
@@ -83,6 +86,342 @@ const insertRun = ({ id, taxYear = 2025 }: { readonly id: string; readonly taxYe
       completedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-08-31T08:00:00.000Z")),
     })
   })
+
+describe("completed-sync coverage schema", () => {
+  it.effect("user deletion cascades through coverage without deleting another owner's work", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() =>
+        runPg(seedSyncEngineRepositoryFixture({ userId: CLAIMING_USER_ID }))
+      )
+      yield* Effect.promise(() =>
+        runPg(
+          seedSyncEngineRepositoryFixture({
+            sourceId: WRITER_SOURCE_ID,
+            userId: WRITER_USER_ID,
+            principalId: WRITER_PRINCIPAL_ID,
+          })
+        )
+      )
+      yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            for (const [index, principalId, sourceId, runId] of [
+              [0, TEST_PRINCIPAL_ID, TEST_SOURCE_ID, CALCULATION_RUN_ID],
+              [1, WRITER_PRINCIPAL_ID, WRITER_SOURCE_ID, OTHER_CALCULATION_RUN_ID],
+            ] as const) {
+              const jobId = `00000000-0000-4000-8000-00000000076${index}`
+              const requestId = `00000000-0000-4000-8000-00000000077${index}`
+              const scope = {
+                principalId,
+                jurisdiction: "DE",
+                taxYear: 2025,
+                reportingCurrency: "EUR",
+              }
+              const completedAt = DateTime.toDateUtc(DateTime.makeUnsafe("2026-01-01T00:00:00Z"))
+              yield* db
+                .insert(schema.processingJobs)
+                .values({ id: jobId, principalId, sourceId, status: "completed", completedAt })
+              yield* db.insert(schema.calculationSyncRequests).values({
+                ...scope,
+                id: requestId,
+                sourceId,
+                sourceJobId: jobId,
+                requestedAt: completedAt,
+                status: "succeeded",
+              })
+              yield* insertRun({ id: runId })
+              if (index === 1)
+                yield* db
+                  .update(schema.calculationRuns)
+                  .set({ principalId })
+                  .where(eq(schema.calculationRuns.id, runId))
+              yield* db.insert(schema.calculationRunSyncCaptures).values({ ...scope, runId })
+              yield* db
+                .insert(schema.calculationRunSyncRequests)
+                .values({ ...scope, runId, requestId })
+              yield* db.insert(schema.calculationSyncAttempts).values({
+                ...scope,
+                runId,
+                requestId,
+                status: "succeeded",
+                startedAt: completedAt,
+                completedAt,
+              })
+            }
+          })
+        )
+      )
+      yield* context.runWithLayer({
+        layer: UserRepositoryLive,
+        effect: Effect.flatMap(UserRepository, (repository) =>
+          repository.delete(AuthUserId.make(CLAIMING_USER_ID))
+        ),
+      })
+      yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            for (const table of [
+              schema.calculationSyncRequests,
+              schema.calculationSyncAttempts,
+              schema.calculationRunSyncCaptures,
+              schema.calculationRunSyncRequests,
+            ]) {
+              const remaining = yield* db.select({ principalId: table.principalId }).from(table)
+              expect(remaining).toEqual([{ principalId: WRITER_PRINCIPAL_ID }])
+            }
+          })
+        )
+      )
+    })
+  )
+
+  it.effect(
+    "completion_scope_and_ownership: rejects foreign jobs, sources, principals, scopes and runs",
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => runPg(seedSyncEngineRepositoryFixture()))
+        yield* Effect.promise(() =>
+          runPg(
+            seedSyncEngineRepositoryFixture({
+              sourceId: WRITER_SOURCE_ID,
+              userId: WRITER_USER_ID,
+              principalId: WRITER_PRINCIPAL_ID,
+            })
+          )
+        )
+        const scope = {
+          principalId: TEST_PRINCIPAL_ID,
+          jurisdiction: "DE",
+          taxYear: 2025,
+          reportingCurrency: "EUR",
+        }
+        const requestId = "00000000-0000-4000-8000-000000000751"
+        const jobId = "00000000-0000-4000-8000-000000000752"
+        const foreignJobId = "00000000-0000-4000-8000-000000000753"
+        const request = {
+          ...scope,
+          id: requestId,
+          sourceId: TEST_SOURCE_ID,
+          sourceJobId: jobId,
+          requestedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-01-01T00:00:00Z")),
+        }
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.insert(schema.processingJobs).values([
+                {
+                  id: jobId,
+                  sourceId: TEST_SOURCE_ID,
+                  principalId: TEST_PRINCIPAL_ID,
+                  status: "completed",
+                },
+                {
+                  id: foreignJobId,
+                  sourceId: WRITER_SOURCE_ID,
+                  principalId: WRITER_PRINCIPAL_ID,
+                  status: "completed",
+                },
+              ])
+              yield* insertRun({ id: CALCULATION_RUN_ID })
+              yield* insertRun({ id: OTHER_CALCULATION_RUN_ID, taxYear: 2024 })
+            })
+          )
+        )
+        for (const mismatch of [
+          { sourceJobId: foreignJobId },
+          { sourceId: WRITER_SOURCE_ID },
+          { principalId: WRITER_PRINCIPAL_ID },
+          { sourceId: WRITER_SOURCE_ID, sourceJobId: foreignJobId },
+        ]) {
+          yield* Effect.promise(() =>
+            expect(
+              runPg(
+                Effect.flatMap(drizzle, (db) =>
+                  db.insert(schema.calculationSyncRequests).values({ ...request, ...mismatch })
+                )
+              )
+            ).rejects.toBeDefined()
+          )
+        }
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.flatMap(drizzle, (db) =>
+              db.insert(schema.calculationSyncRequests).values(request)
+            )
+          )
+        )
+        yield* Effect.promise(() =>
+          expect(
+            runPg(
+              Effect.flatMap(drizzle, (db) =>
+                db
+                  .insert(schema.calculationSyncRequests)
+                  .values({ ...request, id: "00000000-0000-4000-8000-000000000754" })
+              )
+            )
+          ).rejects.toBeDefined()
+        )
+        for (const mismatch of [
+          { taxYear: 2024 },
+          { principalId: WRITER_PRINCIPAL_ID },
+          { reportingCurrency: "USD" },
+          { jurisdiction: "US" },
+        ]) {
+          yield* Effect.promise(() =>
+            expect(
+              runPg(
+                Effect.flatMap(drizzle, (db) =>
+                  db
+                    .insert(schema.calculationRunSyncCaptures)
+                    .values({ ...scope, runId: CALCULATION_RUN_ID, ...mismatch })
+                )
+              )
+            ).rejects.toBeDefined()
+          )
+        }
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.flatMap(drizzle, (db) =>
+              db.insert(schema.calculationRunSyncCaptures).values([
+                { ...scope, runId: CALCULATION_RUN_ID },
+                { ...scope, taxYear: 2024, runId: OTHER_CALCULATION_RUN_ID },
+              ])
+            )
+          )
+        )
+        for (const mismatch of [
+          { taxYear: 2024 },
+          { principalId: WRITER_PRINCIPAL_ID },
+          { runId: OTHER_CALCULATION_RUN_ID, taxYear: 2024 },
+        ]) {
+          yield* Effect.promise(() =>
+            expect(
+              runPg(
+                Effect.flatMap(drizzle, (db) =>
+                  db
+                    .insert(schema.calculationRunSyncRequests)
+                    .values({ ...scope, runId: CALCULATION_RUN_ID, requestId, ...mismatch })
+                )
+              )
+            ).rejects.toBeDefined()
+          )
+        }
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.flatMap(drizzle, (db) =>
+              db
+                .insert(schema.calculationRunSyncRequests)
+                .values({ ...scope, runId: CALCULATION_RUN_ID, requestId })
+            )
+          )
+        )
+        for (const mismatch of [
+          { taxYear: 2024 },
+          { principalId: WRITER_PRINCIPAL_ID },
+          { runId: OTHER_CALCULATION_RUN_ID },
+        ]) {
+          yield* Effect.promise(() =>
+            expect(
+              runPg(
+                Effect.flatMap(drizzle, (db) =>
+                  db.insert(schema.calculationSyncAttempts).values({
+                    ...scope,
+                    requestId,
+                    runId: CALCULATION_RUN_ID,
+                    status: "running",
+                    ...mismatch,
+                  })
+                )
+              )
+            ).rejects.toBeDefined()
+          )
+        }
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              const rows = yield* db
+                .select({ id: schema.calculationSyncRequests.id })
+                .from(schema.calculationSyncRequests)
+              const attempts = yield* db
+                .select({ id: schema.calculationSyncAttempts.id })
+                .from(schema.calculationSyncAttempts)
+              const links = yield* db
+                .select({ runId: schema.calculationRunSyncRequests.runId })
+                .from(schema.calculationRunSyncRequests)
+              expect(rows).toEqual([{ id: requestId }])
+              expect(attempts).toEqual([])
+              expect(links).toEqual([{ runId: CALCULATION_RUN_ID }])
+              yield* db.insert(schema.calculationSyncAttempts).values({
+                ...scope,
+                requestId,
+                status: "failed",
+                failureCode: "price_fetch_failed",
+                completedAt: yield* DateTime.nowAsDate,
+              })
+              yield* db
+                .insert(schema.calculationSyncAttempts)
+                .values({ ...scope, requestId, runId: CALCULATION_RUN_ID, status: "running" })
+            })
+          )
+        )
+        yield* Effect.promise(() =>
+          expect(
+            runPg(
+              Effect.flatMap(drizzle, (db) =>
+                db
+                  .insert(schema.calculationSyncAttempts)
+                  .values({ ...scope, requestId, runId: CALCULATION_RUN_ID, status: "running" })
+              )
+            )
+          ).rejects.toBeDefined()
+        )
+      })
+  )
+
+  it.effect("legacy evidence stays absent while a new captured-empty marker is explicit", () =>
+    Effect.promise(() =>
+      runPg(
+        Effect.gen(function* () {
+          yield* seedSyncEngineRepositoryFixture()
+          yield* insertRun({ id: CALCULATION_RUN_ID })
+          yield* insertRun({ id: OTHER_CALCULATION_RUN_ID })
+          const db = yield* drizzle
+          yield* db.insert(schema.calculationRunSyncCaptures).values({
+            runId: OTHER_CALCULATION_RUN_ID,
+            principalId: TEST_PRINCIPAL_ID,
+            jurisdiction: "DE",
+            taxYear: 2025,
+            reportingCurrency: "EUR",
+          })
+          const evidence = yield* db
+            .select({
+              runId: schema.calculationRuns.id,
+              capturedRunId: schema.calculationRunSyncCaptures.runId,
+            })
+            .from(schema.calculationRuns)
+            .leftJoin(
+              schema.calculationRunSyncCaptures,
+              eq(schema.calculationRunSyncCaptures.runId, schema.calculationRuns.id)
+            )
+            .orderBy(asc(schema.calculationRuns.id))
+          expect(evidence).toEqual([
+            { runId: CALCULATION_RUN_ID, capturedRunId: null },
+            { runId: OTHER_CALCULATION_RUN_ID, capturedRunId: OTHER_CALCULATION_RUN_ID },
+          ])
+          expect(
+            yield* db
+              .select({ requestId: schema.calculationRunSyncRequests.requestId })
+              .from(schema.calculationRunSyncRequests)
+          ).toEqual([])
+        })
+      )
+    )
+  )
+})
 
 describe("calculation-runs schema", () => {
   it.effect("stores a complete run result under one immutable run key", () =>
@@ -627,6 +966,10 @@ describe("calculation-runs schema", () => {
             yield* db.execute(sql`drop function create_default_custody_unit_for_source`)
             yield* db.execute(sql`drop trigger sources_move_custody_unit_principal on sources`)
             yield* db.execute(sql`drop function move_custody_unit_with_source_principal`)
+            yield* db.execute(sql`drop table calculation_sync_attempts`)
+            yield* db.execute(sql`drop table calculation_run_sync_requests`)
+            yield* db.execute(sql`drop table calculation_run_sync_captures`)
+            yield* db.execute(sql`drop table calculation_sync_requests`)
             yield* db.execute(sql`drop table active_calculation_runs`)
             yield* db.execute(sql`drop table calculation_run_explanation_entries`)
             yield* db.execute(sql`drop table calculation_run_blockers`)

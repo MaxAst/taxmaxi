@@ -1,5 +1,6 @@
+import { vi } from "vitest"
 import * as DateTime from "effect/DateTime"
-import { eq, sql } from "drizzle-orm"
+import { asc, eq, sql } from "drizzle-orm"
 import * as Effect from "effect/Effect"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import { drizzle } from "../../src/layers/PgClientLive.ts"
@@ -1696,5 +1697,209 @@ describe("SourceSyncJobRepositoryLive", () => {
         lastFailureAt: null,
       })
     })
+  )
+})
+
+const completeInBerlin2026 = (jobId: string) =>
+  runRepository(
+    Effect.flatMap(SourceSyncJobRepository, (repository) => {
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2025-12-31T23:30:00.000Z"))
+      try {
+        return repository.completeJob({ jobId, state: completedState })
+      } finally {
+        clock.mockRestore()
+      }
+    })
+  )
+
+const selectCalculationRequests = () =>
+  runPg(
+    Effect.flatMap(drizzle, (db) =>
+      db
+        .select({
+          id: schema.calculationSyncRequests.id,
+          sourceJobId: schema.calculationSyncRequests.sourceJobId,
+          sourceId: schema.calculationSyncRequests.sourceId,
+          principalId: schema.calculationSyncRequests.principalId,
+          taxYear: schema.calculationSyncRequests.taxYear,
+          jurisdiction: schema.calculationSyncRequests.jurisdiction,
+          reportingCurrency: schema.calculationSyncRequests.reportingCurrency,
+          status: schema.calculationSyncRequests.status,
+          requestedAt: schema.calculationSyncRequests.requestedAt,
+        })
+        .from(schema.calculationSyncRequests)
+        .orderBy(asc(schema.calculationSyncRequests.taxYear))
+    )
+  )
+
+const seedActive2024 = () =>
+  runPg(
+    Effect.gen(function* () {
+      const db = yield* drizzle
+      const [run] = yield* db
+        .insert(schema.calculationRuns)
+        .values({
+          principalId: TEST_PRINCIPAL_ID,
+          jurisdiction: "DE",
+          taxYear: 2024,
+          reportingCurrency: "EUR",
+          engineVersion: "test",
+          ruleSetVersion: "test",
+          inputLedgerRevision: "test",
+          valuationRevision: "test",
+          status: "complete",
+          accountingMethod: "fifo",
+          inventoryScope: "per_custody_unit",
+          appliedChoiceIds: [],
+          appliedRules: [],
+          processedEventIds: [],
+          completedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2024-12-31T00:00:00Z")),
+        })
+        .returning({ id: schema.calculationRuns.id })
+      if (run === undefined) return yield* Effect.die("Missing active fixture run")
+      yield* db.insert(schema.activeCalculationRuns).values([
+        {
+          principalId: TEST_PRINCIPAL_ID,
+          jurisdiction: "DE",
+          taxYear: 2024,
+          reportingCurrency: "EUR",
+          runId: run.id,
+        },
+      ])
+    })
+  )
+
+describe("completed-sync calculation requests", () => {
+  beforeEach(() =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        yield* context.recreateTestDatabase()
+        yield* Effect.promise(() => runPg(seedSyncEngineRepositoryFixture()))
+        yield* Effect.promise(() => seedActive2024())
+      })
+    )
+  )
+
+  it.effect(
+    "completion_records_calculation_requests: current Berlin year and active years commit once",
+    () =>
+      Effect.gen(function* () {
+        const job = yield* Effect.promise(() => createJob())
+        yield* Effect.promise(() => claimJob({ jobId: job.id }))
+        yield* Effect.promise(() => completeInBerlin2026(job.id))
+        const requests = yield* Effect.promise(() => selectCalculationRequests())
+        expect(requests.map(({ taxYear }) => taxYear)).toEqual([2024, 2026])
+        expect(requests).toEqual(
+          [2024, 2026].map((taxYear) => ({
+            id: expect.any(String),
+            sourceJobId: job.id,
+            sourceId: TEST_SOURCE_ID,
+            principalId: TEST_PRINCIPAL_ID,
+            jurisdiction: "DE",
+            taxYear,
+            reportingCurrency: "EUR",
+            status: "queued",
+            requestedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-12-31T23:30:00.000Z")),
+          }))
+        )
+        expect((yield* Effect.promise(() => selectProcessingJob({ jobId: job.id }))).status).toBe(
+          "completed"
+        )
+        yield* Effect.promise(() => expect(completeInBerlin2026(job.id)).rejects.toBeDefined())
+        expect(yield* Effect.promise(selectCalculationRequests)).toEqual(requests)
+      })
+  )
+
+  it.effect("completion retains an existing historical scope without an active run", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() =>
+        runPg(
+          Effect.flatMap(drizzle, (db) =>
+            db.insert(schema.activeCalculationRuns).values({
+              principalId: TEST_PRINCIPAL_ID,
+              jurisdiction: "DE",
+              taxYear: 2023,
+              reportingCurrency: "EUR",
+              runId: null,
+            })
+          )
+        )
+      )
+      const job = yield* Effect.promise(() => createJob())
+      yield* Effect.promise(() => claimJob({ jobId: job.id }))
+      yield* Effect.promise(() => completeInBerlin2026(job.id))
+      const requests = yield* Effect.promise(selectCalculationRequests)
+      expect(requests.map(({ taxYear }) => taxYear)).toEqual([2023, 2024, 2026])
+      expect(
+        requests.every(
+          ({ sourceJobId, principalId, status }) =>
+            sourceJobId === job.id && principalId === TEST_PRINCIPAL_ID && status === "queued"
+        )
+      ).toBe(true)
+    })
+  )
+
+  it.effect(
+    "completion_records_calculation_requests: failed request insertion rolls back completion",
+    () =>
+      Effect.gen(function* () {
+        const job = yield* Effect.promise(() => createJob())
+        yield* Effect.promise(() => claimJob({ jobId: job.id }))
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.flatMap(drizzle, (db) =>
+              db.execute(sql`
+      ALTER TABLE calculation_sync_requests ADD CONSTRAINT test_reject_request CHECK (tax_year <> 2024)
+    `)
+            )
+          )
+        )
+        yield* Effect.promise(() => expect(completeInBerlin2026(job.id)).rejects.toBeDefined())
+        expect(yield* Effect.promise(selectCalculationRequests)).toEqual([])
+        expect(yield* Effect.promise(() => selectProcessingJob({ jobId: job.id }))).toMatchObject({
+          status: "processing",
+          completedAt: null,
+        })
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.flatMap(drizzle, (db) =>
+              db.execute(
+                sql`ALTER TABLE calculation_sync_requests DROP CONSTRAINT test_reject_request`
+              )
+            )
+          )
+        )
+      })
+  )
+
+  it.effect(
+    "completion_scope_and_ownership: follow-up completion accepts distinct exact requests",
+    () =>
+      Effect.gen(function* () {
+        const first = yield* Effect.promise(() => createJob())
+        yield* Effect.promise(() => claimJob({ jobId: first.id }))
+        yield* Effect.promise(() => createJob({ mode: "replay" }))
+        yield* Effect.promise(() => completeInBerlin2026(first.id))
+        const firstRequests = yield* Effect.promise(() => selectCalculationRequests())
+        const { followUpJobId } = yield* Effect.promise(() =>
+          selectProcessingJob({ jobId: first.id })
+        )
+        expect(followUpJobId).not.toBeNull()
+        if (followUpJobId === null) return
+        expect(firstRequests).toHaveLength(2)
+        yield* Effect.promise(() => claimJob({ jobId: followUpJobId }))
+        yield* Effect.promise(() => completeInBerlin2026(followUpJobId))
+        const requests = yield* Effect.promise(() => selectCalculationRequests())
+        expect(requests).toHaveLength(4)
+        expect(requests.filter(({ sourceJobId }) => sourceJobId === first.id)).toEqual(
+          firstRequests
+        )
+        expect(
+          requests
+            .filter(({ sourceJobId }) => sourceJobId === followUpJobId)
+            .map(({ taxYear }) => taxYear)
+        ).toEqual([2024, 2026])
+        expect(new Set(requests.map(({ id }) => id)).size).toBe(4)
+      })
   )
 })

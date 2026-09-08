@@ -32,6 +32,27 @@ export const CalculationRunId = Schema.String.check(Schema.isUUID()).pipe(
 /** Stable, caller-assigned identity of one immutable calculation run. */
 export type CalculationRunId = typeof CalculationRunId.Type
 
+/** Stable identity of accepted completed-sync work, independent of a run. */
+export const CalculationSyncRequestId = Schema.String.check(Schema.isUUID()).pipe(
+  Schema.brand("CalculationSyncRequestId")
+)
+
+/** Stable identity of accepted completed-sync work. */
+export type CalculationSyncRequestId = typeof CalculationSyncRequestId.Type
+
+/** Stable identity of one attempt at a completed-sync request. */
+export const CalculationSyncAttemptId = Schema.String.check(Schema.isUUID()).pipe(
+  Schema.brand("CalculationSyncAttemptId")
+)
+
+/** Stable identity of one attempt at a completed-sync request. */
+export type CalculationSyncAttemptId = typeof CalculationSyncAttemptId.Type
+
+/** Exact request links read alongside the factual ledger; an empty array is explicit evidence. */
+export interface CalculationRunSyncCapture {
+  readonly requestIds: ReadonlyArray<CalculationSyncRequestId>
+}
+
 /**
  * Revision of the factual ledger used as calculation input.
  *

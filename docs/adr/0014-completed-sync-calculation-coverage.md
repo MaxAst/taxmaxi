@@ -11,6 +11,8 @@ A completed source sync currently queues only a principal ID, leaving readers un
 - Scope means the requested annual result, not a restriction to that year's source history. Each annual calculation processes all available factual history before the end of that year, as ADR 0007 requires. There is no dependency on saved prior-year results. Sync-triggered scheduling retains the current DE/EUR year and existing active DE/EUR years; reading an unscheduled year does not enqueue work or imply that work is pending.
 - Existing jobs and runs without recorded links have unknown coverage. Do not infer historical associations or backfill them from timestamps or row shape. Newly completed sync/replay work establishes new evidence through its normal writers. Account claims and non-sync triggers cannot masquerade as source jobs.
 
+- Claiming an anonymous source transfers its accepted calculation requests to the account principal as queued work, retaining each exact request ID, source-job/source IDs, requested scope, and original request time. The claim discards anonymous attempts and captured coverage alongside the anonymous calculation results it already removes; imported facts and the target account's active results remain unchanged. Requests retained under the anonymous principal whose attempts point to deleted runs return to queued through those explicit links. All ownership changes and work changes commit together or roll back together. A fresh target accounting snapshot establishes coverage; the claim never invents a source job, request identity, unrequested scope, or historical association.
+
 ## Consequences
 
 Which states describe a recorded calculation request, independently of the active result?

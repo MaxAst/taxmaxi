@@ -4,7 +4,7 @@
  * @module PrincipalClaimRepositoryLive
  */
 
-import { and, asc, desc, eq, gt, isNotNull, isNull, or, sql } from "drizzle-orm"
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, or, sql } from "drizzle-orm"
 import * as DateTime from "effect/DateTime"
 import { PrincipalId } from "@my/core/ownership"
 import type { ChainType } from "@my/core/source"
@@ -180,6 +180,34 @@ const make = Effect.gen(function* () {
   const db = yield* drizzle
   type ClaimTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
 
+  // Claims retain accepted work, but anonymous attempts cannot certify the new owner.
+  const takeClaimCalculationRequests = ({
+    executor,
+    sourceId,
+    principalId,
+  }: {
+    readonly executor: ClaimTransaction
+    readonly sourceId: SourceId
+    readonly principalId: PrincipalId
+  }) =>
+    executor
+      .delete(schema.calculationSyncRequests)
+      .where(
+        and(
+          eq(schema.calculationSyncRequests.sourceId, sourceId),
+          eq(schema.calculationSyncRequests.principalId, principalId)
+        )
+      )
+      .returning({
+        id: schema.calculationSyncRequests.id,
+        sourceId: schema.calculationSyncRequests.sourceId,
+        sourceJobId: schema.calculationSyncRequests.sourceJobId,
+        jurisdiction: schema.calculationSyncRequests.jurisdiction,
+        taxYear: schema.calculationSyncRequests.taxYear,
+        reportingCurrency: schema.calculationSyncRequests.reportingCurrency,
+        requestedAt: schema.calculationSyncRequests.requestedAt,
+      })
+
   const fenceAndDeleteAnonymousCalculationRuns = ({
     executor,
     principalId,
@@ -195,6 +223,29 @@ const make = Effect.gen(function* () {
         Effect.map(DateTime.toParts),
         Effect.map(({ year }) => year)
       )
+
+      // Only recorded attempts identify other work invalidated by these deleted runs.
+      const requestsOnDeletedRuns = yield* executor
+        .select({ requestId: schema.calculationSyncAttempts.requestId })
+        .from(schema.calculationSyncAttempts)
+        .innerJoin(
+          schema.calculationRuns,
+          eq(schema.calculationSyncAttempts.runId, schema.calculationRuns.id)
+        )
+        .where(eq(schema.calculationRuns.principalId, principalId))
+
+      const requestIds = requestsOnDeletedRuns.map(({ requestId }) => requestId)
+      if (requestIds.length > 0) {
+        yield* executor
+          .update(schema.calculationSyncRequests)
+          .set({ status: "queued" })
+          .where(inArray(schema.calculationSyncRequests.id, requestIds))
+
+        // A retry without a run must not keep explicitly requeued work occupied.
+        yield* executor
+          .delete(schema.calculationSyncAttempts)
+          .where(inArray(schema.calculationSyncAttempts.requestId, requestIds))
+      }
 
       yield* executor
         .delete(schema.calculationRuns)
@@ -641,6 +692,12 @@ const make = Effect.gen(function* () {
               })
             }
 
+            const transferredRequests = yield* takeClaimCalculationRequests({
+              executor: tx,
+              sourceId: params.sourceId,
+              principalId: params.anonymousPrincipalId,
+            })
+
             const movedSources = yield* tx
               .update(schema.sources)
               .set({ principalId: params.userPrincipalId, updatedAt: now })
@@ -763,6 +820,16 @@ const make = Effect.gen(function* () {
               })
             }
 
+            if (transferredRequests.length > 0) {
+              yield* tx.insert(schema.calculationSyncRequests).values(
+                transferredRequests.map((request) => ({
+                  ...request,
+                  principalId: params.userPrincipalId,
+                  status: "queued" as const,
+                }))
+              )
+            }
+
             yield* fenceAndDeleteAnonymousCalculationRuns({
               executor: tx,
               principalId: params.anonymousPrincipalId,
@@ -869,6 +936,12 @@ const make = Effect.gen(function* () {
                 message: "Target principal already owns the claimed wallet address.",
               })
             }
+
+            const transferredRequests = yield* takeClaimCalculationRequests({
+              executor: tx,
+              sourceId: params.sourceId,
+              principalId: params.anonymousPrincipalId,
+            })
 
             const movedSources = yield* tx
               .update(schema.sources)
@@ -990,6 +1063,16 @@ const make = Effect.gen(function* () {
               return yield* new PrincipalClaimTransferStaleError({
                 message: "Request claims were not consumed.",
               })
+            }
+
+            if (transferredRequests.length > 0) {
+              yield* tx.insert(schema.calculationSyncRequests).values(
+                transferredRequests.map((request) => ({
+                  ...request,
+                  principalId: params.userPrincipalId,
+                  status: "queued" as const,
+                }))
+              )
             }
 
             yield* fenceAndDeleteAnonymousCalculationRuns({
