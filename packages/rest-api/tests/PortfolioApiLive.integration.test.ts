@@ -13,6 +13,7 @@ import {
 import { CurrencyCode } from "@my/core/currency"
 import { PrincipalId } from "@my/core/ownership"
 import {
+  SourceSyncJobRepository,
   SourceSyncRunService,
   SourceSyncService,
   TransferReconciliationService,
@@ -24,6 +25,11 @@ import * as BigDecimal from "effect/BigDecimal"
 import * as Chunk from "effect/Chunk"
 import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
+import * as Deferred from "effect/Deferred"
+import * as Fiber from "effect/Fiber"
+import * as Exit from "effect/Exit"
+import { vi } from "vitest"
+import { SourceSyncJobRepositoryLive } from "../../persistence/src/layers/SourceSyncJobRepositoryLive.ts"
 import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
@@ -47,7 +53,10 @@ import {
   TEST_BTC_ASSET_ID,
 } from "../../persistence/tests/support/integration-test-kit.ts"
 import { AnonSessionServiceLive } from "../src/layers/AnonSessionServiceLive.ts"
-import { PortfolioAssetsResponse } from "../src/definitions/PortfolioApi.ts"
+import {
+  PortfolioCalculationStatusResponse,
+  PortfolioAssetsResponse,
+} from "../src/definitions/PortfolioApi.ts"
 import { SourceFifoLotsResponse, SourceOverviewResponse } from "../src/definitions/SourcesApi.ts"
 import { SimpleTokenValidatorLive } from "../src/layers/AuthMiddlewareLive.ts"
 import { TaxMaxiApiLive } from "../src/layers/TaxMaxiApiLive.ts"
@@ -508,6 +517,89 @@ const getSourceFifoLots = ({ sourceId, userId }: { sourceId: string; userId: str
     return { status: response.status, body: yield* response.json }
   })
 
+const calculationStatus = (sourceJobId?: string, taxYear = 2024) =>
+  getPortfolio({
+    userId: fixtureIds.userId,
+    path: `/v1/portfolio/calculation-status?taxYear=${taxYear}${sourceJobId === undefined ? "" : `&sourceJobId=${sourceJobId}`}`,
+  }).pipe(
+    Effect.provide(HttpLive),
+    Effect.scoped,
+    Effect.flatMap(({ status, body }) => {
+      expect(status).toBe(200)
+      return Schema.decodeUnknownEffect(PortfolioCalculationStatusResponse)(body)
+    })
+  )
+
+const completeCalculationSourceJob = context.runWithLayer({
+  layer: SourceSyncJobRepositoryLive,
+  effect: Effect.gen(function* () {
+    const repository = yield* SourceSyncJobRepository
+    const job = yield* repository.createOrReuseJob({
+      sourceId: fixtureIds.sourceId,
+      principalId: fixtureIds.principalId,
+      mode: "sync",
+      maxAttempts: 3,
+    })
+    yield* repository.claimJob({
+      jobId: job.id,
+      workerId: "http-proof",
+      startedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z")),
+    })
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-02-01T00:00:00Z"))
+    const completion = repository.completeJob({
+      jobId: job.id,
+      state: {
+        phase: "completed",
+        processedRecords: 0,
+        totalRecords: 0,
+        fetchedRecords: 0,
+        normalizedRecords: 0,
+        failedRecords: 0,
+        cursorPayload: null,
+        highWatermark: null,
+        checkpointExternalId: null,
+        checkpointRawRecordId: null,
+      },
+    })
+    clock.mockRestore()
+    yield* completion
+    return job.id
+  }),
+})
+
+const recomputeSelectedYear = (runId: string) =>
+  makeRecompute({
+    principalId: fixtureIds.principalId,
+    runId,
+    taxYear: 2024,
+  })
+
+const seedCalculationStatus = seedSyncEngineRepositoryFixture(fixtureIds).pipe(
+  Effect.provide(TestPgClientLive),
+  Effect.scoped
+)
+
+const readCalculationEvidence = Effect.gen(function* () {
+  const db = yield* drizzle
+  return {
+    requests: yield* db
+      .select({
+        id: schema.calculationSyncRequests.id,
+        status: schema.calculationSyncRequests.status,
+      })
+      .from(schema.calculationSyncRequests),
+    attempts: yield* db
+      .select({
+        id: schema.calculationSyncAttempts.id,
+        status: schema.calculationSyncAttempts.status,
+      })
+      .from(schema.calculationSyncAttempts),
+    runs: yield* db
+      .select({ id: schema.calculationRuns.id, status: schema.calculationRuns.status })
+      .from(schema.calculationRuns),
+  }
+}).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+
 await Effect.runPromise(context.recreateTestDatabase())
 
 describe("PortfolioApiLive", () => {
@@ -784,5 +876,344 @@ describe("PortfolioApiLive", () => {
         assets: [{ amount: "2", profitLoss: null }],
       })
     })
+  )
+  it.effect(
+    "discovers selected-year work over HTTP and keeps R0 until the captured R1 settles",
+    () =>
+      Effect.gen(function* () {
+        yield* seedCalculationStatus
+        yield* context.runWithLayer({
+          layer: CalculationRunServiceTestLive,
+          effect: recomputeSelectedYear(fixtureIds.activeRunId),
+        })
+        const job = yield* completeCalculationSourceJob
+        const queued = yield* calculationStatus(job)
+        expect(queued.scope).toEqual({
+          jurisdiction: "DE",
+          taxYear: 2024,
+          reportingCurrency: "EUR",
+        })
+        expect(queued.activeRun).toEqual({ runId: fixtureIds.activeRunId, status: "complete" })
+        expect(queued.jobs).toMatchObject([
+          {
+            sourceJobId: job,
+            activeCoverage: "not_covered",
+            coveringRun: null,
+            work: { status: "queued", attempts: [] },
+          },
+        ])
+        const requestId = queued.jobs[0]?.work?.requestId
+        expect(requestId).toBeDefined()
+        const beforeReads = yield* readCalculationEvidence
+        expect((yield* calculationStatus()).work.requests).toMatchObject([
+          { requestId, sourceJobId: job },
+        ])
+        expect((yield* calculationStatus(job, 2026)).work.status).toBe("queued")
+        expect((yield* calculationStatus(job, 2025)).activeRun).toBeNull()
+        expect((yield* calculationStatus(job, 2025)).work).toEqual({
+          status: "not_requested",
+          requests: [],
+        })
+        expect(yield* readCalculationEvidence).toEqual(beforeReads)
+
+        const reached = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const repositoryLayer = Layer.effect(
+          CalculationRunRepository,
+          Effect.map(CalculationRunRepository, (repository) =>
+            CalculationRunRepository.of({
+              ...repository,
+              persist: (params) =>
+                Deferred.succeed(reached, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(repository.persist(params))
+                ),
+            })
+          )
+        ).pipe(Layer.provide(CalculationRunRepositoryLive))
+        const layer = CalculationRunServiceLive.pipe(
+          Layer.provide(Layer.merge(repositoryLayer, FactualLedgerRepositoryLive))
+        )
+        const fiber = yield* Effect.forkChild(
+          context.runWithLayer({ layer, effect: recomputeSelectedYear(fixtureIds.latestRunId) })
+        )
+        const runningAttempt = yield* Effect.gen(function* () {
+          yield* Deferred.await(reached)
+          const running = yield* calculationStatus(job)
+          expect(running.activeRun).toEqual(queued.activeRun)
+          expect(running.jobs).toMatchObject([
+            {
+              coveringRun: null,
+              activeCoverage: "not_covered",
+              work: {
+                requestId,
+                status: "running",
+                attempts: [{ runId: fixtureIds.latestRunId, status: "running" }],
+              },
+            },
+          ])
+          return running.jobs[0]?.work?.attempts[0]?.attemptId
+        }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)))
+        yield* Fiber.join(fiber)
+        expect(runningAttempt).toBeDefined()
+        const covered = yield* calculationStatus(job)
+        expect(covered.activeRun).toEqual({ runId: fixtureIds.latestRunId, status: "complete" })
+        expect(covered.jobs).toMatchObject([
+          {
+            activeCoverage: "covered",
+            coveringRun: { runId: fixtureIds.latestRunId, status: "complete" },
+            work: {
+              requestId,
+              status: "succeeded",
+              attempts: [{ runId: fixtureIds.latestRunId, status: "succeeded", failureCode: null }],
+            },
+          },
+        ])
+        expect(covered.jobs[0]?.work?.attempts[0]?.attemptId).toBe(runningAttempt)
+        expect(yield* calculationStatus()).toEqual(covered)
+        const captured = yield* Effect.flatMap(drizzle, (db) =>
+          db
+            .select({
+              runId: schema.calculationRunSyncRequests.runId,
+              requestId: schema.calculationRunSyncRequests.requestId,
+            })
+            .from(schema.calculationRunSyncRequests)
+        ).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+        expect(captured).toEqual([{ runId: fixtureIds.latestRunId, requestId }])
+        const nextJob = yield* completeCalculationSourceJob
+        const filtered = yield* calculationStatus(job)
+        expect(filtered.jobs).toHaveLength(1)
+        expect(filtered.jobs[0]?.sourceJobId).toBe(job)
+        expect(filtered.work).toMatchObject({
+          status: "queued",
+          requests: [{ sourceJobId: nextJob }],
+        })
+      })
+  )
+
+  it.effect(
+    "reports a failed calculation without claiming coverage or replacing the active result",
+    () =>
+      Effect.gen(function* () {
+        yield* seedCalculationStatus
+        yield* context.runWithLayer({
+          layer: CalculationRunServiceTestLive,
+          effect: recomputeSelectedYear(fixtureIds.activeRunId),
+        })
+        const job = yield* completeCalculationSourceJob
+        const result = yield* Effect.exit(
+          context.runWithLayer({
+            layer: FailingCalculationRunServiceLive,
+            effect: recomputeSelectedYear(fixtureIds.latestRunId),
+          })
+        )
+        expect(Exit.isFailure(result)).toBe(true)
+        const failed = yield* calculationStatus(job)
+        expect(failed.activeRun?.runId).toBe(fixtureIds.activeRunId)
+        expect(failed.work.status).toBe("failed")
+        expect(failed.jobs).toMatchObject([
+          {
+            coveringRun: null,
+            activeCoverage: "not_covered",
+            work: {
+              status: "failed",
+              attempts: [
+                {
+                  runId: fixtureIds.latestRunId,
+                  status: "failed",
+                  failureCode: "calculation_failed",
+                },
+              ],
+            },
+          },
+        ])
+      })
+  )
+
+  it.effect("exposes an exact runless preparation failure without covering its source job", () =>
+    Effect.gen(function* () {
+      yield* seedCalculationStatus
+      yield* context.runWithLayer({
+        layer: CalculationRunServiceTestLive,
+        effect: recomputeSelectedYear(fixtureIds.activeRunId),
+      })
+      const job = yield* completeCalculationSourceJob
+      const queued = yield* calculationStatus(job)
+      const requestId = queued.jobs[0]?.work?.requestId
+      expect(requestId).toBeDefined()
+      yield* context.runWithLayer({
+        layer: CalculationRunRepositoryLive,
+        effect: Effect.gen(function* () {
+          const repository = yield* CalculationRunRepository
+          const scope = {
+            principalId: PrincipalId.make(fixtureIds.principalId),
+            jurisdiction: JurisdictionCode.make("DE"),
+            taxYear: TaxYear.make(2024),
+            reportingCurrency: CurrencyCode.make("EUR"),
+          }
+          const preparation = yield* repository.observeSyncPreparation(scope)
+          expect(preparation.requestIds).toEqual([requestId])
+          yield* repository.failSyncPreparation({
+            ...scope,
+            preparation,
+            failureCode: "price_hydration_failed",
+          })
+        }),
+      })
+      const failed = yield* calculationStatus(job)
+      expect(failed.activeRun).toEqual(queued.activeRun)
+      expect(failed.work.status).toBe("failed")
+      expect(failed.jobs).toMatchObject([
+        {
+          coveringRun: null,
+          activeCoverage: "not_covered",
+          work: {
+            requestId,
+            status: "failed",
+            attempts: [{ runId: null, status: "failed", failureCode: "price_hydration_failed" }],
+          },
+        },
+      ])
+      expect(failed.jobs[0]?.work?.attempts[0]?.attemptId).toBeDefined()
+      expect(yield* calculationStatus()).toEqual(failed)
+    })
+  )
+
+  it.effect("distinguishes legacy unknown coverage from a real partial covering run", () =>
+    Effect.gen(function* () {
+      yield* seedActivePortfolioRun.pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+      const job = yield* completeCalculationSourceJob
+      const taxYear = yield* currentGermanTaxYear
+      expect((yield* calculationStatus(job, taxYear)).jobs[0]?.activeCoverage).toBe("unknown")
+      yield* Effect.gen(function* () {
+        const db = yield* drizzle
+        yield* db
+          .delete(schema.calculationRuns)
+          .where(eq(schema.calculationRuns.id, fixtureIds.latestRunId))
+        yield* db.insert(schema.transactionLegs).values(
+          yield* prepareMovementLegFixtures([
+            {
+              movementIdentity: { sourceRecordKey: "http-unpriced", componentKey: "principal" },
+              sourceId: fixtureIds.sourceId,
+              principalId: fixtureIds.principalId,
+              externalId: "http-unpriced",
+              timestamp: DateTime.toDateUtc(DateTime.makeUnsafe(`${taxYear}-01-01T00:00:00Z`)),
+              assetId: TEST_BTC_ASSET_ID,
+              amount: "1",
+              kind: "income",
+              provenance: "deterministic",
+              originKind: "none",
+            },
+          ])
+        )
+      }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+      yield* context.runWithLayer({
+        layer: CalculationRunServiceTestLive,
+        effect: makeRecompute({
+          principalId: fixtureIds.principalId,
+          runId: fixtureIds.latestRunId,
+          taxYear,
+        }),
+      })
+      const status = yield* calculationStatus(job, taxYear)
+      expect(status.activeRun).toEqual({ runId: fixtureIds.latestRunId, status: "partial" })
+      expect(status.jobs).toMatchObject([
+        {
+          activeCoverage: "covered",
+          coveringRun: { runId: fixtureIds.latestRunId, status: "partial" },
+          work: { status: "succeeded" },
+        },
+      ])
+    })
+  )
+
+  it.effect(
+    "validates calculation-status authentication, year and job ownership without writes",
+    () =>
+      Effect.gen(function* () {
+        yield* seedCalculationStatus
+        const foreign = yield* seedSyncEngineRepositoryFixture({
+          userId: "00000000-0000-4000-8000-000000000581",
+          principalId: "00000000-0000-4000-8000-000000000582",
+          sourceId: "00000000-0000-4000-8000-000000000583",
+        }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+        const jobs = yield* context.runWithLayer({
+          layer: SourceSyncJobRepositoryLive,
+          effect: Effect.gen(function* () {
+            const repository = yield* SourceSyncJobRepository
+            const owned = yield* repository.createOrReuseJob({
+              sourceId: fixtureIds.sourceId,
+              principalId: fixtureIds.principalId,
+              mode: "sync",
+              maxAttempts: 3,
+            })
+            const other = yield* repository.createOrReuseJob({
+              sourceId: foreign.sourceId,
+              principalId: foreign.principalId,
+              mode: "sync",
+              maxAttempts: 3,
+            })
+            return { owned, other }
+          }),
+        })
+        const beforeReads = yield* readCalculationEvidence
+        const pending = yield* calculationStatus(jobs.owned.id)
+        expect(pending.jobs).toMatchObject([
+          { sourceJobStatus: "pending", work: null, coveringRun: null, activeCoverage: "unknown" },
+        ])
+        const responses = yield* Effect.gen(function* () {
+          const absent = yield* getPortfolio({
+            userId: fixtureIds.userId,
+            path: "/v1/portfolio/calculation-status?taxYear=2024&sourceJobId=00000000-0000-4000-8000-000000000599",
+          })
+          const other = yield* getPortfolio({
+            userId: fixtureIds.userId,
+            path: `/v1/portfolio/calculation-status?taxYear=2024&sourceJobId=${jobs.other.id}`,
+          })
+          for (const query of [
+            "",
+            "taxYear=hello",
+            "taxYear=2024.5",
+            "taxYear=Infinity",
+            "taxYear=2024&sourceJobId=bad",
+          ]) {
+            expect(
+              (yield* getPortfolio({
+                userId: fixtureIds.userId,
+                path: `/v1/portfolio/calculation-status?${query}`,
+              })).status
+            ).toBe(400)
+          }
+          const unauthorized = yield* HttpClientRequest.get(
+            "/v1/portfolio/calculation-status?taxYear=2024"
+          ).pipe(HttpClient.execute)
+          expect(unauthorized.status).toBe(401)
+          return { absent, other }
+        }).pipe(Effect.provide(HttpLive), Effect.scoped)
+        expect(responses.absent.status).toBe(404)
+        expect(responses.absent.body).toMatchObject({ code: "source_job_not_found" })
+        expect(responses.other).toEqual(responses.absent)
+        expect(yield* readCalculationEvidence).toEqual(beforeReads)
+        yield* context.runWithLayer({
+          layer: SourceSyncJobRepositoryLive,
+          effect: Effect.gen(function* () {
+            const repository = yield* SourceSyncJobRepository
+            const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z"))
+            yield* repository.claimJob({
+              jobId: jobs.owned.id,
+              workerId: "http-proof",
+              startedAt: timestamp,
+            })
+            yield* repository.failJob({
+              jobId: jobs.owned.id,
+              message: "fixture provider failure",
+              completedAt: timestamp,
+            })
+          }),
+        })
+        expect((yield* calculationStatus(jobs.owned.id)).jobs).toMatchObject([
+          { sourceJobStatus: "failed", work: null, coveringRun: null, activeCoverage: "unknown" },
+        ])
+      })
   )
 })

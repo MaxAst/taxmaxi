@@ -15,6 +15,8 @@ import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import { InternalServerError } from "../definitions/ApiErrors.ts"
 import {
+  PortfolioCalculationStatusResponse,
+  PortfolioCalculationJobNotFoundResponse,
   PortfolioAssetRow,
   PortfolioActiveRunResponse,
   PortfolioAssetsResponse,
@@ -95,94 +97,124 @@ export const PortfolioApiLive = HttpApiBuilder.group(TaxMaxiApi, "portfolio", (h
     const priceService = yield* CoinGeckoPriceService
     const principalResolutionService = yield* PrincipalResolutionService
 
-    return handlers.handle("listPortfolioAssets", ({ query: urlParams }) =>
-      Effect.gen(function* () {
-        const { principal } = yield* principalResolutionService.resolveCurrentUserPrincipal.pipe(
-          Effect.mapError(() => internalError("Failed to resolve the current user."))
-        )
-
-        const currency = urlParams.currency ?? "eur"
-        const taxYear = yield* currentGermanTaxYear
-
-        const portfolio = yield* portfolioRepository
-          .getActiveRunPortfolio({
-            principalId: principal.id,
-            sourceId: urlParams.sourceId === undefined ? null : SourceId.make(urlParams.sourceId),
-            jurisdiction: GERMAN_JURISDICTION,
-            taxYear,
-            reportingCurrency: EUR,
-          })
-          .pipe(
-            Effect.catchTag("PortfolioSourceNotFoundError", () =>
-              Effect.fail(new PortfolioSourceNotFoundResponse({ message: "Source not found." }))
-            ),
-            Effect.mapError((error) =>
-              error._tag === "PortfolioSourceNotFoundResponse"
-                ? error
-                : internalError("Failed to load portfolio assets.")
-            )
+    return handlers
+      .handle("getCalculationStatus", ({ query }) =>
+        Effect.gen(function* () {
+          const { principal } = yield* principalResolutionService.resolveCurrentUserPrincipal.pipe(
+            Effect.mapError(() => internalError("principal_resolution_failed"))
           )
-
-        const latestRun = yield* calculationRunRepository
-          .getLatestStatus({
-            principalId: principal.id,
-            jurisdiction: GERMAN_JURISDICTION,
-            taxYear,
-            reportingCurrency: EUR,
-          })
-          .pipe(Effect.mapError(() => internalError("Failed to load calculation run status.")))
-
-        const positions = portfolio.positions
-
-        const coinIds = Array.from(
-          new Set(
-            positions.flatMap((position) =>
-              position.coingeckoCoinId === null ? [] : [position.coingeckoCoinId]
-            )
-          )
-        )
-
-        const prices = yield* priceService
-          .getCurrentPrices({ coinIds, currency })
-          .pipe(Effect.mapError(() => internalError("Failed to load current asset prices.")))
-
-        const assets = positions
-          .map((position) =>
-            makePortfolioAssetRow({
-              position,
-              market:
-                position.coingeckoCoinId === null
-                  ? undefined
-                  : prices.get(position.coingeckoCoinId),
-              currency,
+          const status = yield* calculationRunRepository
+            .getSyncStatus({
+              principalId: principal.id,
+              jurisdiction: GERMAN_JURISDICTION,
+              reportingCurrency: EUR,
+              taxYear: query.taxYear,
+              ...(query.sourceJobId === undefined ? {} : { sourceJobId: query.sourceJobId }),
             })
-          )
-          .sort(comparePortfolioAssets)
-        const summary = makePortfolioSummary(assets)
+            .pipe(
+              Effect.mapError((error) =>
+                error._tag === "CalculationSyncJobNotFoundError"
+                  ? new PortfolioCalculationJobNotFoundResponse({ code: "source_job_not_found" })
+                  : internalError("calculation_status_read_failed")
+              )
+            )
 
-        return PortfolioAssetsResponse.make({
-          currency: currency.toUpperCase(),
-          activeRun:
-            portfolio.activeRun === null
-              ? null
-              : PortfolioActiveRunResponse.make({
-                  runId: portfolio.activeRun.runId,
-                  status: portfolio.activeRun.status,
-                  blockerCounts: portfolio.activeRun.blockerCounts,
-                }),
-          latestRun:
-            latestRun === null
-              ? null
-              : PortfolioLatestRunResponse.make({
-                  runId: latestRun.runId,
-                  status: latestRun.status,
-                  failureCode: latestRun.failureCode,
-                }),
-          summary,
-          assets,
+          return PortfolioCalculationStatusResponse.make({
+            scope: { jurisdiction: "DE", taxYear: status.scope.taxYear, reportingCurrency: "EUR" },
+            activeRun: status.activeRun,
+            work: status.work,
+            jobs: status.jobs,
+          })
         })
-      })
-    )
+      )
+      .handle("listPortfolioAssets", ({ query: urlParams }) =>
+        Effect.gen(function* () {
+          const { principal } = yield* principalResolutionService.resolveCurrentUserPrincipal.pipe(
+            Effect.mapError(() => internalError("Failed to resolve the current user."))
+          )
+
+          const currency = urlParams.currency ?? "eur"
+          const taxYear = yield* currentGermanTaxYear
+
+          const portfolio = yield* portfolioRepository
+            .getActiveRunPortfolio({
+              principalId: principal.id,
+              sourceId: urlParams.sourceId === undefined ? null : SourceId.make(urlParams.sourceId),
+              jurisdiction: GERMAN_JURISDICTION,
+              taxYear,
+              reportingCurrency: EUR,
+            })
+            .pipe(
+              Effect.catchTag("PortfolioSourceNotFoundError", () =>
+                Effect.fail(new PortfolioSourceNotFoundResponse({ message: "Source not found." }))
+              ),
+              Effect.mapError((error) =>
+                error._tag === "PortfolioSourceNotFoundResponse"
+                  ? error
+                  : internalError("Failed to load portfolio assets.")
+              )
+            )
+
+          const latestRun = yield* calculationRunRepository
+            .getLatestStatus({
+              principalId: principal.id,
+              jurisdiction: GERMAN_JURISDICTION,
+              taxYear,
+              reportingCurrency: EUR,
+            })
+            .pipe(Effect.mapError(() => internalError("Failed to load calculation run status.")))
+
+          const positions = portfolio.positions
+
+          const coinIds = Array.from(
+            new Set(
+              positions.flatMap((position) =>
+                position.coingeckoCoinId === null ? [] : [position.coingeckoCoinId]
+              )
+            )
+          )
+
+          const prices = yield* priceService
+            .getCurrentPrices({ coinIds, currency })
+            .pipe(Effect.mapError(() => internalError("Failed to load current asset prices.")))
+
+          const assets = positions
+            .map((position) =>
+              makePortfolioAssetRow({
+                position,
+                market:
+                  position.coingeckoCoinId === null
+                    ? undefined
+                    : prices.get(position.coingeckoCoinId),
+                currency,
+              })
+            )
+            .sort(comparePortfolioAssets)
+          const summary = makePortfolioSummary(assets)
+
+          return PortfolioAssetsResponse.make({
+            currency: currency.toUpperCase(),
+            activeRun:
+              portfolio.activeRun === null
+                ? null
+                : PortfolioActiveRunResponse.make({
+                    runId: portfolio.activeRun.runId,
+                    status: portfolio.activeRun.status,
+                    blockerCounts: portfolio.activeRun.blockerCounts,
+                  }),
+            latestRun:
+              latestRun === null
+                ? null
+                : PortfolioLatestRunResponse.make({
+                    runId: latestRun.runId,
+                    status: latestRun.status,
+                    failureCode: latestRun.failureCode,
+                  }),
+            summary,
+            assets,
+          })
+        })
+      )
   })
 )
 

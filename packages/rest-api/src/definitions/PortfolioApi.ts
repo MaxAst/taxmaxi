@@ -1,5 +1,6 @@
 /** PortfolioApi - Current user portfolio endpoints. */
 
+import { TaxYear } from "@my/core/accounting"
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import * as Schema from "effect/Schema"
 import * as SchemaTransformation from "effect/SchemaTransformation"
@@ -87,8 +88,85 @@ const listPortfolioAssets = HttpApiEndpoint.get("listPortfolioAssets", "/assets"
   })
 )
 
+/** Exact selected-year work and coverage, read without starting a calculation. */
+export const PortfolioCalculationStatusQuery = Schema.Struct({
+  taxYear: Schema.FiniteFromString.pipe(Schema.decodeTo(TaxYear)),
+  sourceJobId: Schema.optional(Schema.String.check(Schema.isUUID())),
+})
+
+export class PortfolioCalculationJobNotFoundResponse extends Schema.TaggedError<PortfolioCalculationJobNotFoundResponse>()(
+  "PortfolioCalculationJobNotFoundResponse",
+  { code: Schema.Literal("source_job_not_found") },
+  { httpApiStatus: 404 }
+) {}
+
+const CalculationRun = Schema.Struct({
+  runId: Schema.String,
+  status: Schema.Literals(["complete", "partial"]),
+})
+
+const CalculationWork = Schema.Struct({
+  requestId: Schema.String,
+  sourceId: Schema.String,
+  sourceJobId: Schema.String,
+  status: Schema.Literals(["queued", "running", "succeeded", "failed"]),
+  attempts: Schema.Array(
+    Schema.Struct({
+      attemptId: Schema.String,
+      runId: Schema.NullOr(Schema.String),
+      status: Schema.Literals(["running", "succeeded", "failed"]),
+      failureCode: Schema.NullOr(Schema.String),
+    })
+  ),
+})
+
+/** Work spans the whole scope even when jobs are filtered to one source job. */
+export class PortfolioCalculationStatusResponse extends Schema.Class<PortfolioCalculationStatusResponse>(
+  "PortfolioCalculationStatusResponse"
+)({
+  scope: Schema.Struct({
+    jurisdiction: Schema.Literal("DE"),
+    taxYear: TaxYear,
+    reportingCurrency: Schema.Literal("EUR"),
+  }),
+  activeRun: Schema.NullOr(CalculationRun),
+  work: Schema.Struct({
+    status: Schema.Literals(["not_requested", "queued", "running", "succeeded", "failed"]),
+    requests: Schema.Array(CalculationWork),
+  }),
+  jobs: Schema.Array(
+    Schema.Struct({
+      sourceJobStatus: Schema.Literals([
+        "pending",
+        "processing",
+        "completed",
+        "failed",
+        "credit_required",
+      ]),
+      sourceJobId: Schema.String,
+      sourceId: Schema.String,
+      work: Schema.NullOr(CalculationWork),
+      coveringRun: Schema.NullOr(CalculationRun),
+      activeCoverage: Schema.Literals(["covered", "not_covered", "unknown"]),
+    })
+  ),
+}) {}
+
+const getCalculationStatus = HttpApiEndpoint.get("getCalculationStatus", "/calculation-status", {
+  query: PortfolioCalculationStatusQuery,
+  success: PortfolioCalculationStatusResponse,
+  error: [PortfolioCalculationJobNotFoundResponse, InternalServerError],
+}).annotateMerge(
+  OpenApi.annotations({
+    summary: "Read selected-year calculation status",
+    description:
+      "Returns DE/EUR scope work independently of an optional source job filter. Without a filter, discovers the newest completed job per owned source. Active coverage and covering runs are separate: compare active run IDs before attaching coverage to separately fetched results. Unknown coverage includes legacy runs without captured evidence. This read never requests a calculation.",
+  })
+)
+
 export class PortfolioApi extends HttpApiGroup.make("portfolio")
   .add(listPortfolioAssets)
+  .add(getCalculationStatus)
   .middleware(AuthMiddleware)
   .prefix("/v1/portfolio")
   .annotateMerge(OpenApi.annotations({ title: "Portfolio" })) {}
