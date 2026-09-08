@@ -69,6 +69,11 @@ export const processingJobs = pgTable(
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (table) => [
+    uniqueIndex("processing_jobs_id_source_principal_unique").on(
+      table.id,
+      table.sourceId,
+      table.principalId
+    ),
     index("idx_processing_jobs_source_id").on(table.sourceId),
     index("idx_processing_jobs_principal_id").on(table.principalId),
     index("idx_processing_jobs_status").on(table.status),

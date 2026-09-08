@@ -15,6 +15,7 @@ import * as cex from "./CexTable.ts"
 import * as cexAccount from "./CexAccountTable.ts"
 import * as calculationRunCorrectionInputs from "./CalculationRunCorrectionInputsTable.ts"
 import * as calculationRunResults from "./CalculationRunResultsTables.ts"
+import * as calculationSyncCoverage from "./CalculationSyncCoverageTables.ts"
 import * as calculationRuns from "./CalculationRunsTables.ts"
 import * as custodyUnits from "./CustodyUnitsTables.ts"
 import * as duneProtocolCandidateObservations from "./DuneProtocolCandidateObservationsTable.ts"
@@ -81,6 +82,7 @@ export const schema = {
   ...calculationRunCorrectionInputs,
   ...calculationRunResults,
   ...calculationRuns,
+  ...calculationSyncCoverage,
   ...custodyUnits,
   ...duneProtocolCandidateObservations,
   ...emailVerificationRequests,

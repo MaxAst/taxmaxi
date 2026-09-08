@@ -6,6 +6,7 @@
 
 import { SyncCreditReasonCode } from "@my/core/billing"
 import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm"
+import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
@@ -981,6 +982,15 @@ const make = Effect.gen(function* () {
     return db
       .transaction((tx) =>
         Effect.gen(function* () {
+          // Claims lock the source before changing job ownership; completion uses the same order.
+          yield* tx
+            .select({ id: schema.sources.id })
+            .from(schema.sources)
+            .innerJoin(schema.processingJobs, eq(schema.processingJobs.sourceId, schema.sources.id))
+            .where(eq(schema.processingJobs.id, jobId))
+            .for("update", { of: schema.sources })
+            .pipe(wrapSyncEngineSqlError("sourceSyncJobRepository.completeJob.lockSource"))
+
           const [job] = yield* tx
             .update(schema.processingJobs)
             .set({
@@ -1023,6 +1033,40 @@ const make = Effect.gen(function* () {
               reason: "Only processing jobs can complete.",
             })
           }
+
+          const currentYear = DateTime.toParts(
+            DateTime.setZoneNamedUnsafe(DateTime.makeUnsafe(completedAt), "Europe/Berlin")
+          ).year
+          const activeScopes = yield* tx
+            .select({ taxYear: schema.activeCalculationRuns.taxYear })
+            .from(schema.activeCalculationRuns)
+            .where(
+              and(
+                eq(schema.activeCalculationRuns.principalId, job.principalId),
+                eq(schema.activeCalculationRuns.jurisdiction, "DE"),
+                eq(schema.activeCalculationRuns.reportingCurrency, "EUR"),
+                isNotNull(schema.activeCalculationRuns.runId)
+              )
+            )
+            .pipe(wrapSyncEngineSqlError("sourceSyncJobRepository.completeJob.scopes"))
+          const taxYears = [
+            ...new Set([currentYear, ...activeScopes.map(({ taxYear }) => taxYear)]),
+          ]
+
+          yield* tx
+            .insert(schema.calculationSyncRequests)
+            .values(
+              taxYears.map((taxYear) => ({
+                principalId: job.principalId,
+                sourceId: job.sourceId,
+                sourceJobId: job.id,
+                jurisdiction: "DE",
+                taxYear,
+                reportingCurrency: "EUR",
+                requestedAt: completedAt,
+              }))
+            )
+            .pipe(wrapSyncEngineSqlError("sourceSyncJobRepository.completeJob.requests"))
 
           yield* materializeFollowUpJob({
             executor: tx,
