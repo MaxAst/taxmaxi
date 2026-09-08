@@ -5,6 +5,7 @@
  */
 
 import { DateTime, Effect, Layer } from "effect"
+import type { PrincipalId } from "@my/core/ownership"
 import type { PersistenceError } from "@my/persistence/errors"
 import { CalculationRunRepository } from "@my/persistence/services"
 import { CalculationRecomputeQueue } from "@my/sync-engine/services"
@@ -40,6 +41,7 @@ const loadConfig = Effect.gen(function* () {
 /** Outcome of one bounded durable calculation-maintenance pass. */
 export interface WorkerCalculationMaintenanceSummary {
   readonly failedStaleRuns: number
+  readonly nextAfterPrincipalId: PrincipalId | null
   readonly requestedRecomputes: number
   readonly failedRequests: number
 }
@@ -48,9 +50,11 @@ export interface WorkerCalculationMaintenanceSummary {
 export const runCalculationMaintenancePass = ({
   staleBefore,
   limit,
+  afterPrincipalId,
 }: {
   readonly staleBefore: Date
   readonly limit: number
+  readonly afterPrincipalId?: PrincipalId
 }): Effect.Effect<
   WorkerCalculationMaintenanceSummary,
   PersistenceError,
@@ -62,6 +66,7 @@ export const runCalculationMaintenancePass = ({
     const maintenance = yield* repository.settleStaleAndFindRecomputePrincipals({
       staleBefore,
       limit,
+      ...(afterPrincipalId === undefined ? {} : { afterPrincipalId }),
     })
     const requested = yield* Effect.forEach(
       maintenance.principalIds,
@@ -80,6 +85,7 @@ export const runCalculationMaintenancePass = ({
 
     return {
       failedStaleRuns: maintenance.failedStaleRuns,
+      nextAfterPrincipalId: maintenance.nextAfterPrincipalId,
       requestedRecomputes: requested.filter(Boolean).length,
       failedRequests: requested.filter((succeeded) => !succeeded).length,
     }
@@ -89,6 +95,7 @@ export const runCalculationMaintenancePass = ({
 export const WorkerCalculationMaintenanceLive = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* loadConfig
+    let afterPrincipalId: PrincipalId | undefined
 
     const runPass = Effect.gen(function* () {
       const currentTime = yield* DateTime.now
@@ -99,7 +106,9 @@ export const WorkerCalculationMaintenanceLive = Layer.effectDiscard(
       const summary = yield* runCalculationMaintenancePass({
         staleBefore,
         limit: config.batchSize,
+        ...(afterPrincipalId === undefined ? {} : { afterPrincipalId }),
       })
+      afterPrincipalId = summary.nextAfterPrincipalId ?? undefined
 
       yield* Effect.logInfo(
         { ...summary, staleBefore, batchSize: config.batchSize },

@@ -229,22 +229,44 @@ const make = Effect.gen(function* () {
 
   const recompute: CalculationRunServiceShape["recompute"] = (params) =>
     Effect.gen(function* () {
-      const snapshot = yield* loadSnapshot(params)
-
-      yield* calculationRunRepository.start({
-        id: params.id,
-        principalId: params.principalId,
-        jurisdiction: params.jurisdiction,
-        taxYear: params.taxYear,
-        reportingCurrency: params.reportingCurrency,
-        engineVersion: ACCOUNTING_ENGINE_VERSION,
-        ruleSetVersion: GERMAN_RULE_SET_VERSION,
-        inputLedgerRevision: snapshot.inputLedgerRevision,
-        valuationRevision: snapshot.valuationRevision,
-        custodyUnitMembership: snapshot.factualLedger.custodyUnitMembership,
-        correctionInputs: snapshot.factualLedger.correctionInputs,
-        syncCapture: snapshot.syncCapture,
-      })
+      const snapshot = yield* loadSnapshot(params).pipe(
+        Effect.flatMap((snapshot) =>
+          calculationRunRepository
+            .start({
+              id: params.id,
+              principalId: params.principalId,
+              jurisdiction: params.jurisdiction,
+              taxYear: params.taxYear,
+              reportingCurrency: params.reportingCurrency,
+              engineVersion: ACCOUNTING_ENGINE_VERSION,
+              ruleSetVersion: GERMAN_RULE_SET_VERSION,
+              inputLedgerRevision: snapshot.inputLedgerRevision,
+              valuationRevision: snapshot.valuationRevision,
+              custodyUnitMembership: snapshot.factualLedger.custodyUnitMembership,
+              correctionInputs: snapshot.factualLedger.correctionInputs,
+              syncCapture: snapshot.syncCapture,
+            })
+            .pipe(Effect.as(snapshot))
+        ),
+        Effect.onError((originalCause) =>
+          params.syncPreparation === undefined
+            ? Effect.void
+            : calculationRunRepository
+                .failSyncPreparation({
+                  ...params,
+                  preparation: params.syncPreparation,
+                  failureCode: CALCULATION_FAILED_CODE,
+                })
+                .pipe(
+                  Effect.catchCause((settlementCause) =>
+                    Effect.logError(
+                      { principalId: params.principalId, originalCause, settlementCause },
+                      "calculation-run-service:preparation-failure-settlement-failed"
+                    )
+                  )
+                )
+        )
+      )
 
       return yield* calculate({
         ledger: snapshot.factualLedger.events,

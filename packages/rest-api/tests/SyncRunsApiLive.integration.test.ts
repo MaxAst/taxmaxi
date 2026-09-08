@@ -174,6 +174,9 @@ const CalculationRunStatusFailureTestLive = Layer.succeed(
   CalculationRunRepository.of({
     fail: () => Effect.die("CalculationRunRepository test stub: fail"),
     getSyncStatus: () => Effect.die("unused getSyncStatus"),
+    observeSyncPreparation: () => Effect.die("unused observeSyncPreparation"),
+    failSyncPreparation: () => Effect.void,
+    listRequestedTaxYears: () => Effect.succeed([]),
     getLatestStatus: () =>
       Effect.fail(
         new PersistenceError({
@@ -469,6 +472,9 @@ describe("SyncRunsApiLive", () => {
             fail: repository.fail,
             getLatestStatus: repository.getLatestStatus,
             getSyncStatus: repository.getSyncStatus,
+            observeSyncPreparation: repository.observeSyncPreparation,
+            failSyncPreparation: repository.failSyncPreparation,
+            listRequestedTaxYears: repository.listRequestedTaxYears,
             listActiveTaxYears: repository.listActiveTaxYears,
             settleStaleAndFindRecomputePrincipals: repository.settleStaleAndFindRecomputePrincipals,
             persist: (params) =>

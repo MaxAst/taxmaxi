@@ -48,6 +48,12 @@ export const CalculationSyncAttemptId = Schema.String.check(Schema.isUUID()).pip
 /** Stable identity of one attempt at a completed-sync request. */
 export type CalculationSyncAttemptId = typeof CalculationSyncAttemptId.Type
 
+/** Exact queued or failed requests observed before calculation preparation starts. */
+export interface CalculationSyncPreparation {
+  readonly requestIds: ReadonlyArray<CalculationSyncRequestId>
+  readonly startedAt: Date
+}
+
 /** Exact request links read alongside the factual ledger; an empty array is explicit evidence. */
 export interface CalculationRunSyncCapture {
   readonly requestIds: ReadonlyArray<CalculationSyncRequestId>
@@ -208,12 +214,16 @@ export interface ListActiveCalculationRunTaxYearsParams {
 
 /** Input for one bounded calculation-maintenance pass. */
 export interface MaintainCalculationRunsParams {
+  /** Continue discovery after this principal; omit to start again. */
+  readonly afterPrincipalId?: PrincipalId
   readonly staleBefore: Date
   readonly limit: number
 }
 
 /** Durable work found by one calculation-maintenance pass. */
 export interface CalculationRunMaintenanceResult {
+  /** Next discovery cursor; null wraps the next pass to the beginning. */
+  readonly nextAfterPrincipalId: PrincipalId | null
   readonly failedStaleRuns: number
   readonly principalIds: ReadonlyArray<PrincipalId>
 }
@@ -275,6 +285,24 @@ export interface CalculationSyncStatus {
 
 /** Persistence contract for atomic, write-once calculation results. */
 export interface CalculationRunRepositoryShape {
+  /** Observe exact preparation inputs without claiming requests or writing attempts. */
+  readonly observeSyncPreparation: (
+    params: GetLatestCalculationRunStatusParams
+  ) => Effect.Effect<CalculationSyncPreparation, PersistenceError>
+
+  /** Record failed preparation only for observed requests still queued or failed in this scope. */
+  readonly failSyncPreparation: (
+    params: GetLatestCalculationRunStatusParams & {
+      readonly preparation: CalculationSyncPreparation
+      readonly failureCode: string
+    }
+  ) => Effect.Effect<void, PersistenceError>
+
+  /** List every durably accepted scope year, including previously succeeded work. */
+  readonly listRequestedTaxYears: (
+    params: ListActiveCalculationRunTaxYearsParams
+  ) => Effect.Effect<ReadonlyArray<TaxYear>, PersistenceError>
+
   /** Read all scope work and exact selected-job coverage without writing or enqueueing. */
   readonly getSyncStatus: (
     params: GetCalculationSyncStatusParams

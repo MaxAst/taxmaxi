@@ -243,49 +243,90 @@ const processJob = Effect.fn("worker.calculation.process", {
     "calculation-worker:job-started"
   )
 
-  yield* hydrateCoinGeckoDailyEurPrices(payload.principalId)
   const calculationRunRepository = yield* CalculationRunRepository
-  const currentTaxYear = yield* currentGermanTaxYear
-  const activeTaxYears = yield* calculationRunRepository.listActiveTaxYears({
+  const principalScope = {
     principalId: payload.principalId,
     jurisdiction: GERMAN_JURISDICTION,
     reportingCurrency: EUR,
-  })
-  const taxYears = [...new Set([...activeTaxYears, currentTaxYear])].sort(
-    (left, right) => left - right
-  )
-  const results = yield* Effect.forEach(
-    taxYears,
-    (taxYear) => {
-      const runId = CalculationRunId.make(randomUUID())
-
-      return calculationRunService
-        .recompute({
-          id: runId,
-          principalId: payload.principalId,
-          jurisdiction: GERMAN_JURISDICTION,
-          taxYear,
-          reportingCurrency: EUR,
-          accountingChoices: [],
+  }
+  const requestedTaxYears = yield* calculationRunRepository.listRequestedTaxYears(principalScope)
+  // Observe preparation inputs without reserving work during slow price hydration.
+  const firstRequestedYear = requestedTaxYears[0]
+  const firstPreparation =
+    firstRequestedYear === undefined
+      ? undefined
+      : yield* calculationRunRepository.observeSyncPreparation({
+          ...principalScope,
+          taxYear: firstRequestedYear,
         })
-        .pipe(
-          Effect.tap((result) =>
-            Effect.logInfo(
-              {
-                queueName: CALCULATION_RECOMPUTE_QUEUE_NAME,
-                queueJobId: job.id ?? null,
-                workerId: config.workerId,
-                principalId: payload.principalId,
-                runId,
-                taxYear,
-                activated: result.activated,
-              },
-              "calculation-worker:tax-year-completed"
+  const initialHydration = yield* hydrateCoinGeckoDailyEurPrices(payload.principalId).pipe(
+    Effect.result
+  )
+  if (firstRequestedYear === undefined && Result.isFailure(initialHydration)) {
+    return yield* initialHydration.failure
+  }
+  const currentTaxYear = yield* currentGermanTaxYear
+  const activeTaxYears = yield* calculationRunRepository.listActiveTaxYears(principalScope)
+  const remainingYears = [...new Set([...requestedTaxYears, ...activeTaxYears, currentTaxYear])]
+    .filter((year) => year !== firstRequestedYear)
+    .sort((left, right) => left - right)
+  const taxYears =
+    firstRequestedYear === undefined ? remainingYears : [firstRequestedYear, ...remainingYears]
+  const outcomes = yield* Effect.forEach(
+    taxYears,
+    (taxYear) =>
+      Effect.gen(function* () {
+        const runId = CalculationRunId.make(randomUUID())
+        const syncPreparation =
+          taxYear === firstRequestedYear
+            ? firstPreparation
+            : yield* calculationRunRepository.observeSyncPreparation({ ...principalScope, taxYear })
+        // Stored quotes are reused; each scope observes inputs before its own preparation.
+        const hydration =
+          taxYear === taxYears[0]
+            ? initialHydration
+            : yield* hydrateCoinGeckoDailyEurPrices(payload.principalId).pipe(Effect.result)
+        if (Result.isFailure(hydration)) {
+          if (syncPreparation !== undefined)
+            yield* calculationRunRepository.failSyncPreparation({
+              ...principalScope,
+              taxYear,
+              preparation: syncPreparation,
+              failureCode: "calculation_price_hydration_failed",
+            })
+          return yield* hydration.failure
+        }
+        return yield* calculationRunService
+          .recompute({
+            id: runId,
+            ...principalScope,
+            taxYear,
+            accountingChoices: [],
+            ...(syncPreparation === undefined ? {} : { syncPreparation }),
+          })
+          .pipe(
+            Effect.tap((result) =>
+              Effect.logInfo(
+                {
+                  queueName: CALCULATION_RECOMPUTE_QUEUE_NAME,
+                  queueJobId: job.id ?? null,
+                  workerId: config.workerId,
+                  principalId: payload.principalId,
+                  runId,
+                  taxYear,
+                  activated: result.activated,
+                },
+                "calculation-worker:tax-year-completed"
+              )
             )
           )
-        )
-    },
+      }).pipe(Effect.result),
     { concurrency: 1 }
+  )
+  const failure = outcomes.find(Result.isFailure)
+  if (failure !== undefined) return yield* failure.failure
+  const results = outcomes.flatMap((outcome) =>
+    Result.isSuccess(outcome) ? [outcome.success] : []
   )
 
   yield* Effect.logInfo(
