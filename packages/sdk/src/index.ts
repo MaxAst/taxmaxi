@@ -202,6 +202,9 @@ export type {
 export type {
   PortfolioAssets,
   PortfolioAssetsInput,
+  PortfolioCalculationStatus,
+  PortfolioCalculationStatusInput,
+  PortfolioCalculationStatusError,
   PortfolioEffectResource,
   PortfolioPromiseResource,
 } from "./portfolio/index.ts"
