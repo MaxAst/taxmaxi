@@ -36,6 +36,7 @@ import type {
   EmailVerificationCodeMismatchError,
   EmailVerificationRequestExpiredError,
   EmailVerificationRequestNotFoundError,
+  EmailVerificationResendLimitedError,
   InvalidCredentialsError,
   UnverifiedEmailError,
   UserNotFoundError,
@@ -159,7 +160,9 @@ export interface AuthServiceShape {
    * Start or reuse a pending email verification flow for a local user
    *
    * Creates a verification request when none exists, or reuses the latest
-   * still-active request for the user.
+   * still-active request for the user. The code is sent again unless the
+   * last send was inside the resend cooldown; inside it, the request is
+   * returned and nothing is sent.
    *
    * @param user - The local user who must verify their email
    * @returns Effect containing the active verification request
@@ -174,14 +177,17 @@ export interface AuthServiceShape {
    *
    * @param requestId - The existing verification request identifier
    * @returns Effect containing the refreshed verification request
-   * @errors EmailVerificationRequestNotFoundError - Verification flow no longer exists
+   * @errors EmailVerificationRequestNotFoundError - Verification flow no longer exists or has expired
+   * @errors EmailVerificationResendLimitedError - Resend is inside the cooldown or the lineage has used all its sends
    * @errors AuthProcessingError - Failed to create the refreshed verification request
    */
   readonly resendEmailVerification: (
     requestId: EmailVerificationRequestId
   ) => Effect.Effect<
     EmailVerificationRequest,
-    EmailVerificationRequestNotFoundError | AuthProcessingError
+    | EmailVerificationRequestNotFoundError
+    | EmailVerificationResendLimitedError
+    | AuthProcessingError
   >
 
   /**
@@ -419,6 +425,7 @@ export type EmailVerificationError =
   | EmailVerificationRequestNotFoundError
   | EmailVerificationCodeMismatchError
   | EmailVerificationRequestExpiredError
+  | EmailVerificationResendLimitedError
   | UserNotFoundError
   | AuthProcessingError
 

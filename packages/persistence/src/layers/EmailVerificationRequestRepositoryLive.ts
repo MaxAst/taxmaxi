@@ -25,8 +25,11 @@ import {
   type EmailVerificationRequest as EmailVerificationRequestRow,
 } from "../schema/EmailVerificationRequestsTable.ts"
 import {
+  type EmailVerificationCooldown,
   EmailVerificationRequestRepository,
+  type EmailVerificationRequestRenewalOutcome,
   type EmailVerificationRequestRepositoryService,
+  type EmailVerificationRequestStartOutcome,
 } from "../services/EmailVerificationRequestRepository.ts"
 import { drizzle } from "./PgClientLive.ts"
 
@@ -63,6 +66,28 @@ const rowToEmailVerificationRequest = (
       updatedAt: Timestamp.make({ epochMillis: row.updatedAt.getTime() }),
     })
   )
+}
+
+/**
+ * The `cooldown` outcome for a stored request whose recorded last send is
+ * younger than `cooldownMillis` as of the send time taken inside the lock,
+ * or undefined when the cooldown has passed. The decision reads the stored
+ * `lastSentAt` and nothing else.
+ */
+const cooldownOutcome = ({
+  request,
+  now,
+  cooldownMillis,
+}: {
+  readonly request: EmailVerificationRequest
+  readonly now: Date
+  readonly cooldownMillis: number
+}): EmailVerificationCooldown | undefined => {
+  const sinceLastSend = now.getTime() - request.lastSentAt.epochMillis
+
+  return sinceLastSend < cooldownMillis
+    ? { _tag: "cooldown", request, retryAfterMillis: cooldownMillis - sinceLastSend }
+    : undefined
 }
 
 const make = Effect.gen(function* () {
@@ -145,10 +170,11 @@ const make = Effect.gen(function* () {
           yield* lockUserRequests({ executor: tx, userId: start.userId })
 
           // The send time is taken after the lock, so it is later than the
-          // previous holder's write and decides "active" as of this send.
+          // previous holder's write and decides "active" and the cooldown as
+          // of this send.
           const now = yield* DateTime.nowAsDate
           const [active] = yield* tx
-            .select({ id: emailVerificationRequests.id })
+            .select(selectFields)
             .from(emailVerificationRequests)
             .where(
               and(
@@ -158,8 +184,21 @@ const make = Effect.gen(function* () {
             )
             .orderBy(desc(emailVerificationRequests.createdAt))
             .limit(1)
+          const stored = Option.fromNullishOr(active).pipe(
+            Option.flatMap((value) => rowToEmailVerificationRequest(value))
+          )
 
-          if (active !== undefined) {
+          if (active !== undefined && Option.isSome(stored)) {
+            const cooldown = cooldownOutcome({
+              request: stored.value,
+              now,
+              cooldownMillis: start.cooldownMillis,
+            })
+
+            if (cooldown !== undefined) {
+              return cooldown
+            }
+
             const [reused] = yield* tx
               .update(emailVerificationRequests)
               .set({
@@ -176,7 +215,10 @@ const make = Effect.gen(function* () {
             // user lock, so the row selected above is still here. The Option
             // only covers the row mapping's nullable user column.
             if (Option.isSome(request)) {
-              return request.value
+              return {
+                _tag: "sent",
+                request: request.value,
+              } satisfies EmailVerificationRequestStartOutcome
             }
           }
 
@@ -201,17 +243,20 @@ const make = Effect.gen(function* () {
             updatedAt: now,
           })
 
-          return EmailVerificationRequest.make({
-            id: start.id,
-            userId: start.userId,
-            email: start.email,
-            code: start.code,
-            expiresAt,
-            sendCount: 1,
-            lastSentAt: sentAt,
-            createdAt: sentAt,
-            updatedAt: sentAt,
-          })
+          return {
+            _tag: "sent",
+            request: EmailVerificationRequest.make({
+              id: start.id,
+              userId: start.userId,
+              email: start.email,
+              code: start.code,
+              expiresAt,
+              sendCount: 1,
+              lastSentAt: sentAt,
+              createdAt: sentAt,
+              updatedAt: sentAt,
+            }),
+          } satisfies EmailVerificationRequestStartOutcome
         })
       )
       .pipe(wrapSqlError("startOrReuse"))
@@ -230,7 +275,7 @@ const make = Effect.gen(function* () {
             .limit(1)
 
           if (owner === undefined || owner.userId === null) {
-            return Option.none()
+            return { _tag: "missing" } satisfies EmailVerificationRequestRenewalOutcome
           }
 
           yield* lockUserRequests({ executor: tx, userId: AuthUserId.make(owner.userId) })
@@ -240,14 +285,47 @@ const make = Effect.gen(function* () {
             .from(emailVerificationRequests)
             .where(eq(emailVerificationRequests.id, renewal.id))
             .limit(1)
+          const stored = Option.fromNullishOr(locked).pipe(
+            Option.flatMap((value) => rowToEmailVerificationRequest(value))
+          )
 
-          if (locked === undefined || locked.userId === null) {
-            return Option.none()
+          if (locked === undefined || locked.userId === null || Option.isNone(stored)) {
+            return { _tag: "missing" } satisfies EmailVerificationRequestRenewalOutcome
           }
 
-          // Taken after the lock, like in `startOrReuse`, and the expiry
-          // counts from it.
+          // Taken after the lock, like in `startOrReuse`; the rule below and
+          // the expiry both count from it.
           const now = yield* DateTime.nowAsDate
+
+          // An expired request ends its lineage: it is not renewed, and the
+          // next unverified login starts a fresh one through `startOrReuse`.
+          if (locked.expiresAt.getTime() <= now.getTime()) {
+            return { _tag: "missing" } satisfies EmailVerificationRequestRenewalOutcome
+          }
+
+          // The cap and the cooldown are decided here, under the same lock
+          // that writes the send facts, so two resends cannot both pass them.
+          // The cap comes first: a lineage that has used all its sends waits
+          // until the request expires, whether or not its last send is still
+          // inside the cooldown.
+          if (locked.sendCount >= renewal.maxSendCount) {
+            return {
+              _tag: "capped",
+              request: stored.value,
+              retryAfterMillis: locked.expiresAt.getTime() - now.getTime(),
+            } satisfies EmailVerificationRequestRenewalOutcome
+          }
+
+          const cooldown = cooldownOutcome({
+            request: stored.value,
+            now,
+            cooldownMillis: renewal.cooldownMillis,
+          })
+
+          if (cooldown !== undefined) {
+            return cooldown
+          }
+
           const sentAt = Timestamp.make({ epochMillis: now.getTime() })
           const expiresAt = addMillis(sentAt, renewal.lifetimeMillis)
           const sendCount = locked.sendCount + 1
@@ -268,8 +346,9 @@ const make = Effect.gen(function* () {
             .delete(emailVerificationRequests)
             .where(eq(emailVerificationRequests.id, renewal.id))
 
-          return Option.some(
-            EmailVerificationRequest.make({
+          return {
+            _tag: "sent",
+            request: EmailVerificationRequest.make({
               id: renewal.replacementId,
               userId: AuthUserId.make(locked.userId),
               email: Email.make(locked.email),
@@ -279,8 +358,8 @@ const make = Effect.gen(function* () {
               lastSentAt: sentAt,
               createdAt: sentAt,
               updatedAt: sentAt,
-            })
-          )
+            }),
+          } satisfies EmailVerificationRequestRenewalOutcome
         })
       )
       .pipe(wrapSqlError("renew"))

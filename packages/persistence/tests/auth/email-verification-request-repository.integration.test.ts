@@ -25,6 +25,8 @@ const TEST_FIRST_USER_ID = AuthUserId.make("00000000-4000-4000-8000-000000000701
 const TEST_SECOND_USER_ID = AuthUserId.make("00000000-4000-4000-8000-000000000702")
 const TEST_FIRST_SENT_AT = Timestamp.Timestamp.make({ epochMillis: 1_757_300_000_000 })
 const TEST_LIFETIME_MILLIS = 10 * 60 * 1000
+const TEST_COOLDOWN_MILLIS = 60 * 1000
+const TEST_MAX_SEND_COUNT = 5
 
 const runRepository = <A, E>(effect: Effect.Effect<A, E, EmailVerificationRequestRepository>) =>
   Effect.runPromise(
@@ -210,7 +212,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
         )
       )
 
-      const reused = yield* Effect.promise(() =>
+      const started = yield* Effect.promise(() =>
         runRepository(
           Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
             repository.startOrReuse({
@@ -219,11 +221,15 @@ describe("EmailVerificationRequestRepositoryLive", () => {
               email: Email.make("verification-one@example.com"),
               code: EmailVerificationCode.make("REUSE002"),
               lifetimeMillis: TEST_LIFETIME_MILLIS,
+              cooldownMillis: TEST_COOLDOWN_MILLIS,
             })
           )
         )
       )
       const afterReuseMillis = Timestamp.now().epochMillis
+      // The seeded send is long past the cooldown, so the reuse sends.
+      expect(started._tag).toBe("sent")
+      const reused = started.request
       expect(reused.id).toBe(activeRequestId)
       expect(reused.code).toBe(EmailVerificationCode.make("REUSE001"))
       expect(reused.sendCount).toBe(1)
@@ -280,7 +286,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
       // wrong by the time it holds the lock: the row is expired by then.
       yield* Effect.sleep("100 millis")
 
-      const fresh = yield* Effect.promise(() =>
+      const started = yield* Effect.promise(() =>
         runRepository(
           Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
             repository.startOrReuse({
@@ -289,10 +295,15 @@ describe("EmailVerificationRequestRepositoryLive", () => {
               email: Email.make("verification-one@example.com"),
               code: EmailVerificationCode.make("REUSE003"),
               lifetimeMillis: TEST_LIFETIME_MILLIS,
+              cooldownMillis: TEST_COOLDOWN_MILLIS,
             })
           )
         )
       )
+      // The expired row was seeded with a send just now, but an expired row
+      // is not reused, so its cooldown does not apply to the fresh request.
+      expect(started._tag).toBe("sent")
+      const fresh = started.request
       expect(fresh.id).toBe(freshRequestId)
       expect(fresh.code).toBe(EmailVerificationCode.make("REUSE003"))
       expect(fresh.sendCount).toBe(1)
@@ -306,7 +317,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
     })
   )
 
-  it.effect("keeps one row with the renewed count when a start races a renewal", () =>
+  it.effect("lets only the first writer send when a start races a renewal", () =>
     Effect.gen(function* () {
       const requestId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000751")
       const replacementId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000752")
@@ -340,6 +351,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                   email: Email.make("verification-one@example.com"),
                   code: EmailVerificationCode.make("MIXED002"),
                   lifetimeMillis: TEST_LIFETIME_MILLIS,
+                  cooldownMillis: TEST_COOLDOWN_MILLIS,
                 })
               )
             )
@@ -352,6 +364,8 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                   replacementId,
                   code: EmailVerificationCode.make("MIXED003"),
                   lifetimeMillis: TEST_LIFETIME_MILLIS,
+                  cooldownMillis: TEST_COOLDOWN_MILLIS,
+                  maxSendCount: TEST_MAX_SEND_COUNT,
                 })
               )
             )
@@ -361,49 +375,62 @@ describe("EmailVerificationRequestRepositoryLive", () => {
       )
       const afterRaceMillis = Timestamp.now().epochMillis
 
-      // The renewal always finds its row: either it runs first, or the start
-      // reused that same row (a reuse never deletes it).
-      expect(Option.isSome(renewed)).toBe(true)
-      if (Option.isSome(renewed)) {
-        expect(renewed.value.id).toBe(replacementId)
-        expect(renewed.value.sendCount).toBe(2)
-        expect(renewed.value.lastSentAt.epochMillis).toBeGreaterThanOrEqual(now.epochMillis)
-        expect(renewed.value.lastSentAt.epochMillis).toBeLessThanOrEqual(afterRaceMillis)
-      }
-
-      // The start never created a fresh row: it reused either the original
-      // (ran first) or the replacement (ran second).
-      expect(started.sendCount).toBeGreaterThanOrEqual(1)
-      expect(started.sendCount).toBeLessThanOrEqual(2)
-      expect(started.id).not.toBe(unusedFreshId)
-      const startRanSecond = started.sendCount === 2
-      if (startRanSecond) {
-        expect(started.id).toBe(replacementId)
-        expect(started.code).toBe(EmailVerificationCode.make("MIXED003"))
-      } else {
-        expect(started.id).toBe(requestId)
-        expect(started.code).toBe(EmailVerificationCode.make("MIXED001"))
-      }
-      expect(started.lastSentAt.epochMillis).toBeGreaterThanOrEqual(now.epochMillis)
-      expect(started.lastSentAt.epochMillis).toBeLessThanOrEqual(afterRaceMillis)
-
+      // The seeded send is long past the cooldown, so whichever writer holds
+      // the lock first sends and writes `lastSentAt`. The second writer reads
+      // that write under the lock and lands inside the cooldown. Neither
+      // writer creates a fresh row.
       const rows = yield* Effect.promise(() => selectUserRows(TEST_FIRST_USER_ID))
       expect(rows).toHaveLength(1)
-      expect(rows[0]?.id).toBe(replacementId)
-      expect(rows[0]?.sendCount).toBe(2)
-      expect(rows.filter((row) => row.sendCount === 1)).toHaveLength(0)
-      // Each writer takes its send time inside the lock, so the stored value
-      // is the second writer's, which is the later of the two.
-      const renewedLastSentAtMillis = Option.isSome(renewed)
-        ? renewed.value.lastSentAt.epochMillis
-        : Number.NaN
-      expect(rows[0]?.lastSentAt.getTime()).toBe(
-        Math.max(started.lastSentAt.epochMillis, renewedLastSentAtMillis)
-      )
+      expect(started._tag === "sent" || renewed._tag === "sent").toBe(true)
+      expect(started._tag === "cooldown" || renewed._tag === "cooldown").toBe(true)
+
+      if (started._tag === "sent") {
+        expect(started.request.id).toBe(requestId)
+        expect(started.request.code).toBe(EmailVerificationCode.make("MIXED001"))
+        expect(started.request.sendCount).toBe(1)
+        expect(started.request.lastSentAt.epochMillis).toBeGreaterThanOrEqual(now.epochMillis)
+        expect(started.request.lastSentAt.epochMillis).toBeLessThanOrEqual(afterRaceMillis)
+
+        expect(renewed._tag).toBe("cooldown")
+        if (renewed._tag === "cooldown") {
+          expect(renewed.request.id).toBe(requestId)
+          expect(renewed.request.sendCount).toBe(1)
+          expect(renewed.request.lastSentAt.epochMillis).toBe(
+            started.request.lastSentAt.epochMillis
+          )
+          expect(renewed.retryAfterMillis).toBeGreaterThan(0)
+          expect(renewed.retryAfterMillis).toBeLessThanOrEqual(TEST_COOLDOWN_MILLIS)
+        }
+
+        expect(rows[0]?.id).toBe(requestId)
+        expect(rows[0]?.sendCount).toBe(1)
+        expect(rows[0]?.lastSentAt.getTime()).toBe(started.request.lastSentAt.epochMillis)
+      } else {
+        expect(renewed._tag).toBe("sent")
+        if (renewed._tag === "sent") {
+          expect(renewed.request.id).toBe(replacementId)
+          expect(renewed.request.sendCount).toBe(2)
+          expect(renewed.request.lastSentAt.epochMillis).toBeGreaterThanOrEqual(now.epochMillis)
+          expect(renewed.request.lastSentAt.epochMillis).toBeLessThanOrEqual(afterRaceMillis)
+
+          expect(started.request.id).toBe(replacementId)
+          expect(started.request.code).toBe(EmailVerificationCode.make("MIXED003"))
+          expect(started.request.sendCount).toBe(2)
+          expect(started.request.lastSentAt.epochMillis).toBe(
+            renewed.request.lastSentAt.epochMillis
+          )
+          expect(started.retryAfterMillis).toBeGreaterThan(0)
+          expect(started.retryAfterMillis).toBeLessThanOrEqual(TEST_COOLDOWN_MILLIS)
+
+          expect(rows[0]?.id).toBe(replacementId)
+          expect(rows[0]?.sendCount).toBe(2)
+          expect(rows[0]?.lastSentAt.getTime()).toBe(renewed.request.lastSentAt.epochMillis)
+        }
+      }
     })
   )
 
-  it.effect("starts one request when two starts race for the same user", () =>
+  it.effect("starts one request and sends once when two starts race for the same user", () =>
     Effect.gen(function* () {
       const firstFreshId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000761")
       const secondFreshId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000762")
@@ -424,12 +451,13 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                 email: Email.make("verification-one@example.com"),
                 code,
                 lifetimeMillis: TEST_LIFETIME_MILLIS,
+                cooldownMillis: TEST_COOLDOWN_MILLIS,
               })
             )
           )
         )
 
-      const [first, second] = yield* Effect.all(
+      const outcomes = yield* Effect.all(
         [
           startWith({ id: firstFreshId, code: EmailVerificationCode.make("TWIN0001") }),
           startWith({ id: secondFreshId, code: EmailVerificationCode.make("TWIN0002") }),
@@ -437,16 +465,200 @@ describe("EmailVerificationRequestRepositoryLive", () => {
         { concurrency: "unbounded" }
       )
 
-      expect(first.id).toBe(second.id)
-      expect(first.code).toBe(second.code)
-      expect(first.sendCount).toBe(1)
-      expect(second.sendCount).toBe(1)
-      expect([firstFreshId, secondFreshId]).toContain(first.id)
+      // The first writer inserts the fresh row and sends; the second reads
+      // that row under the lock and is inside its cooldown.
+      const sent = outcomes.filter((outcome) => outcome._tag === "sent")
+      const cooled = outcomes.filter((outcome) => outcome._tag === "cooldown")
+      expect(sent).toHaveLength(1)
+      expect(cooled).toHaveLength(1)
+
+      const [first, second] = outcomes
+      expect(first.request.id).toBe(second.request.id)
+      expect(first.request.code).toBe(second.request.code)
+      expect(first.request.sendCount).toBe(1)
+      expect(second.request.sendCount).toBe(1)
+      expect(first.request.lastSentAt.epochMillis).toBe(second.request.lastSentAt.epochMillis)
+      expect([firstFreshId, secondFreshId]).toContain(first.request.id)
+      const cooledOutcome = cooled[0]
+      if (cooledOutcome?._tag === "cooldown") {
+        expect(cooledOutcome.retryAfterMillis).toBeGreaterThan(0)
+        expect(cooledOutcome.retryAfterMillis).toBeLessThanOrEqual(TEST_COOLDOWN_MILLIS)
+      }
 
       const rows = yield* Effect.promise(() => selectUserRows(TEST_FIRST_USER_ID))
       expect(rows).toHaveLength(1)
-      expect(rows[0]?.id).toBe(first.id)
+      expect(rows[0]?.id).toBe(first.request.id)
       expect(rows[0]?.sendCount).toBe(1)
+    })
+  )
+
+  it.effect("refuses a renewal inside the cooldown and writes nothing", () =>
+    Effect.gen(function* () {
+      const requestId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000771")
+      const sentAt = Timestamp.now()
+
+      yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.create({
+              id: requestId,
+              userId: TEST_FIRST_USER_ID,
+              email: Email.make("verification-one@example.com"),
+              code: EmailVerificationCode.make("COOL0001"),
+              expiresAt: Timestamp.addMinutes(sentAt, 10),
+              sendCount: 2,
+              lastSentAt: sentAt,
+            })
+          )
+        )
+      )
+
+      const outcome = yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.renew({
+              id: requestId,
+              replacementId: EmailVerificationRequestId.make(
+                "00000000-4000-4000-8000-000000000772"
+              ),
+              code: EmailVerificationCode.make("COOL0002"),
+              lifetimeMillis: TEST_LIFETIME_MILLIS,
+              cooldownMillis: TEST_COOLDOWN_MILLIS,
+              maxSendCount: TEST_MAX_SEND_COUNT,
+            })
+          )
+        )
+      )
+      const afterMillis = Timestamp.now().epochMillis
+
+      expect(outcome._tag).toBe("cooldown")
+      if (outcome._tag === "cooldown") {
+        expect(outcome.request.id).toBe(requestId)
+        expect(outcome.request.code).toBe(EmailVerificationCode.make("COOL0001"))
+        expect(outcome.request.sendCount).toBe(2)
+        expect(outcome.request.lastSentAt.epochMillis).toBe(sentAt.epochMillis)
+        // The rest of the cooldown, measured from the stored send time.
+        expect(outcome.retryAfterMillis).toBeGreaterThanOrEqual(
+          TEST_COOLDOWN_MILLIS - (afterMillis - sentAt.epochMillis)
+        )
+        expect(outcome.retryAfterMillis).toBeLessThanOrEqual(TEST_COOLDOWN_MILLIS)
+      }
+
+      const rows = yield* Effect.promise(() => selectUserRows(TEST_FIRST_USER_ID))
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.id).toBe(requestId)
+      expect(rows[0]?.sendCount).toBe(2)
+      expect(rows[0]?.lastSentAt.getTime()).toBe(sentAt.epochMillis)
+    })
+  )
+
+  it.effect("refuses a renewal after the last allowed send until the request expires", () =>
+    Effect.gen(function* () {
+      const requestId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000781")
+      const expiresAt = Timestamp.addMinutes(Timestamp.now(), 7)
+      // The last send is just now, so the cooldown would also refuse; the cap
+      // must decide first and report the wait until expiry.
+      const lastSentAt = Timestamp.now()
+
+      yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.create({
+              id: requestId,
+              userId: TEST_FIRST_USER_ID,
+              email: Email.make("verification-one@example.com"),
+              code: EmailVerificationCode.make("CAP00001"),
+              expiresAt,
+              sendCount: TEST_MAX_SEND_COUNT,
+              lastSentAt,
+            })
+          )
+        )
+      )
+
+      const beforeMillis = Timestamp.now().epochMillis
+      const outcome = yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.renew({
+              id: requestId,
+              replacementId: EmailVerificationRequestId.make(
+                "00000000-4000-4000-8000-000000000782"
+              ),
+              code: EmailVerificationCode.make("CAP00002"),
+              lifetimeMillis: TEST_LIFETIME_MILLIS,
+              cooldownMillis: TEST_COOLDOWN_MILLIS,
+              maxSendCount: TEST_MAX_SEND_COUNT,
+            })
+          )
+        )
+      )
+      const afterMillis = Timestamp.now().epochMillis
+
+      // The cap is what refuses, not the cooldown; the wait is the time until
+      // the request expires, well past the rest of the cooldown.
+      expect(outcome._tag).toBe("capped")
+      if (outcome._tag === "capped") {
+        expect(outcome.request.id).toBe(requestId)
+        expect(outcome.request.sendCount).toBe(TEST_MAX_SEND_COUNT)
+        expect(outcome.retryAfterMillis).toBeGreaterThan(TEST_COOLDOWN_MILLIS)
+        expect(outcome.retryAfterMillis).toBeGreaterThanOrEqual(expiresAt.epochMillis - afterMillis)
+        expect(outcome.retryAfterMillis).toBeLessThanOrEqual(expiresAt.epochMillis - beforeMillis)
+      }
+
+      const rows = yield* Effect.promise(() => selectUserRows(TEST_FIRST_USER_ID))
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.id).toBe(requestId)
+      expect(rows[0]?.sendCount).toBe(TEST_MAX_SEND_COUNT)
+      expect(rows[0]?.lastSentAt.getTime()).toBe(lastSentAt.epochMillis)
+    })
+  )
+
+  it.effect("treats an expired request as gone on renewal and writes nothing", () =>
+    Effect.gen(function* () {
+      const requestId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000791")
+
+      yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.create({
+              id: requestId,
+              userId: TEST_FIRST_USER_ID,
+              email: Email.make("verification-one@example.com"),
+              code: EmailVerificationCode.make("GONE0001"),
+              expiresAt: Timestamp.addMillis(Timestamp.now(), -1000),
+              sendCount: TEST_MAX_SEND_COUNT,
+              lastSentAt: TEST_FIRST_SENT_AT,
+            })
+          )
+        )
+      )
+
+      const outcome = yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.renew({
+              id: requestId,
+              replacementId: EmailVerificationRequestId.make(
+                "00000000-4000-4000-8000-000000000792"
+              ),
+              code: EmailVerificationCode.make("GONE0002"),
+              lifetimeMillis: TEST_LIFETIME_MILLIS,
+              cooldownMillis: TEST_COOLDOWN_MILLIS,
+              maxSendCount: TEST_MAX_SEND_COUNT,
+            })
+          )
+        )
+      )
+
+      // An expired request is not renewed; the row is left for the next
+      // start to discard.
+      expect(outcome._tag).toBe("missing")
+
+      const rows = yield* Effect.promise(() => selectUserRows(TEST_FIRST_USER_ID))
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.id).toBe(requestId)
+      expect(rows[0]?.sendCount).toBe(TEST_MAX_SEND_COUNT)
     })
   )
 
@@ -492,6 +704,8 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                 replacementId,
                 code,
                 lifetimeMillis: TEST_LIFETIME_MILLIS,
+                cooldownMillis: TEST_COOLDOWN_MILLIS,
+                maxSendCount: TEST_MAX_SEND_COUNT,
               })
             )
           )
@@ -512,18 +726,20 @@ describe("EmailVerificationRequestRepositoryLive", () => {
       )
       const afterRaceMillis = Timestamp.now().epochMillis
 
-      const renewed = outcomes.filter(Option.isSome)
+      // Both renewals name the same id. The first replaces that row; the
+      // second re-reads it under the lock and finds it gone.
+      const renewed = outcomes.filter((outcome) => outcome._tag === "sent")
       expect(renewed).toHaveLength(1)
-      expect(outcomes.filter(Option.isNone)).toHaveLength(1)
+      expect(outcomes.filter((outcome) => outcome._tag === "missing")).toHaveLength(1)
 
       const winner = renewed[0]
       expect(winner).toBeDefined()
-      if (winner !== undefined) {
-        expect([firstReplacementId, secondReplacementId]).toContain(winner.value.id)
-        expect(winner.value.userId).toBe(TEST_FIRST_USER_ID)
-        expect(winner.value.sendCount).toBe(2)
-        expect(winner.value.lastSentAt.epochMillis).toBeGreaterThanOrEqual(now.epochMillis)
-        expect(winner.value.lastSentAt.epochMillis).toBeLessThanOrEqual(afterRaceMillis)
+      if (winner !== undefined && winner._tag === "sent") {
+        expect([firstReplacementId, secondReplacementId]).toContain(winner.request.id)
+        expect(winner.request.userId).toBe(TEST_FIRST_USER_ID)
+        expect(winner.request.sendCount).toBe(2)
+        expect(winner.request.lastSentAt.epochMillis).toBeGreaterThanOrEqual(now.epochMillis)
+        expect(winner.request.lastSentAt.epochMillis).toBeLessThanOrEqual(afterRaceMillis)
       }
 
       const replacedRequest = yield* Effect.promise(() =>
@@ -537,7 +753,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
 
       const activeRows = yield* Effect.promise(() => selectUserRows(TEST_FIRST_USER_ID))
       expect(activeRows).toHaveLength(1)
-      expect(activeRows[0]?.id).toBe(winner?.value.id)
+      expect(activeRows[0]?.id).toBe(winner?._tag === "sent" ? winner.request.id : undefined)
       expect(activeRows[0]?.sendCount).toBe(2)
 
       const renewedAgainAfterGone = yield* Effect.promise(() =>
@@ -550,11 +766,13 @@ describe("EmailVerificationRequestRepositoryLive", () => {
               ),
               code: EmailVerificationCode.make("RACE0004"),
               lifetimeMillis: TEST_LIFETIME_MILLIS,
+              cooldownMillis: TEST_COOLDOWN_MILLIS,
+              maxSendCount: TEST_MAX_SEND_COUNT,
             })
           )
         )
       )
-      expect(Option.isNone(renewedAgainAfterGone)).toBe(true)
+      expect(renewedAgainAfterGone._tag).toBe("missing")
     })
   )
 

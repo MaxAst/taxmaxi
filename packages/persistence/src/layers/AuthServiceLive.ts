@@ -58,6 +58,7 @@ import {
   EmailVerificationCodeMismatchError,
   EmailVerificationRequestExpiredError,
   EmailVerificationRequestNotFoundError,
+  EmailVerificationResendLimitedError,
   ProviderNotEnabledError,
   ProviderAuthFailedError,
   UserNotFoundError,
@@ -74,7 +75,11 @@ import {
 import { isPersistenceError } from "../errors/RepositoryError.ts"
 import { UserRepository } from "../services/UserRepository.ts"
 import { EmailVerificationDeliveryService } from "../services/EmailVerificationDeliveryService.ts"
-import { EmailVerificationRequestRepository } from "../services/EmailVerificationRequestRepository.ts"
+import {
+  EmailVerificationRequestRepository,
+  type EmailVerificationRequestRenewalOutcome,
+  type EmailVerificationRequestStartOutcome,
+} from "../services/EmailVerificationRequestRepository.ts"
 import { IdentityRepository } from "../services/IdentityRepository.ts"
 import { SessionRepository } from "../services/SessionRepository.ts"
 import { OAuthStateStore } from "../services/OAuthStateStore.ts"
@@ -83,6 +88,10 @@ import { PrincipalRepository } from "../services/PrincipalRepository.ts"
 
 const OAUTH_STATE_TTL_MILLIS = 10 * 60 * 1000
 const EMAIL_VERIFICATION_TTL_MILLIS = 10 * 60 * 1000
+/** Resend rule: least time between two sends of one verification request. */
+const EMAIL_VERIFICATION_RESEND_COOLDOWN_MILLIS = 60 * 1000
+/** Resend rule: most sends one verification request lineage may have. */
+const EMAIL_VERIFICATION_MAX_SEND_COUNT = 5
 const EMAIL_VERIFICATION_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 /**
@@ -749,10 +758,11 @@ const make = Effect.gen(function* () {
   /**
    * Reuse the user's active request or start a fresh one. The repository does
    * both under the user's write lock and takes the send time inside it: an
-   * active request gets `lastSentAt` set to that time and keeps its
-   * `sendCount`; otherwise a fresh request is written with `sendCount` 1 and
-   * an expiry counted from that same time. The caller hands the returned code
-   * to delivery.
+   * active request outside the cooldown gets `lastSentAt` set to that time
+   * and keeps its `sendCount` (`sent`); one inside the cooldown is returned
+   * untouched (`cooldown`); otherwise a fresh request is written with
+   * `sendCount` 1 and an expiry counted from that same time (`sent`). The
+   * caller hands the code to delivery only on `sent`.
    */
   const startOrReuseEmailVerificationRequest = ({
     userId,
@@ -760,7 +770,7 @@ const make = Effect.gen(function* () {
   }: {
     readonly userId: AuthUserId
     readonly email: AuthUser["email"]
-  }): Effect.Effect<EmailVerificationRequest, AuthProcessingError> =>
+  }): Effect.Effect<EmailVerificationRequestStartOutcome, AuthProcessingError> =>
     Effect.gen(function* () {
       const { id, code } = yield* generateEmailVerificationIdAndCode
 
@@ -771,20 +781,22 @@ const make = Effect.gen(function* () {
           email: sanitizeEmail(email),
           code,
           lifetimeMillis: EMAIL_VERIFICATION_TTL_MILLIS,
+          cooldownMillis: EMAIL_VERIFICATION_RESEND_COOLDOWN_MILLIS,
         })
         .pipe(Effect.mapError((cause) => authProcessingError("start-email-verification", cause)))
     })
 
   /**
-   * Replace a request with a fresh code. The repository advances `sendCount`
-   * under the user's write lock, so concurrent writers cannot undercount. None means the
-   * request is gone (verified, expired and cleaned, or already replaced).
+   * Replace a request with a fresh code. The repository checks the cooldown
+   * and the send cap and advances `sendCount` under the user's write lock, so
+   * two concurrent resends cannot both pass the rule or undercount. `missing`
+   * means the request is gone (verified, expired, or already replaced).
    */
   const renewEmailVerificationRequest = ({
     requestId,
   }: {
     readonly requestId: EmailVerificationRequestId
-  }): Effect.Effect<Option.Option<EmailVerificationRequest>, AuthProcessingError> =>
+  }): Effect.Effect<EmailVerificationRequestRenewalOutcome, AuthProcessingError> =>
     Effect.gen(function* () {
       const { id, code } = yield* generateEmailVerificationIdAndCode
 
@@ -794,9 +806,19 @@ const make = Effect.gen(function* () {
           replacementId: id,
           code,
           lifetimeMillis: EMAIL_VERIFICATION_TTL_MILLIS,
+          cooldownMillis: EMAIL_VERIFICATION_RESEND_COOLDOWN_MILLIS,
+          maxSendCount: EMAIL_VERIFICATION_MAX_SEND_COUNT,
         })
         .pipe(Effect.mapError((cause) => authProcessingError("renew-email-verification", cause)))
     })
+
+  /**
+   * Whole seconds a client must wait, rounded up so a wait of any part of a
+   * second is never reported as zero. The repository only reports a positive
+   * wait, so the result is at least 1.
+   */
+  const toRetryAfterSeconds = (retryAfterMillis: number): number =>
+    Math.ceil(retryAfterMillis / 1000)
 
   const sendEmailVerificationRequest = ({
     request,
@@ -946,40 +968,56 @@ const make = Effect.gen(function* () {
       }),
 
     /**
-     * Start or reuse an email verification flow for a local user
+     * Start or reuse an email verification flow for a local user. Inside the
+     * cooldown the active request is returned and no code is sent.
      */
     startEmailVerification: (user) =>
       Effect.gen(function* () {
-        const verificationRequest = yield* startOrReuseEmailVerificationRequest({
+        const outcome = yield* startOrReuseEmailVerificationRequest({
           userId: user.id,
           email: user.email,
         })
 
-        yield* sendEmailVerificationRequest({
-          request: verificationRequest,
-          operation: "send-email-verification",
-        })
-
-        return verificationRequest
-      }),
-
-    /**
-     * Replace the pending email verification flow with a fresh code
-     */
-    resendEmailVerification: (requestId) =>
-      Effect.gen(function* () {
-        const renewedRequest = yield* renewEmailVerificationRequest({ requestId })
-
-        if (Option.isNone(renewedRequest)) {
-          return yield* new EmailVerificationRequestNotFoundError({ requestId })
+        if (outcome._tag === "cooldown") {
+          yield* Effect.logInfo(
+            { userId: user.id, requestId: outcome.request.id },
+            "Skipped the verification re-send inside the cooldown"
+          )
+          return outcome.request
         }
 
         yield* sendEmailVerificationRequest({
-          request: renewedRequest.value,
-          operation: "resend-email-verification",
+          request: outcome.request,
+          operation: "send-email-verification",
         })
 
-        return renewedRequest.value
+        return outcome.request
+      }),
+
+    /**
+     * Replace the pending email verification flow with a fresh code, unless
+     * the resend rule (cooldown or send cap) refuses it
+     */
+    resendEmailVerification: (requestId) =>
+      Effect.gen(function* () {
+        const outcome = yield* renewEmailVerificationRequest({ requestId })
+
+        switch (outcome._tag) {
+          case "missing":
+            return yield* new EmailVerificationRequestNotFoundError({ requestId })
+          case "cooldown":
+          case "capped":
+            return yield* new EmailVerificationResendLimitedError({
+              retryAfterSeconds: toRetryAfterSeconds(outcome.retryAfterMillis),
+            })
+          case "sent":
+            yield* sendEmailVerificationRequest({
+              request: outcome.request,
+              operation: "resend-email-verification",
+            })
+
+            return outcome.request
+        }
       }),
 
     /**

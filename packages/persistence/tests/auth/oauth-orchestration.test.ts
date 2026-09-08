@@ -36,7 +36,9 @@ import {
 } from "../../src/services/EmailVerificationDeliveryService.ts"
 import {
   EmailVerificationRequestRepository,
+  type EmailVerificationRequestRenewalOutcome,
   type EmailVerificationRequestRepositoryService,
+  type EmailVerificationRequestStartOutcome,
 } from "../../src/services/EmailVerificationRequestRepository.ts"
 import {
   IdentityRepository,
@@ -56,6 +58,8 @@ import {
   EmailVerificationCodeMismatchError,
   EmailVerificationRequestExpiredError,
   EmailVerificationRequestNotFoundError,
+  EmailVerificationResendLimitedError,
+  isEmailVerificationResendLimitedError,
   ProviderAuthFailedError,
 } from "@my/core/authentication/errors"
 
@@ -265,20 +269,33 @@ const makeEmailVerificationRequestRepo = (
     state.verificationRequests.set(verificationRequest.id, verificationRequest)
     return Effect.succeed(verificationRequest)
   },
-  startOrReuse: ({ id, userId, email, code, lifetimeMillis }) => {
+  startOrReuse: ({ id, userId, email, code, lifetimeMillis, cooldownMillis }) => {
     const now = Timestamp.now()
     const active = Array.from(state.verificationRequests.values()).find(
       (request) => request.userId === userId && request.expiresAt.epochMillis > now.epochMillis
     )
 
     if (active !== undefined) {
+      const sinceLastSend = now.epochMillis - active.lastSentAt.epochMillis
+
+      if (sinceLastSend < cooldownMillis) {
+        return Effect.succeed({
+          _tag: "cooldown",
+          request: active,
+          retryAfterMillis: cooldownMillis - sinceLastSend,
+        } satisfies EmailVerificationRequestStartOutcome)
+      }
+
       const reused = EmailVerificationRequest.make({
         ...active,
         lastSentAt: now,
         updatedAt: now,
       })
       state.verificationRequests.set(active.id, reused)
-      return Effect.succeed(reused)
+      return Effect.succeed({
+        _tag: "sent",
+        request: reused,
+      } satisfies EmailVerificationRequestStartOutcome)
     }
 
     for (const [existingId, existingRequest] of state.verificationRequests) {
@@ -299,15 +316,38 @@ const makeEmailVerificationRequestRepo = (
       updatedAt: now,
     })
     state.verificationRequests.set(id, fresh)
-    return Effect.succeed(fresh)
+    return Effect.succeed({
+      _tag: "sent",
+      request: fresh,
+    } satisfies EmailVerificationRequestStartOutcome)
   },
-  renew: ({ id, replacementId, code, lifetimeMillis }) => {
+  renew: ({ id, replacementId, code, lifetimeMillis, cooldownMillis, maxSendCount }) => {
     const existing = state.verificationRequests.get(id)
-    if (existing === undefined) {
-      return Effect.succeed(Option.none())
+    const now = Timestamp.now()
+
+    if (existing === undefined || existing.expiresAt.epochMillis <= now.epochMillis) {
+      return Effect.succeed({ _tag: "missing" } satisfies EmailVerificationRequestRenewalOutcome)
     }
 
-    const now = Timestamp.now()
+    // Same order as the live repository: the cap decides before the cooldown.
+    if (existing.sendCount >= maxSendCount) {
+      return Effect.succeed({
+        _tag: "capped",
+        request: existing,
+        retryAfterMillis: existing.expiresAt.epochMillis - now.epochMillis,
+      } satisfies EmailVerificationRequestRenewalOutcome)
+    }
+
+    const sinceLastSend = now.epochMillis - existing.lastSentAt.epochMillis
+
+    if (sinceLastSend < cooldownMillis) {
+      return Effect.succeed({
+        _tag: "cooldown",
+        request: existing,
+        retryAfterMillis: cooldownMillis - sinceLastSend,
+      } satisfies EmailVerificationRequestRenewalOutcome)
+    }
+
     const replacement = EmailVerificationRequest.make({
       id: replacementId,
       userId: existing.userId,
@@ -322,7 +362,10 @@ const makeEmailVerificationRequestRepo = (
 
     state.verificationRequests.delete(id)
     state.verificationRequests.set(replacementId, replacement)
-    return Effect.succeed(Option.some(replacement))
+    return Effect.succeed({
+      _tag: "sent",
+      request: replacement,
+    } satisfies EmailVerificationRequestRenewalOutcome)
   },
   findById: (id) => Effect.succeed(Option.fromNullishOr(state.verificationRequests.get(id))),
   findByUserId: (userId) =>
@@ -357,6 +400,28 @@ const makeEmailVerificationRequestRepo = (
 const makeEmailVerificationDeliveryService = (): EmailVerificationDeliveryServiceShape => ({
   sendVerificationCode: () => Effect.void,
 })
+
+/**
+ * Push a stored request's last send into the past so the resend rule lets
+ * the next send through without waiting for real time.
+ */
+const backdateLastSentAt = ({
+  harness,
+  request,
+  seconds,
+}: {
+  readonly harness: Harness
+  readonly request: EmailVerificationRequest
+  readonly seconds: number
+}) => {
+  harness.state.verificationRequests.set(
+    request.id,
+    EmailVerificationRequest.make({
+      ...request,
+      lastSentAt: Timestamp.addMillis(request.lastSentAt, -seconds * 1000),
+    })
+  )
+}
 
 const makeIdentityRepo = (state: HarnessState): IdentityRepositoryService => {
   const passwordHashes = new Map<string, HashedPassword>()
@@ -920,6 +985,9 @@ describe("AuthServiceLive OAuth orchestration", () => {
 
       expect(firstRequest.id).toBe(secondRequest.id)
       expect(firstRequest.code).toBe(secondRequest.code)
+      // The second start is inside the cooldown: no send, so the send time
+      // does not move.
+      expect(secondRequest.lastSentAt.epochMillis).toBe(firstRequest.lastSentAt.epochMillis)
       expect(harness.state.verificationRequests.size).toBe(1)
     })
   )
@@ -937,14 +1005,96 @@ describe("AuthServiceLive OAuth orchestration", () => {
       const originalRequest = yield* Effect.promise(() =>
         harness.runWithAuth((auth) => auth.startEmailVerification(user))
       )
+      backdateLastSentAt({ harness, request: originalRequest, seconds: 61 })
+
       const refreshedRequest = yield* Effect.promise(() =>
         harness.runWithAuth((auth) => auth.resendEmailVerification(originalRequest.id))
       )
 
       expect(refreshedRequest.id).not.toBe(originalRequest.id)
       expect(refreshedRequest.code).not.toBe(originalRequest.code)
+      expect(refreshedRequest.sendCount).toBe(originalRequest.sendCount + 1)
       expect(harness.state.verificationRequests.has(originalRequest.id)).toBe(false)
       expect(harness.state.verificationRequests.has(refreshedRequest.id)).toBe(true)
+    })
+  )
+
+  it.effect("resendEmailVerification inside the cooldown fails with the seconds left", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness([])
+
+      const user = yield* Effect.promise(() =>
+        harness.runWithAuth((auth) =>
+          auth.register(Email.make("owner@example.com"), "password123", "Owner")
+        )
+      )
+
+      const originalRequest = yield* Effect.promise(() =>
+        harness.runWithAuth((auth) => auth.startEmailVerification(user))
+      )
+      const result = yield* Effect.promise(() =>
+        harness.runWithAuthEither((auth) => auth.resendEmailVerification(originalRequest.id))
+      )
+
+      expect(Result.isFailure(result)).toBe(true)
+      if (Result.isFailure(result)) {
+        expect(result.failure).toBeInstanceOf(EmailVerificationResendLimitedError)
+        if (isEmailVerificationResendLimitedError(result.failure)) {
+          expect(result.failure.retryAfterSeconds).toBeGreaterThanOrEqual(1)
+          expect(result.failure.retryAfterSeconds).toBeLessThanOrEqual(60)
+        }
+      }
+      expect(harness.state.verificationRequests.get(originalRequest.id)).toEqual(originalRequest)
+      expect(harness.state.verificationRequests.size).toBe(1)
+    })
+  )
+
+  it.effect("resendEmailVerification after the fifth send fails until the request expires", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness([])
+
+      const user = yield* Effect.promise(() =>
+        harness.runWithAuth((auth) =>
+          auth.register(Email.make("owner@example.com"), "password123", "Owner")
+        )
+      )
+
+      const originalRequest = yield* Effect.promise(() =>
+        harness.runWithAuth((auth) => auth.startEmailVerification(user))
+      )
+      const expiresAt = Timestamp.addMinutes(Timestamp.now(), 5)
+      // The last send is just now (inside the cooldown); the cap still decides
+      // and the wait is until expiry, not the rest of the cooldown.
+      const cappedRequest = EmailVerificationRequest.make({
+        ...originalRequest,
+        sendCount: 5,
+        lastSentAt: Timestamp.now(),
+        expiresAt,
+      })
+      harness.state.verificationRequests.set(originalRequest.id, cappedRequest)
+
+      const beforeMillis = Timestamp.now().epochMillis
+      const result = yield* Effect.promise(() =>
+        harness.runWithAuthEither((auth) => auth.resendEmailVerification(originalRequest.id))
+      )
+      const afterMillis = Timestamp.now().epochMillis
+
+      expect(Result.isFailure(result)).toBe(true)
+      if (Result.isFailure(result)) {
+        expect(result.failure).toBeInstanceOf(EmailVerificationResendLimitedError)
+        if (isEmailVerificationResendLimitedError(result.failure)) {
+          // Seconds until expiry, rounded up; never the cooldown remainder.
+          expect(result.failure.retryAfterSeconds).toBeGreaterThan(60)
+          expect(result.failure.retryAfterSeconds).toBeGreaterThanOrEqual(
+            Math.ceil((expiresAt.epochMillis - afterMillis) / 1000)
+          )
+          expect(result.failure.retryAfterSeconds).toBeLessThanOrEqual(
+            Math.ceil((expiresAt.epochMillis - beforeMillis) / 1000)
+          )
+        }
+      }
+      expect(harness.state.verificationRequests.get(originalRequest.id)).toEqual(cappedRequest)
+      expect(harness.state.verificationRequests.size).toBe(1)
     })
   )
 
