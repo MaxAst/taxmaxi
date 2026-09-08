@@ -225,7 +225,7 @@ const make = Effect.gen(function* () {
       )
 
       // Only recorded attempts identify other work invalidated by these deleted runs.
-      const requestsOnDeletedRuns = executor
+      const requestsOnDeletedRuns = yield* executor
         .select({ requestId: schema.calculationSyncAttempts.requestId })
         .from(schema.calculationSyncAttempts)
         .innerJoin(
@@ -234,10 +234,18 @@ const make = Effect.gen(function* () {
         )
         .where(eq(schema.calculationRuns.principalId, principalId))
 
-      yield* executor
-        .update(schema.calculationSyncRequests)
-        .set({ status: "queued" })
-        .where(inArray(schema.calculationSyncRequests.id, requestsOnDeletedRuns))
+      const requestIds = requestsOnDeletedRuns.map(({ requestId }) => requestId)
+      if (requestIds.length > 0) {
+        yield* executor
+          .update(schema.calculationSyncRequests)
+          .set({ status: "queued" })
+          .where(inArray(schema.calculationSyncRequests.id, requestIds))
+
+        // A retry without a run must not keep explicitly requeued work occupied.
+        yield* executor
+          .delete(schema.calculationSyncAttempts)
+          .where(inArray(schema.calculationSyncAttempts.requestId, requestIds))
+      }
 
       yield* executor
         .delete(schema.calculationRuns)

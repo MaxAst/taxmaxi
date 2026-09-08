@@ -62,12 +62,12 @@ export const calculationSyncRequests = pgTable(
       name: "calculation_sync_requests_job_owner_fk",
       columns: [table.sourceJobId, table.sourceId, table.principalId],
       foreignColumns: [processingJobs.id, processingJobs.sourceId, processingJobs.principalId],
-    }),
+    }).onDelete("cascade"),
     foreignKey({
       name: "calculation_sync_requests_source_owner_fk",
       columns: [table.sourceId, table.principalId],
       foreignColumns: [sources.id, sources.principalId],
-    }),
+    }).onDelete("cascade"),
     check("calculation_sync_requests_year_positive", sql`${table.taxYear} > 0`),
     index("idx_calculation_sync_requests_scope_status").on(
       table.principalId,

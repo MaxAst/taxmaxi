@@ -1,7 +1,7 @@
 {
   "version": "8",
   "dialect": "postgres",
-  "id": "81fb4257-060c-4b19-aea3-fe69ebb30992",
+  "id": "73ffb86f-f275-463e-b0ad-cdd041ccd863",
   "prevIds": ["53deea49-ba38-42ce-85aa-e3fad61d413a"],
   "ddl": [
     {
@@ -18402,7 +18402,7 @@
       "tableTo": "processing_jobs",
       "columnsTo": ["id", "source_id", "principal_id"],
       "onUpdate": "NO ACTION",
-      "onDelete": "NO ACTION",
+      "onDelete": "CASCADE",
       "name": "calculation_sync_requests_job_owner_fk",
       "entityType": "fks",
       "schema": "public",
@@ -18415,7 +18415,7 @@
       "tableTo": "sources",
       "columnsTo": ["id", "principal_id"],
       "onUpdate": "NO ACTION",
-      "onDelete": "NO ACTION",
+      "onDelete": "CASCADE",
       "name": "calculation_sync_requests_source_owner_fk",
       "entityType": "fks",
       "schema": "public",

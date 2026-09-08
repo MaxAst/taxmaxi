@@ -191,10 +191,16 @@ describe("PrincipalClaimRepositoryLive", () => {
               ...request,
               principalId:
                 request.sourceId === SOURCE_ID ? USER_PRINCIPAL_ID : ANONYMOUS_PRINCIPAL_ID,
-              status: "queued",
+              status: [workRequestId(5), workRequestId(6)].includes(request.id)
+                ? request.status
+                : "queued",
             }))
           )
-          expect(after.attempts).toEqual([])
+          expect(after.attempts).toEqual(
+            before.attempts.filter(({ requestId }) =>
+              [workRequestId(5), workRequestId(6)].includes(requestId)
+            )
+          )
           expect(after.captures).toEqual([])
           expect(after.links).toEqual([])
           expect(after.runs).toEqual(
@@ -405,12 +411,20 @@ const seedCalculationWork = () =>
         jurisdiction: "DE",
         reportingCurrency: "EUR",
       }
-      const states = ["queued", "running", "succeeded", "failed", "succeeded"] as const
+      const states = [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "running",
+        "running",
+        "failed",
+      ] as const
       yield* db.insert(schema.processingJobs).values(
         states.map((_, index) => ({
           id: workJobId(index),
           principalId: ANONYMOUS_PRINCIPAL_ID,
-          sourceId: index === 4 ? OTHER_SOURCE_ID : SOURCE_ID,
+          sourceId: index >= 4 ? OTHER_SOURCE_ID : SOURCE_ID,
           status: "completed" as const,
           completedAt: WORK_TIME,
         }))
@@ -420,7 +434,7 @@ const seedCalculationWork = () =>
           ...scope,
           id: workRequestId(index),
           sourceJobId: workJobId(index),
-          sourceId: index === 4 ? OTHER_SOURCE_ID : SOURCE_ID,
+          sourceId: index >= 4 ? OTHER_SOURCE_ID : SOURCE_ID,
           taxYear: index % 2 === 0 ? 2024 : 2026,
           status,
           requestedAt: WORK_TIME,
@@ -478,9 +492,21 @@ const seedCalculationWork = () =>
           taxYear,
           runId,
           requestId: workRequestId(index),
-          status: index === 1 ? "running" : "succeeded",
+          status: index === 1 ? "running" : index === 4 ? "failed" : "succeeded",
+          failureCode: index === 4 ? "price_fetch_failed" : null,
           startedAt: WORK_TIME,
           completedAt: index === 1 ? null : WORK_TIME,
+        })
+      }
+      for (const index of [4, 5, 6]) {
+        yield* db.insert(schema.calculationSyncAttempts).values({
+          ...scope,
+          taxYear: index % 2 === 0 ? 2024 : 2026,
+          requestId: workRequestId(index),
+          status: index === 6 ? "failed" : "running",
+          failureCode: index === 6 ? "price_fetch_failed" : null,
+          startedAt: WORK_TIME,
+          completedAt: index === 6 ? WORK_TIME : null,
         })
       }
       yield* db.insert(schema.calculationSyncAttempts).values({
