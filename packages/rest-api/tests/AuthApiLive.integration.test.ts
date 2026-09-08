@@ -253,7 +253,7 @@ const makeAuthHandler = () => {
       return {
         providers: Chunk.of(localProvider),
         sessionDurations: SessionDurationConfig.Default,
-        localAuth: localAuthDefaults,
+        localAuth: { ...localAuthDefaults, requireNumbers: true },
         autoProvisionUsers: true,
         linkIdentitiesByEmail: true,
       }
@@ -750,8 +750,8 @@ describe("AuthApiLive integration", () => {
         })
 
         expect(verifyResponse.status).toBe(200)
-        expect(yield* jsonBody(verifyResponse)).toMatchObject({
-          redirectTo: "/home",
+        expect(yield* jsonBody(verifyResponse)).toEqual({
+          redirectTo: "/app",
         })
 
         const verifySetCookies = getSetCookies(verifyResponse)
@@ -1030,5 +1030,52 @@ describe("AuthApiLive integration", () => {
         expect(sentVerificationCodes).toHaveLength(1)
         expect(sentVerificationCodes[0]?.code).toBe(originalCode)
       }).pipe(Effect.scoped)
+  )
+  it.effect("lists enabled providers with capability flags and no display text", () =>
+    Effect.gen(function* () {
+      const { handler } = yield* makeAuthHandlerScoped
+
+      const providersResponse = yield* getRequest({
+        handler,
+        path: "/auth/providers",
+      })
+
+      expect(providersResponse.status).toBe(200)
+      expect(yield* jsonBody(providersResponse)).toEqual({
+        providers: [
+          {
+            type: "local",
+            supportsRegistration: true,
+            supportsPasswordLogin: true,
+            oauthEnabled: false,
+            supportsLinking: false,
+          },
+        ],
+      })
+    }).pipe(Effect.scoped)
+  )
+
+  it.effect("rejects a weak password with requirement codes and the minimum length", () =>
+    Effect.gen(function* () {
+      const { handler, sentVerificationCodes } = yield* makeAuthHandlerScoped
+
+      const registerResponse = yield* postJson({
+        handler,
+        path: "/auth/register",
+        payload: {
+          email: `weak-${nextTestUuid()}@taxmaxi.test`,
+          password: "short",
+        },
+      })
+
+      expect(registerResponse.status).toBe(400)
+      expect(yield* jsonBody(registerResponse)).toMatchObject({
+        _tag: "PasswordWeakError",
+        requirements: ["min_length", "number"],
+        minPasswordLength: 8,
+      })
+      expect(getSetCookies(registerResponse)).toHaveLength(0)
+      expect(sentVerificationCodes).toHaveLength(0)
+    }).pipe(Effect.scoped)
   )
 })
