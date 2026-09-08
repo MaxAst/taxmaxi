@@ -216,8 +216,9 @@ describe("completed sync through accounting snapshot and shared status", () => {
         yield* Effect.promise(() =>
           completeJob({ sourceId: targetSourceId, principalId: targetPrincipalId })
         )
+        const services = yield* Effect.context<never>()
         const targetStatus = () =>
-          Effect.runPromise(
+          Effect.runPromiseWith(services)(
             context.runWithLayer({
               layer: CalculationRunRepositoryLive,
               effect: Effect.flatMap(CalculationRunRepository, (repository) =>
