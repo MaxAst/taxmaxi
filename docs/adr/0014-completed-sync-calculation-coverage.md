@@ -20,11 +20,17 @@ Which states describe a recorded calculation request, independently of the activ
 ```mermaid
 stateDiagram-v2
     [*] --> queued: source completion commits
-    queued --> running: attempt claims request
+    queued --> running: real run starts and claims request
+    queued --> failed: preparation fails before a run starts
     running --> succeeded: finalized run captured request
     running --> failed: attempt fails or is recovered as interrupted
-    failed --> queued: existing recovery schedules retry
+    failed --> running: retry starts a real run
+    failed --> failed: retry preparation fails
 ```
+
+A sync job imports facts. Its calculation request records work still needed for a particular annual result; a calculation run reads a snapshot of those facts and calculates that result. For example, wallets A and B can both finish syncing before one run reads them. That run captures both requests; a wallet finishing after the snapshot needs a later run.
+
+Price preparation and snapshot loading leave queued or failed requests available for recovery. Starting a real run claims its captured queued or failed requests and records new running attempts. A preparation failure records terminal failed attempts without a run, with the actual preparation start and completion times, only for the exact requests observed before preparation that remain queued or failed under the same owner and scope. Later arrivals and work claimed by another run stay untouched. Recovery dispatches retries without changing failed requests back to queued; earlier failed attempts remain visible. An interrupted real run and its own running attempts fail together before replacement work can claim them.
 
 `not_requested` describes the absence of a request for the scope; it is not a stored request state. Dispatch failure leaves a queued request. A new sync creates a separate request, rather than changing a successful request back to queued. A succeeded request can still have an uncovered active result if its covering run was not activated.
 
