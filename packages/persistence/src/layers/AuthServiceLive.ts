@@ -737,38 +737,84 @@ const make = Effect.gen(function* () {
     })
 
   /**
-   * Write a fresh verification request and record its send facts. The caller
-   * states `sendCount`: 1 for a first request, the replaced request's count
-   * plus one for a resend. `lastSentAt` is now, because the caller hands the
-   * code to delivery right after this returns.
+   * A fresh id and one-time code for a verification request.
+   */
+  const generateEmailVerificationIdAndCode = Effect.gen(function* () {
+    const id = EmailVerificationRequestId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie))
+    const codeBytes = yield* crypto.randomBytes(8).pipe(Effect.orDie)
+
+    return { id, code: generateEmailVerificationCode(codeBytes) }
+  })
+
+  /**
+   * Write a first verification request and record its send facts: `sendCount`
+   * is 1 and `lastSentAt` is now, because the caller hands the code to
+   * delivery right after this returns.
    */
   const createEmailVerificationRequest = ({
     userId,
     email,
-    sendCount,
   }: {
     readonly userId: AuthUserId
     readonly email: AuthUser["email"]
-    readonly sendCount: EmailVerificationRequest["sendCount"]
   }): Effect.Effect<EmailVerificationRequest, AuthProcessingError> =>
     Effect.gen(function* () {
       const now = Timestamp.now()
-      const requestId = EmailVerificationRequestId.make(
-        yield* crypto.randomUUIDv4.pipe(Effect.orDie)
-      )
-      const verificationCodeBytes = yield* crypto.randomBytes(8).pipe(Effect.orDie)
+      const { id, code } = yield* generateEmailVerificationIdAndCode
 
       return yield* emailVerificationRequestRepo
         .create({
-          id: requestId,
+          id,
           userId,
           email: sanitizeEmail(email),
-          code: generateEmailVerificationCode(verificationCodeBytes),
+          code,
           expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
-          sendCount,
+          sendCount: 1,
           lastSentAt: now,
         })
         .pipe(Effect.mapError((cause) => authProcessingError("create-email-verification", cause)))
+    })
+
+  /**
+   * Record that an existing request's code is sent again: `lastSentAt` moves
+   * to now, `sendCount` stays. None means the request is gone meanwhile.
+   */
+  const recordEmailVerificationSend = ({
+    requestId,
+    sentAt,
+  }: {
+    readonly requestId: EmailVerificationRequestId
+    readonly sentAt: Timestamp.Timestamp
+  }): Effect.Effect<Option.Option<EmailVerificationRequest>, AuthProcessingError> =>
+    emailVerificationRequestRepo
+      .recordSend({ id: requestId, sentAt })
+      .pipe(
+        Effect.mapError((cause) => authProcessingError("record-email-verification-send", cause))
+      )
+
+  /**
+   * Replace a request with a fresh code. The repository advances `sendCount`
+   * under a row lock, so concurrent resends cannot undercount. None means the
+   * request is gone (verified, expired and cleaned, or already replaced).
+   */
+  const renewEmailVerificationRequest = ({
+    requestId,
+  }: {
+    readonly requestId: EmailVerificationRequestId
+  }): Effect.Effect<Option.Option<EmailVerificationRequest>, AuthProcessingError> =>
+    Effect.gen(function* () {
+      const now = Timestamp.now()
+      const { id, code } = yield* generateEmailVerificationIdAndCode
+
+      return yield* emailVerificationRequestRepo
+        .renew({
+          id: requestId,
+          replacementId: id,
+          code,
+          expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
+          sentAt: now,
+        })
+        .pipe(Effect.mapError((cause) => authProcessingError("renew-email-verification", cause)))
     })
 
   const sendEmailVerificationRequest = ({
@@ -923,20 +969,29 @@ const make = Effect.gen(function* () {
      */
     startEmailVerification: (user) =>
       Effect.gen(function* () {
+        const now = Timestamp.now()
         const maybeExistingRequest = yield* emailVerificationRequestRepo
           .findByUserId(user.id)
           .pipe(Effect.mapError((cause) => authProcessingError("find-email-verification", cause)))
 
-        const verificationRequest = yield* Option.isSome(maybeExistingRequest) &&
+        // Reusing an active request re-sends its code, so the send is recorded
+        // on that row first. If the row vanished meanwhile, start fresh.
+        const reusedRequest = yield* Option.isSome(maybeExistingRequest) &&
         !isEmailVerificationRequestExpired({
           request: maybeExistingRequest.value,
-          now: Timestamp.now(),
+          now,
         })
-          ? Effect.succeed(maybeExistingRequest.value)
+          ? recordEmailVerificationSend({
+              requestId: maybeExistingRequest.value.id,
+              sentAt: now,
+            })
+          : Effect.succeed(Option.none<EmailVerificationRequest>())
+
+        const verificationRequest = yield* Option.isSome(reusedRequest)
+          ? Effect.succeed(reusedRequest.value)
           : createEmailVerificationRequest({
               userId: user.id,
               email: user.email,
-              sendCount: 1,
             })
 
         yield* sendEmailVerificationRequest({
@@ -952,26 +1007,18 @@ const make = Effect.gen(function* () {
      */
     resendEmailVerification: (requestId) =>
       Effect.gen(function* () {
-        const maybeExistingRequest = yield* emailVerificationRequestRepo
-          .findById(requestId)
-          .pipe(Effect.mapError((cause) => authProcessingError("find-email-verification", cause)))
+        const renewedRequest = yield* renewEmailVerificationRequest({ requestId })
 
-        if (Option.isNone(maybeExistingRequest)) {
+        if (Option.isNone(renewedRequest)) {
           return yield* new EmailVerificationRequestNotFoundError({ requestId })
         }
 
-        const verificationRequest = yield* createEmailVerificationRequest({
-          userId: maybeExistingRequest.value.userId,
-          email: maybeExistingRequest.value.email,
-          sendCount: maybeExistingRequest.value.sendCount + 1,
-        })
-
         yield* sendEmailVerificationRequest({
-          request: verificationRequest,
+          request: renewedRequest.value,
           operation: "resend-email-verification",
         })
 
-        return verificationRequest
+        return renewedRequest.value
       }),
 
     /**

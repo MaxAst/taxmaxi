@@ -38,6 +38,30 @@ export interface EmailVerificationRequestInsert {
 }
 
 /**
+ * EmailVerificationRequestSend - Input to record that an existing request's code
+ * was sent again.
+ */
+export interface EmailVerificationRequestSend {
+  readonly id: EmailVerificationRequestId
+  readonly sentAt: Timestamp
+}
+
+/**
+ * EmailVerificationRequestRenewal - Input to replace a request with a fresh code.
+ *
+ * `id` names the request being replaced. The replacement keeps its user and
+ * email, takes the replaced request's `sendCount` plus one, and records
+ * `sentAt` as the time the new code is handed to delivery.
+ */
+export interface EmailVerificationRequestRenewal {
+  readonly id: EmailVerificationRequestId
+  readonly replacementId: EmailVerificationRequestId
+  readonly code: EmailVerificationCode
+  readonly expiresAt: Timestamp
+  readonly sentAt: Timestamp
+}
+
+/**
  * EmailVerificationRequestRepositoryService - CRUD operations for verification requests.
  */
 export interface EmailVerificationRequestRepositoryService {
@@ -50,6 +74,27 @@ export interface EmailVerificationRequestRepositoryService {
   readonly create: (
     request: EmailVerificationRequestInsert
   ) => Effect.Effect<EmailVerificationRequest, PersistenceError>
+
+  /**
+   * Record that the existing request's code was sent again: sets `lastSentAt`
+   * and leaves `sendCount` unchanged. Returns none when the request no longer
+   * exists.
+   */
+  readonly recordSend: (
+    send: EmailVerificationRequestSend
+  ) => Effect.Effect<Option.Option<EmailVerificationRequest>, PersistenceError>
+
+  /**
+   * Replace a request with a fresh code in one transaction.
+   *
+   * Locks the replaced row, inserts the replacement with the locked row's
+   * `sendCount` plus one, and deletes the locked row. Two concurrent renewals
+   * of the same request therefore serialize: the second finds the row gone and
+   * returns none.
+   */
+  readonly renew: (
+    renewal: EmailVerificationRequestRenewal
+  ) => Effect.Effect<Option.Option<EmailVerificationRequest>, PersistenceError>
 
   /**
    * Find a verification request by its unique identifier.

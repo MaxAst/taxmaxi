@@ -1039,6 +1039,21 @@ describe("AuthApiLive integration", () => {
 
         sentVerificationCodes.length = 0
 
+        // Push the register send two minutes into the past so the login send
+        // is visible as a later `lastSentAt` on the same row.
+        yield* runTestSql({
+          statement: `
+            UPDATE email_verification_requests
+            SET last_sent_at = last_sent_at - interval '2 minutes'
+          `,
+        })
+        const backdatedRequest = yield* readStoredVerificationRequest({
+          requestId: registerVerificationRequestId,
+        })
+
+        expect(backdatedRequest?.sendCount).toBe(1)
+
+        const beforeLoginMillis = Timestamp.now().epochMillis
         const loginResponse = yield* postJson({
           handler,
           path: "/auth/login",
@@ -1067,6 +1082,20 @@ describe("AuthApiLive integration", () => {
         expect(loginVerificationRequestId).toBe(registerVerificationRequestId)
         expect(sentVerificationCodes).toHaveLength(1)
         expect(sentVerificationCodes[0]?.code).toBe(originalCode)
+
+        const reusedRequest = yield* readStoredVerificationRequest({
+          requestId: registerVerificationRequestId,
+        })
+        const afterLoginMillis = Timestamp.now().epochMillis
+
+        expect(reusedRequest).toBeDefined()
+        expect(reusedRequest?.code).toBe(originalCode)
+        expect(reusedRequest?.sendCount).toBe(1)
+        expect(reusedRequest?.lastSentAt.epochMillis).toBeGreaterThan(
+          backdatedRequest?.lastSentAt.epochMillis ?? Number.POSITIVE_INFINITY
+        )
+        expect(reusedRequest?.lastSentAt.epochMillis).toBeGreaterThanOrEqual(beforeLoginMillis)
+        expect(reusedRequest?.lastSentAt.epochMillis).toBeLessThanOrEqual(afterLoginMillis)
       }).pipe(Effect.scoped)
   )
   it.effect("lists enabled providers with capability flags and no display text", () =>

@@ -265,6 +265,44 @@ const makeEmailVerificationRequestRepo = (
     state.verificationRequests.set(verificationRequest.id, verificationRequest)
     return Effect.succeed(verificationRequest)
   },
+  recordSend: ({ id, sentAt }) => {
+    const existing = state.verificationRequests.get(id)
+    if (existing === undefined) {
+      return Effect.succeed(Option.none())
+    }
+
+    const updated = EmailVerificationRequest.make({
+      ...existing,
+      lastSentAt: sentAt,
+      updatedAt: Timestamp.now(),
+    })
+
+    state.verificationRequests.set(id, updated)
+    return Effect.succeed(Option.some(updated))
+  },
+  renew: ({ id, replacementId, code, expiresAt, sentAt }) => {
+    const existing = state.verificationRequests.get(id)
+    if (existing === undefined) {
+      return Effect.succeed(Option.none())
+    }
+
+    const now = Timestamp.now()
+    const replacement = EmailVerificationRequest.make({
+      id: replacementId,
+      userId: existing.userId,
+      email: existing.email,
+      code,
+      expiresAt,
+      sendCount: existing.sendCount + 1,
+      lastSentAt: sentAt,
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    state.verificationRequests.delete(id)
+    state.verificationRequests.set(replacementId, replacement)
+    return Effect.succeed(Option.some(replacement))
+  },
   findById: (id) => Effect.succeed(Option.fromNullishOr(state.verificationRequests.get(id))),
   findByUserId: (userId) =>
     Effect.succeed(

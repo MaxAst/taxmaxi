@@ -117,6 +117,71 @@ const make = Effect.gen(function* () {
       )
       .pipe(wrapSqlError("create"))
 
+  const recordSend: EmailVerificationRequestRepositoryService["recordSend"] = ({ id, sentAt }) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.nowAsDate
+      const [row] = yield* db
+        .update(emailVerificationRequests)
+        .set({ lastSentAt: sentAt.toDate(), updatedAt: now })
+        .where(eq(emailVerificationRequests.id, id))
+        .returning(selectFields)
+
+      return Option.fromNullishOr(row).pipe(
+        Option.flatMap((value) => rowToEmailVerificationRequest(value))
+      )
+    }).pipe(wrapSqlError("recordSend"))
+
+  const renew: EmailVerificationRequestRepositoryService["renew"] = (renewal) =>
+    db
+      .transaction((tx) =>
+        Effect.gen(function* () {
+          const [locked] = yield* tx
+            .select(selectFields)
+            .from(emailVerificationRequests)
+            .where(eq(emailVerificationRequests.id, renewal.id))
+            .for("update")
+            .limit(1)
+
+          if (locked === undefined || locked.userId === null) {
+            return Option.none()
+          }
+
+          const now = yield* DateTime.nowAsDate
+          const sendCount = locked.sendCount + 1
+
+          yield* tx.insert(emailVerificationRequests).values({
+            id: renewal.replacementId,
+            userId: locked.userId,
+            email: locked.email,
+            code: renewal.code,
+            expiresAt: renewal.expiresAt.toDate(),
+            sendCount,
+            lastSentAt: renewal.sentAt.toDate(),
+            createdAt: now,
+            updatedAt: now,
+          })
+
+          yield* tx
+            .delete(emailVerificationRequests)
+            .where(eq(emailVerificationRequests.id, renewal.id))
+
+          return Option.some(
+            EmailVerificationRequest.make({
+              id: renewal.replacementId,
+              userId: AuthUserId.make(locked.userId),
+              email: Email.make(locked.email),
+              code: renewal.code,
+              expiresAt: renewal.expiresAt,
+              sendCount,
+              lastSentAt: renewal.sentAt,
+              createdAt: Timestamp.make({ epochMillis: now.getTime() }),
+              updatedAt: Timestamp.make({ epochMillis: now.getTime() }),
+            })
+          )
+        })
+      )
+      .pipe(wrapSqlError("renew"))
+
   const findById: EmailVerificationRequestRepositoryService["findById"] = (id) =>
     Effect.gen(function* () {
       const [row] = yield* db
@@ -167,6 +232,8 @@ const make = Effect.gen(function* () {
 
   return {
     create,
+    recordSend,
+    renew,
     findById,
     findByUserId,
     consume,

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "@effect/vitest"
+import { eq } from "drizzle-orm"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import {
@@ -165,6 +166,191 @@ describe("EmailVerificationRequestRepositoryLive", () => {
         )
       )
       expect(Option.isNone(missingAfterConsume)).toBe(true)
+    })
+  )
+
+  it.effect("records a repeated send on an existing request without changing its count", () =>
+    Effect.gen(function* () {
+      const requestId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000731")
+      const missingRequestId = EmailVerificationRequestId.make(
+        "00000000-4000-4000-8000-000000000732"
+      )
+      const secondSentAt = Timestamp.addMinutes(TEST_FIRST_SENT_AT, 2)
+
+      yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.create({
+              id: requestId,
+              userId: TEST_FIRST_USER_ID,
+              email: Email.make("verification-one@example.com"),
+              code: EmailVerificationCode.make("RESEND01"),
+              expiresAt: Timestamp.addMinutes(Timestamp.now(), 10),
+              sendCount: 1,
+              lastSentAt: TEST_FIRST_SENT_AT,
+            })
+          )
+        )
+      )
+
+      const recorded = yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.recordSend({ id: requestId, sentAt: secondSentAt })
+          )
+        )
+      )
+      expect(Option.isSome(recorded)).toBe(true)
+      if (Option.isSome(recorded)) {
+        expect(recorded.value.id).toBe(requestId)
+        expect(recorded.value.code).toBe(EmailVerificationCode.make("RESEND01"))
+        expect(recorded.value.sendCount).toBe(1)
+        expect(recorded.value.lastSentAt.epochMillis).toBe(secondSentAt.epochMillis)
+      }
+
+      const stored = yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.findById(requestId)
+          )
+        )
+      )
+      expect(Option.isSome(stored)).toBe(true)
+      if (Option.isSome(stored)) {
+        expect(stored.value.sendCount).toBe(1)
+        expect(stored.value.lastSentAt.epochMillis).toBe(secondSentAt.epochMillis)
+      }
+
+      const recordedOnMissing = yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.recordSend({ id: missingRequestId, sentAt: secondSentAt })
+          )
+        )
+      )
+      expect(Option.isNone(recordedOnMissing)).toBe(true)
+    })
+  )
+
+  it.effect("renews a request once when two renewals race for the same request", () =>
+    Effect.gen(function* () {
+      const requestId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000741")
+      const firstReplacementId = EmailVerificationRequestId.make(
+        "00000000-4000-4000-8000-000000000742"
+      )
+      const secondReplacementId = EmailVerificationRequestId.make(
+        "00000000-4000-4000-8000-000000000743"
+      )
+      const now = Timestamp.now()
+
+      yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.create({
+              id: requestId,
+              userId: TEST_FIRST_USER_ID,
+              email: Email.make("verification-one@example.com"),
+              code: EmailVerificationCode.make("RACE0001"),
+              expiresAt: Timestamp.addMinutes(now, 10),
+              sendCount: 1,
+              lastSentAt: TEST_FIRST_SENT_AT,
+            })
+          )
+        )
+      )
+
+      const renewWith = ({
+        replacementId,
+        code,
+      }: {
+        readonly replacementId: EmailVerificationRequestId
+        readonly code: EmailVerificationCode
+      }) =>
+        Effect.promise(() =>
+          runRepository(
+            Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+              repository.renew({
+                id: requestId,
+                replacementId,
+                code,
+                expiresAt: Timestamp.addMinutes(now, 10),
+                sentAt: now,
+              })
+            )
+          )
+        )
+
+      const outcomes = yield* Effect.all(
+        [
+          renewWith({
+            replacementId: firstReplacementId,
+            code: EmailVerificationCode.make("RACE0002"),
+          }),
+          renewWith({
+            replacementId: secondReplacementId,
+            code: EmailVerificationCode.make("RACE0003"),
+          }),
+        ],
+        { concurrency: "unbounded" }
+      )
+
+      const renewed = outcomes.filter(Option.isSome)
+      expect(renewed).toHaveLength(1)
+      expect(outcomes.filter(Option.isNone)).toHaveLength(1)
+
+      const winner = renewed[0]
+      expect(winner).toBeDefined()
+      if (winner !== undefined) {
+        expect([firstReplacementId, secondReplacementId]).toContain(winner.value.id)
+        expect(winner.value.userId).toBe(TEST_FIRST_USER_ID)
+        expect(winner.value.sendCount).toBe(2)
+        expect(winner.value.lastSentAt.epochMillis).toBe(now.epochMillis)
+      }
+
+      const replacedRequest = yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.findById(requestId)
+          )
+        )
+      )
+      expect(Option.isNone(replacedRequest)).toBe(true)
+
+      const activeRows = yield* Effect.promise(() =>
+        context.runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+
+            return yield* db
+              .select({
+                id: schema.emailVerificationRequests.id,
+                sendCount: schema.emailVerificationRequests.sendCount,
+              })
+              .from(schema.emailVerificationRequests)
+              .where(eq(schema.emailVerificationRequests.userId, TEST_FIRST_USER_ID))
+          })
+        )
+      )
+      expect(activeRows).toHaveLength(1)
+      expect(activeRows[0]?.id).toBe(winner?.value.id)
+      expect(activeRows[0]?.sendCount).toBe(2)
+
+      const renewedAgainAfterGone = yield* Effect.promise(() =>
+        runRepository(
+          Effect.flatMap(EmailVerificationRequestRepository, (repository) =>
+            repository.renew({
+              id: requestId,
+              replacementId: EmailVerificationRequestId.make(
+                "00000000-4000-4000-8000-000000000744"
+              ),
+              code: EmailVerificationCode.make("RACE0004"),
+              expiresAt: Timestamp.addMinutes(now, 10),
+              sentAt: now,
+            })
+          )
+        )
+      )
+      expect(Option.isNone(renewedAgainAfterGone)).toBe(true)
     })
   )
 
