@@ -32,7 +32,15 @@ import { drizzle } from "./PgClientLive.ts"
 
 type SelectedEmailVerificationRequestRow = Pick<
   EmailVerificationRequestRow,
-  "id" | "userId" | "email" | "code" | "expiresAt" | "createdAt" | "updatedAt"
+  | "id"
+  | "userId"
+  | "email"
+  | "code"
+  | "expiresAt"
+  | "sendCount"
+  | "lastSentAt"
+  | "createdAt"
+  | "updatedAt"
 >
 
 const rowToEmailVerificationRequest = (
@@ -49,6 +57,8 @@ const rowToEmailVerificationRequest = (
       email: Email.make(row.email),
       code: EmailVerificationCode.make(row.code),
       expiresAt: Timestamp.make({ epochMillis: row.expiresAt.getTime() }),
+      sendCount: row.sendCount,
+      lastSentAt: Timestamp.make({ epochMillis: row.lastSentAt.getTime() }),
       createdAt: Timestamp.make({ epochMillis: row.createdAt.getTime() }),
       updatedAt: Timestamp.make({ epochMillis: row.updatedAt.getTime() }),
     })
@@ -64,6 +74,8 @@ const make = Effect.gen(function* () {
     email: emailVerificationRequests.email,
     code: emailVerificationRequests.code,
     expiresAt: emailVerificationRequests.expiresAt,
+    sendCount: emailVerificationRequests.sendCount,
+    lastSentAt: emailVerificationRequests.lastSentAt,
     createdAt: emailVerificationRequests.createdAt,
     updatedAt: emailVerificationRequests.updatedAt,
   } as const
@@ -84,6 +96,8 @@ const make = Effect.gen(function* () {
             email: request.email,
             code: request.code,
             expiresAt: request.expiresAt.toDate(),
+            sendCount: request.sendCount,
+            lastSentAt: request.lastSentAt.toDate(),
             createdAt: now,
             updatedAt: now,
           })
@@ -94,6 +108,8 @@ const make = Effect.gen(function* () {
             email: request.email,
             code: request.code,
             expiresAt: request.expiresAt,
+            sendCount: request.sendCount,
+            lastSentAt: request.lastSentAt,
             createdAt: Timestamp.make({ epochMillis: now.getTime() }),
             updatedAt: Timestamp.make({ epochMillis: now.getTime() }),
           })

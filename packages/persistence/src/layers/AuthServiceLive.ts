@@ -736,12 +736,20 @@ const make = Effect.gen(function* () {
       cause,
     })
 
+  /**
+   * Write a fresh verification request and record its send facts. The caller
+   * states `sendCount`: 1 for a first request, the replaced request's count
+   * plus one for a resend. `lastSentAt` is now, because the caller hands the
+   * code to delivery right after this returns.
+   */
   const createEmailVerificationRequest = ({
     userId,
     email,
+    sendCount,
   }: {
     readonly userId: AuthUserId
     readonly email: AuthUser["email"]
+    readonly sendCount: EmailVerificationRequest["sendCount"]
   }): Effect.Effect<EmailVerificationRequest, AuthProcessingError> =>
     Effect.gen(function* () {
       const now = Timestamp.now()
@@ -757,6 +765,8 @@ const make = Effect.gen(function* () {
           email: sanitizeEmail(email),
           code: generateEmailVerificationCode(verificationCodeBytes),
           expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
+          sendCount,
+          lastSentAt: now,
         })
         .pipe(Effect.mapError((cause) => authProcessingError("create-email-verification", cause)))
     })
@@ -926,6 +936,7 @@ const make = Effect.gen(function* () {
           : createEmailVerificationRequest({
               userId: user.id,
               email: user.email,
+              sendCount: 1,
             })
 
         yield* sendEmailVerificationRequest({
@@ -952,6 +963,7 @@ const make = Effect.gen(function* () {
         const verificationRequest = yield* createEmailVerificationRequest({
           userId: maybeExistingRequest.value.userId,
           email: maybeExistingRequest.value.email,
+          sendCount: maybeExistingRequest.value.sendCount + 1,
         })
 
         yield* sendEmailVerificationRequest({

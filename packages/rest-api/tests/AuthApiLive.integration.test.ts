@@ -3,6 +3,7 @@ import { nextTestUuid } from "./support/TestUuid.ts"
 import { Etag, HttpRouter } from "effect/unstable/http"
 import { NodeHttpPlatform, NodeServices } from "@effect/platform-node"
 import {
+  EmailVerificationRequestId,
   HashedPassword,
   PasswordHasher,
   SessionId,
@@ -14,6 +15,7 @@ import * as ConfigProvider from "effect/ConfigProvider"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
 import * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
 import type * as Scope from "effect/Scope"
@@ -27,6 +29,7 @@ import {
   type TransferReconciliationServiceShape,
 } from "@my/sync-engine/services"
 import { AuthServiceLive } from "../../persistence/src/layers/AuthServiceLive.ts"
+import { EmailVerificationRequestRepositoryLive } from "../../persistence/src/layers/EmailVerificationRequestRepositoryLive.ts"
 import { LocalAuthProviderLive } from "../../persistence/src/layers/LocalAuthProviderLive.ts"
 import { drizzle, runSqlUnsafe } from "../../persistence/src/layers/PgClientLive.ts"
 import { RepositoriesLive } from "../../persistence/src/layers/RepositoriesLive.ts"
@@ -36,7 +39,9 @@ import {
   SessionDurationConfig,
 } from "../../persistence/src/services/AuthServiceConfig.ts"
 import { EmailVerificationDeliveryService } from "../../persistence/src/services/EmailVerificationDeliveryService.ts"
+import { EmailVerificationRequestRepository } from "../../persistence/src/services/EmailVerificationRequestRepository.ts"
 import { LocalAuthProvider } from "../../persistence/src/services/LocalAuthProvider.ts"
+import * as Timestamp from "@my/core/shared/values/Timestamp"
 import { makeIntegrationTestDatabaseContext } from "../../persistence/tests/support/integration-test-kit.ts"
 import { AnonSessionServiceLive } from "../src/layers/AnonSessionServiceLive.ts"
 import { TaxMaxiApiLive } from "../src/layers/TaxMaxiApiLive.ts"
@@ -79,6 +84,16 @@ const readStoredLocalProviderIds = () =>
       .from(schema.identities)
     return rows.filter((row) => row.provider === "local").map((row) => row.providerId)
   }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+
+const readStoredVerificationRequest = ({ requestId }: { readonly requestId: string }) =>
+  Effect.gen(function* () {
+    const repository = yield* EmailVerificationRequestRepository
+    const request = yield* repository.findById(EmailVerificationRequestId.make(requestId))
+    return Option.getOrUndefined(request)
+  }).pipe(
+    Effect.provide(EmailVerificationRequestRepositoryLive.pipe(Layer.provide(TestPgClientLive))),
+    Effect.scoped
+  )
 
 const readStoredDisplayNames = () =>
   Effect.gen(function* () {
@@ -664,6 +679,7 @@ describe("AuthApiLive integration", () => {
       Effect.gen(function* () {
         const { handler, sentVerificationCodes } = yield* makeAuthHandlerScoped
 
+        const testStartMillis = Timestamp.now().epochMillis
         const email = `owner-${nextTestUuid()}@taxmaxi.test`
         const password = "password123"
 
@@ -694,6 +710,16 @@ describe("AuthApiLive integration", () => {
 
         expect(firstCode).toBeDefined()
 
+        const registeredRequest = yield* readStoredVerificationRequest({
+          requestId: firstVerificationRequestId,
+        })
+        const afterRegisterMillis = Timestamp.now().epochMillis
+
+        expect(registeredRequest).toBeDefined()
+        expect(registeredRequest?.sendCount).toBe(1)
+        expect(registeredRequest?.lastSentAt.epochMillis).toBeGreaterThanOrEqual(testStartMillis)
+        expect(registeredRequest?.lastSentAt.epochMillis).toBeLessThanOrEqual(afterRegisterMillis)
+
         const resendResponse = yield* postJson({
           handler,
           path: "/auth/resend-verification",
@@ -721,6 +747,18 @@ describe("AuthApiLive integration", () => {
         expect(secondVerificationRequestId).not.toBe(firstVerificationRequestId)
         expect(secondCode).toBeDefined()
         expect(secondCode).not.toBe(firstCode)
+
+        const resentRequest = yield* readStoredVerificationRequest({
+          requestId: secondVerificationRequestId,
+        })
+        const afterResendMillis = Timestamp.now().epochMillis
+
+        expect(resentRequest).toBeDefined()
+        expect(resentRequest?.sendCount).toBe(2)
+        expect(resentRequest?.lastSentAt.epochMillis).toBeGreaterThanOrEqual(
+          registeredRequest?.lastSentAt.epochMillis ?? Number.NaN
+        )
+        expect(resentRequest?.lastSentAt.epochMillis).toBeLessThanOrEqual(afterResendMillis)
 
         const invalidVerifyResponse = yield* postJson({
           handler,

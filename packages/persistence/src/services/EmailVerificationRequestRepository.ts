@@ -22,6 +22,10 @@ import type { PersistenceError } from "../errors/RepositoryError.ts"
 
 /**
  * EmailVerificationRequestInsert - Input required to create a verification request.
+ *
+ * The writer states the send facts: `sendCount` is 1 for a first request and
+ * the replaced request's count plus one for a resend; `lastSentAt` is when the
+ * code is handed to delivery.
  */
 export interface EmailVerificationRequestInsert {
   readonly id: EmailVerificationRequestId
@@ -29,6 +33,8 @@ export interface EmailVerificationRequestInsert {
   readonly email: Email
   readonly code: EmailVerificationCode
   readonly expiresAt: Timestamp
+  readonly sendCount: EmailVerificationRequest["sendCount"]
+  readonly lastSentAt: Timestamp
 }
 
 /**

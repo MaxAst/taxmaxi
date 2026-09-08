@@ -22,6 +22,7 @@ await Effect.runPromise(context.recreateTestDatabase())
 
 const TEST_FIRST_USER_ID = AuthUserId.make("00000000-4000-4000-8000-000000000701")
 const TEST_SECOND_USER_ID = AuthUserId.make("00000000-4000-4000-8000-000000000702")
+const TEST_FIRST_SENT_AT = Timestamp.Timestamp.make({ epochMillis: 1_757_300_000_000 })
 
 const runRepository = <A, E>(effect: Effect.Effect<A, E, EmailVerificationRequestRepository>) =>
   Effect.runPromise(
@@ -82,6 +83,8 @@ describe("EmailVerificationRequestRepositoryLive", () => {
               email: Email.make("verification-one@example.com"),
               code: EmailVerificationCode.make("FIRST001"),
               expiresAt: Timestamp.addMinutes(Timestamp.now(), 10),
+              sendCount: 1,
+              lastSentAt: TEST_FIRST_SENT_AT,
             })
           )
         )
@@ -99,6 +102,8 @@ describe("EmailVerificationRequestRepositoryLive", () => {
       expect(Option.isSome(loadedById)).toBe(true)
       if (Option.isSome(loadedById)) {
         expect(loadedById.value.code).toBe(EmailVerificationCode.make("FIRST001"))
+        expect(loadedById.value.sendCount).toBe(1)
+        expect(loadedById.value.lastSentAt.epochMillis).toBe(TEST_FIRST_SENT_AT.epochMillis)
       }
 
       yield* Effect.promise(() =>
@@ -110,6 +115,8 @@ describe("EmailVerificationRequestRepositoryLive", () => {
               email: Email.make("verification-one@example.com"),
               code: EmailVerificationCode.make("SECOND01"),
               expiresAt: Timestamp.addMinutes(Timestamp.now(), 10),
+              sendCount: 2,
+              lastSentAt: Timestamp.now(),
             })
           )
         )
@@ -135,6 +142,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
       if (Option.isSome(latestRequest)) {
         expect(latestRequest.value.id).toBe(replacementRequestId)
         expect(latestRequest.value.code).toBe(EmailVerificationCode.make("SECOND01"))
+        expect(latestRequest.value.sendCount).toBe(2)
       }
 
       const consumedRequest = yield* Effect.promise(() =>
@@ -180,6 +188,8 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                 email: Email.make("verification-one@example.com"),
                 code: EmailVerificationCode.make("EXPIRE01"),
                 expiresAt: Timestamp.addMinutes(now, -1),
+                sendCount: 1,
+                lastSentAt: Timestamp.addMinutes(now, -11),
               }),
               repository.create({
                 id: activeRequestId,
@@ -187,6 +197,8 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                 email: Email.make("verification-two@example.com"),
                 code: EmailVerificationCode.make("ACTIVE01"),
                 expiresAt: Timestamp.addMinutes(now, 5),
+                sendCount: 1,
+                lastSentAt: now,
               }),
             ])
           )

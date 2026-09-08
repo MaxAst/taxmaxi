@@ -87,6 +87,20 @@ export class EmailVerificationRequest extends Schema.Class<EmailVerificationRequ
   expiresAt: Timestamp,
 
   /**
+   * How many codes have been sent for this verification flow. Register writes
+   * 1; a resend copies the replaced request's count plus one.
+   */
+  sendCount: Schema.Finite.pipe(
+    Schema.check(Schema.isInt()),
+    Schema.check(Schema.isGreaterThan(0))
+  ),
+
+  /**
+   * When the current code was handed to delivery
+   */
+  lastSentAt: Timestamp,
+
+  /**
    * When the verification request was created
    */
   createdAt: Timestamp,
