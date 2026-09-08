@@ -2,6 +2,7 @@ import type * as BigDecimal from "effect/BigDecimal"
 import * as Schema from "effect/Schema"
 import { describe, expect, it } from "vitest"
 import {
+  PortfolioCalculationStatusQuery,
   PortfolioAssetRow,
   PortfolioCurrency,
   PortfolioSummary,
@@ -123,5 +124,25 @@ describe("PortfolioCurrency", () => {
 
   it("rejects values that are not three letters", () => {
     expect(() => Schema.decodeSync(PortfolioCurrency)("EURO")).toThrow()
+  })
+})
+
+describe("PortfolioCalculationStatusQuery", () => {
+  const decode = Schema.decodeUnknownSync(PortfolioCalculationStatusQuery)
+
+  it("requires an explicit selected year and retains an optional exact job", () => {
+    const sourceJobId = "00000000-0000-4000-8000-000000000001"
+    expect(decode({ taxYear: "2024", sourceJobId })).toEqual({ taxYear: 2024, sourceJobId })
+    expect(decode({ taxYear: "2025" })).toEqual({ taxYear: 2025 })
+  })
+
+  it.each([
+    {},
+    { taxYear: "no" },
+    { taxYear: "2024.5" },
+    { taxYear: "Infinity" },
+    { taxYear: "2024", sourceJobId: "not-a-job-id" },
+  ])("rejects malformed selection %j", (query) => {
+    expect(() => decode(query)).toThrow()
   })
 })
