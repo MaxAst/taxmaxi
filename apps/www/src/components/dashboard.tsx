@@ -5,6 +5,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import { Ellipsis, RotateCcw } from "lucide-react"
 import {
   isTaxMaxiUnauthorizedError,
+  type SourceOverview,
   type SourceSyncJob,
   type SourceSyncJobInput,
   type SourceSyncStart,
@@ -14,6 +15,7 @@ import {
 import { appSurfaceClassName } from "#/components/app-workspace"
 import { CalculationStatus } from "#/components/calculation-status"
 import { AssetsTable } from "#/components/assets-table"
+import { FirstSyncWizard } from "#/components/first-sync-wizard"
 import { SourceCards } from "#/components/source-cards"
 import { Button } from "#/components/ui/button"
 import {
@@ -29,6 +31,7 @@ import { m } from "#/paraglide/messages"
 
 import { accounts as mockAccounts, taxYearAccountSummaries } from "#/fixtures/dashboard-data"
 import { formatCurrency, formatPercent, formatSignedCurrency } from "#/lib/dashboard-format"
+import { getFirstSyncState } from "#/lib/first-sync-state"
 import {
   ALL_ACCOUNTS,
   type Account,
@@ -55,6 +58,8 @@ type DashboardSummary = {
   unresolvedItems: number
 }
 
+const NO_OVERVIEWS: ReadonlyArray<SourceOverview> = []
+
 export function Dashboard({
   accounts = mockAccounts,
   createWalletSource,
@@ -63,6 +68,7 @@ export function Dashboard({
   onUnauthorized,
   replaySourceSync,
   resolveName,
+  sourceOverviews = NO_OVERVIEWS,
   sourceSyncSeeds,
   startSourceSync,
 }: {
@@ -73,6 +79,12 @@ export function Dashboard({
   onUnauthorized?: () => void | Promise<void>
   replaySourceSync?: (sourceId: AccountId) => Promise<SourceSyncStart>
   resolveName?: (name: string) => Promise<{ name: string; resolvedAddress: string }>
+  /**
+   * The source overviews the page loaded, in source order. The first-sync
+   * state reads `latestSync` from them (#108 D03); the wizard owns the body
+   * until one of them reports a `lastSyncedAt`.
+   */
+  sourceOverviews?: ReadonlyArray<SourceOverview>
   /** Jobs still running or paused on the server when the page loaded; the island reconnects to them. */
   sourceSyncSeeds?: ReadonlyArray<SourceSyncSeed>
   startSourceSync?: (sourceId: AccountId) => Promise<SourceSyncStart>
@@ -229,14 +241,26 @@ export function Dashboard({
     void refreshDependentReads()
   }, [activeRunId, authenticationLost, hasPortfolio, queryClient])
 
+  // Billing is only needed while the first-sync wizard can show. It is read
+  // through the query cache so a billing overlay refresh moves the wizard
+  // without a reload (#108 D07); the `/app` loader seeds it when it can.
+  const anySourceSynced = sourceOverviews.some(
+    (overview) => overview.latestSync.lastSyncedAt !== null
+  )
+  const billingQuery = useQuery({
+    ...queries.billingStatus(taxmaxi),
+    enabled: !authenticationLost && !anySourceSynced,
+  })
+
   useEffect(() => {
     if (
       isTaxMaxiUnauthorizedError(portfolioQuery.error) ||
-      isTaxMaxiUnauthorizedError(transactionQuery.error)
+      isTaxMaxiUnauthorizedError(transactionQuery.error) ||
+      isTaxMaxiUnauthorizedError(billingQuery.error)
     ) {
       void handleUnauthorized()
     }
-  }, [handleUnauthorized, portfolioQuery.error, transactionQuery.error])
+  }, [billingQuery.error, handleUnauthorized, portfolioQuery.error, transactionQuery.error])
 
   const goToNextTransactionPage = () => {
     const nextCursor = transactionQuery.data?.page.nextCursor
@@ -351,99 +375,154 @@ export function Dashboard({
     [createWalletSource, onSourceSync]
   )
 
+  // A billing read that is still pending counts as not loaded: the wizard
+  // then shows `billing_unknown` with a retry instead of guessing at credits.
+  const firstSync = useMemo(
+    () =>
+      getFirstSyncState({
+        billing: billingQuery.data ?? null,
+        items: activeSyncs,
+        overviews: sourceOverviews,
+      }),
+    [activeSyncs, billingQuery.data, sourceOverviews]
+  )
+  const firstSyncTarget =
+    firstSync.targetSourceId === null ? undefined : accountsById.get(firstSync.targetSourceId)
+
+  // Start, Continue, and Try again all go through the hook's start function
+  // for the target source (#108 D06); the hook ignores a second click while
+  // that source is already syncing.
+  const startFirstSync = useCallback(() => {
+    if (firstSyncTarget !== undefined) {
+      void onSourceSync(firstSyncTarget)
+    }
+  }, [firstSyncTarget, onSourceSync])
+
+  // Connecting a wallet from the wizard only creates the source. The first
+  // sync stays an explicit click on the next step (#108 D03).
+  const connectWalletSource = useCallback(
+    async (walletAddress: string) => {
+      await createWalletSource?.(walletAddress)
+    },
+    [createWalletSource]
+  )
+
+  // The island stays mounted above whichever body shows, so a first sync's
+  // progress is visible over the wizard and over the tabs alike (#108 D06).
+  const body =
+    firstSync.state === "done" ? null : (
+      <FirstSyncWizard
+        billing={billingQuery.data ?? null}
+        billingRefreshing={billingQuery.isFetching}
+        createWalletSource={createWalletSource === undefined ? undefined : connectWalletSource}
+        onRetryBilling={() => void billingQuery.refetch()}
+        onStart={startFirstSync}
+        resolveName={resolveName}
+        sourceName={firstSyncTarget?.name ?? null}
+        state={firstSync.state}
+      />
+    )
+
   return (
     <div className="text-marketing-foreground flex min-h-screen flex-col pt-28 pb-8 sm:pt-32">
       <SourceSyncIsland items={activeSyncs} onDismiss={onDismissSync} onRetry={onRetrySync} />
-      <SourceCards
-        contentClassName={appSurfaceClassName}
-        onAddWallet={createWalletSource === undefined ? undefined : handleAddWallet}
-        onResolveName={resolveName}
-        onSelectedSourceIdChange={(sourceId) => onAccountScopeChange(sourceId ?? ALL_ACCOUNTS)}
-        onSourceSync={onSourceSync}
-        selectedSourceId={accountScope === ALL_ACCOUNTS ? undefined : accountScope}
-        syncingSourceIds={syncingSourceIds}
-        sources={accounts}
-      >
-        <div aria-busy={isSwitchingPortfolio} className="flex min-w-0 flex-col gap-8 py-6 sm:py-8">
-          <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
-            <div className="min-w-0 space-y-3">
-              <PortfolioOverview key={selectedSourceId ?? ALL_ACCOUNTS} summary={summary} />
-              <CalculationStatus
-                portfolio={portfolioQuery.data}
-                requestFailed={portfolioQuery.isError}
-                refreshing={portfolioQuery.isFetching}
-                disabled={authenticationLost}
-                onRefresh={() => void portfolioQuery.refetch()}
-                postSyncNotice={
-                  syncCompletedAt === null ? null : fastRefresh ? "checking" : "unconfirmed"
-                }
-              />
-            </div>
-            <SelectedSourceMenu
-              account={replayAccount}
-              isSyncing={replayAccount !== undefined && syncingSourceIds.has(replayAccount.id)}
-              onReplay={onSourceReplay}
-            />
-          </div>
-
-          <Tabs defaultValue="assets" className="gap-y-8">
-            <TabsList>
-              <TabsTrigger value="assets">{m["app.dashboard.tabs.assets"]()}</TabsTrigger>
-              <TabsTrigger value="transactions">
-                {m["app.dashboard.tabs.transactions"]()}
-              </TabsTrigger>
-              <TabsTrigger value="taxes">{m["app.dashboard.tabs.taxes"]()}</TabsTrigger>
-            </TabsList>
-            <TabsContent value="assets">
-              {portfolioQuery.data?.activeRun === null ? (
-                <p className="rounded-lg border border-border p-6 text-sm text-muted-foreground">
-                  {m["app.calculation.positionsUnavailable"]()}
-                </p>
-              ) : (
-                <AssetsTable
-                  currency={portfolioQuery.data?.currency ?? "EUR"}
-                  error={portfolioQuery.isError && portfolioQuery.data === undefined}
-                  holdings={activeHoldings}
-                  loading={portfolioQuery.isPending && portfolioQuery.data === undefined}
-                />
-              )}
-            </TabsContent>
-            <TabsContent value="transactions">
-              <div
-                ref={transactionListRef}
-                tabIndex={-1}
-                role="region"
-                aria-label={m["app.dashboard.tabs.transactions"]()}
-              >
-                <TransactionsTable
-                  disabled={authenticationLost}
-                  onSelect={selectTransaction}
-                  selectedTransactionId={selectedTransaction?.transactionId ?? null}
-                  error={transactionQuery.isError}
-                  hasNextPage={transactionQuery.data?.page.hasMore ?? false}
-                  loading={transactionQuery.isFetching}
-                  onNextPage={goToNextTransactionPage}
-                  onPreviousPage={goToPreviousTransactionPage}
-                  onRetry={() => void transactionQuery.refetch()}
-                  pageIndex={transactionCursors.length - 1}
-                  totalCount={transactionQuery.data?.totalCount ?? 0}
-                  transactions={transactionQuery.data?.transactions ?? []}
+      {body ?? (
+        <>
+          <SourceCards
+            contentClassName={appSurfaceClassName}
+            onAddWallet={createWalletSource === undefined ? undefined : handleAddWallet}
+            onResolveName={resolveName}
+            onSelectedSourceIdChange={(sourceId) => onAccountScopeChange(sourceId ?? ALL_ACCOUNTS)}
+            onSourceSync={onSourceSync}
+            selectedSourceId={accountScope === ALL_ACCOUNTS ? undefined : accountScope}
+            syncingSourceIds={syncingSourceIds}
+            sources={accounts}
+          >
+            <div
+              aria-busy={isSwitchingPortfolio}
+              className="flex min-w-0 flex-col gap-8 py-6 sm:py-8"
+            >
+              <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+                <div className="min-w-0 space-y-3">
+                  <PortfolioOverview key={selectedSourceId ?? ALL_ACCOUNTS} summary={summary} />
+                  <CalculationStatus
+                    portfolio={portfolioQuery.data}
+                    requestFailed={portfolioQuery.isError}
+                    refreshing={portfolioQuery.isFetching}
+                    disabled={authenticationLost}
+                    onRefresh={() => void portfolioQuery.refetch()}
+                    postSyncNotice={
+                      syncCompletedAt === null ? null : fastRefresh ? "checking" : "unconfirmed"
+                    }
+                  />
+                </div>
+                <SelectedSourceMenu
+                  account={replayAccount}
+                  isSyncing={replayAccount !== undefined && syncingSourceIds.has(replayAccount.id)}
+                  onReplay={onSourceReplay}
                 />
               </div>
-            </TabsContent>
-            <TabsContent value="taxes"></TabsContent>
-          </Tabs>
-        </div>
-      </SourceCards>
-      <TransactionInspector
-        selection={selectedTransaction}
-        taxmaxi={taxmaxi}
-        disabled={authenticationLost}
-        onUnauthorized={handleUnauthorized}
-        onClose={() => setSelectedTransaction(null)}
-        returnFocusRef={transactionOpenerRef}
-        fallbackFocusRef={transactionListRef}
-      />
+
+              <Tabs defaultValue="assets" className="gap-y-8">
+                <TabsList>
+                  <TabsTrigger value="assets">{m["app.dashboard.tabs.assets"]()}</TabsTrigger>
+                  <TabsTrigger value="transactions">
+                    {m["app.dashboard.tabs.transactions"]()}
+                  </TabsTrigger>
+                  <TabsTrigger value="taxes">{m["app.dashboard.tabs.taxes"]()}</TabsTrigger>
+                </TabsList>
+                <TabsContent value="assets">
+                  {portfolioQuery.data?.activeRun === null ? (
+                    <p className="rounded-lg border border-border p-6 text-sm text-muted-foreground">
+                      {m["app.calculation.positionsUnavailable"]()}
+                    </p>
+                  ) : (
+                    <AssetsTable
+                      currency={portfolioQuery.data?.currency ?? "EUR"}
+                      error={portfolioQuery.isError && portfolioQuery.data === undefined}
+                      holdings={activeHoldings}
+                      loading={portfolioQuery.isPending && portfolioQuery.data === undefined}
+                    />
+                  )}
+                </TabsContent>
+                <TabsContent value="transactions">
+                  <div
+                    ref={transactionListRef}
+                    tabIndex={-1}
+                    role="region"
+                    aria-label={m["app.dashboard.tabs.transactions"]()}
+                  >
+                    <TransactionsTable
+                      disabled={authenticationLost}
+                      onSelect={selectTransaction}
+                      selectedTransactionId={selectedTransaction?.transactionId ?? null}
+                      error={transactionQuery.isError}
+                      hasNextPage={transactionQuery.data?.page.hasMore ?? false}
+                      loading={transactionQuery.isFetching}
+                      onNextPage={goToNextTransactionPage}
+                      onPreviousPage={goToPreviousTransactionPage}
+                      onRetry={() => void transactionQuery.refetch()}
+                      pageIndex={transactionCursors.length - 1}
+                      totalCount={transactionQuery.data?.totalCount ?? 0}
+                      transactions={transactionQuery.data?.transactions ?? []}
+                    />
+                  </div>
+                </TabsContent>
+                <TabsContent value="taxes"></TabsContent>
+              </Tabs>
+            </div>
+          </SourceCards>
+          <TransactionInspector
+            selection={selectedTransaction}
+            taxmaxi={taxmaxi}
+            disabled={authenticationLost}
+            onUnauthorized={handleUnauthorized}
+            onClose={() => setSelectedTransaction(null)}
+            returnFocusRef={transactionOpenerRef}
+            fallbackFocusRef={transactionListRef}
+          />
+        </>
+      )}
     </div>
   )
 }

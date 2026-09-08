@@ -3,8 +3,11 @@ import { useSuspenseQueries, useSuspenseQuery } from "@tanstack/react-query"
 import { useCallback, useMemo } from "react"
 import {
   isTaxMaxiUnauthorizedError,
+  type Account as TaxMaxiAccount,
+  type BillingStatus,
   type Source as TaxMaxiSource,
   type SourceOverview,
+  type SourceList,
 } from "taxmaxi"
 
 import { AppHeader } from "#/components/app-header"
@@ -17,6 +20,45 @@ import { m } from "#/paraglide/messages"
 import { getLocale } from "#/paraglide/runtime"
 import { clearAuthSessionCookie, getAuthStatus } from "#/server-functions/auth"
 import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
+
+/**
+ * Loads everything the `/app` page needs before it renders: the sources with
+ * their overviews, the account (for `welcomeSeenAt`), and the billing status
+ * (#108 D08). A 401 from any read is rethrown so the route redirects to
+ * login. A non-401 billing failure does not block the page: `billing` is
+ * `null` and the first-sync wizard shows `billing_unknown` with a retry.
+ */
+export const loadAppPageData = async ({
+  loadAccount,
+  loadBilling,
+  loadSourceOverview,
+  loadSources,
+}: {
+  readonly loadAccount: () => Promise<TaxMaxiAccount>
+  readonly loadBilling: () => Promise<BillingStatus>
+  readonly loadSourceOverview: (sourceId: string) => Promise<SourceOverview>
+  readonly loadSources: () => Promise<SourceList>
+}): Promise<{
+  readonly account: TaxMaxiAccount
+  readonly billing: BillingStatus | null
+  readonly overviews: ReadonlyArray<SourceOverview>
+  readonly sourceList: SourceList
+}> => {
+  const billingPromise = loadBilling().catch((error: unknown) => {
+    if (isTaxMaxiUnauthorizedError(error)) throw error
+    return null
+  })
+  const sourcesPromise = loadSources().then(async (sourceList) => ({
+    overviews: await Promise.all(sourceList.sources.map((source) => loadSourceOverview(source.id))),
+    sourceList,
+  }))
+  const [{ overviews, sourceList }, account, billing] = await Promise.all([
+    sourcesPromise,
+    loadAccount(),
+    billingPromise,
+  ])
+  return { account, billing, overviews, sourceList }
+}
 
 export const Route = createFileRoute("/app")({
   beforeLoad: async () => {
@@ -31,14 +73,21 @@ export const Route = createFileRoute("/app")({
   loader: async ({ context }) => {
     const taxmaxi = context.taxmaxi()
     try {
-      const sourceList = await taxmaxi.sources.list()
-      context.queryClient.setQueryData(queryKeys.sourceList(), sourceList)
-      await Promise.all(
-        sourceList.sources.map((source) =>
-          context.queryClient.ensureQueryData(queries.sourceOverview(taxmaxi, source.id))
-        )
-      )
-      return sourceList
+      return await loadAppPageData({
+        loadAccount: () => context.queryClient.ensureQueryData(queries.account(taxmaxi)),
+        loadBilling: () =>
+          context.queryClient.ensureQueryData({
+            ...queries.billingStatus(taxmaxi),
+            revalidateIfStale: true,
+          }),
+        loadSourceOverview: (sourceId) =>
+          context.queryClient.ensureQueryData(queries.sourceOverview(taxmaxi, sourceId)),
+        loadSources: async () => {
+          const sourceList = await taxmaxi.sources.list()
+          context.queryClient.setQueryData(queryKeys.sourceList(), sourceList)
+          return sourceList
+        },
+      })
     } catch (error) {
       if (!isTaxMaxiUnauthorizedError(error)) {
         throw error
@@ -148,6 +197,7 @@ function RouteComponent() {
         onUnauthorized={onUnauthorized}
         replaySourceSync={replaySourceSync}
         resolveName={resolveName}
+        sourceOverviews={sourceOverviews}
         sourceSyncSeeds={sourceSyncSeeds}
         startSourceSync={startSourceSync}
       />

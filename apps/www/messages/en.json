@@ -243,6 +243,66 @@
       "submit": "Add wallet",
       "error": "Couldn't add this wallet."
     },
+    "firstSync": {
+      "announcements": "First sync updates",
+      "stepsLabel": "Setup steps",
+      "stepProgress": "Step {current} of {total}: {label}",
+      "steps": {
+        "welcome": "Welcome",
+        "connect": "Connect a source",
+        "plan": "Plan and credits",
+        "sync": "First sync",
+        "done": "Done"
+      },
+      "connected": "{sourceName} connected",
+      "credits": {
+        "one": "1 credit available",
+        "many": "{count} credits available"
+      },
+      "needsSource": {
+        "headline": "Connect your first source",
+        "body": "Add a wallet address and TaxMaxi creates a source for it. Nothing is imported until you start the first sync yourself."
+      },
+      "needsCredits": {
+        "headlinePlan": "Pick a plan to unlock your import",
+        "headlineTopUp": "Top up credits to unlock your import",
+        "body": "Importing your history uses transaction credits, one credit per transaction.",
+        "noPlan": "You don't have a plan yet, so there are no credits to spend.",
+        "noCredits": "Your plan is active but has no credits left, so top up before the first sync.",
+        "choosePlan": "Choose a plan",
+        "buyCredits": "Buy credits"
+      },
+      "billingUnknown": {
+        "headline": "We couldn't check your plan",
+        "body": "We couldn't load your plan status, so we can't tell yet whether a sync can start.",
+        "retry": "Retry",
+        "retrying": "Checking…"
+      },
+      "ready": {
+        "headline": "Ready when you are",
+        "body": "That's enough to import your {sourceName} history. Nothing starts until you say so.",
+        "start": "Start my first sync"
+      },
+      "syncing": {
+        "headline": "Importing your {sourceName} history",
+        "body": "Progress shows at the top of the page. You can leave and come back."
+      },
+      "paused": {
+        "headline": "Sync paused — more credits needed",
+        "body": "Your credits ran out mid-import. Everything fetched so far is kept, and the sync continues where it stopped.",
+        "hint": "Add credits from the notice at the top of the page."
+      },
+      "resumable": {
+        "headline": "Ready to continue",
+        "body": "That's enough to finish the import. It continues where it stopped, and nothing is charged twice.",
+        "continue": "Continue my first sync"
+      },
+      "failed": {
+        "headline": "Your first sync didn't finish",
+        "body": "Something went wrong on our side while importing. Nothing was lost, and you can try again now.",
+        "tryAgain": "Try again"
+      }
+    },
     "dashboard": {
       "tabs": {
         "assets": "Assets",
