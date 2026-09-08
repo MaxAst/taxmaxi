@@ -1765,13 +1765,6 @@ const seedActive2024 = () =>
           reportingCurrency: "EUR",
           runId: run.id,
         },
-        {
-          principalId: TEST_PRINCIPAL_ID,
-          jurisdiction: "DE",
-          taxYear: 2025,
-          reportingCurrency: "EUR",
-          runId: null,
-        },
       ])
     })
   )
@@ -1815,6 +1808,35 @@ describe("completed-sync calculation requests", () => {
         yield* Effect.promise(() => expect(completeInBerlin2026(job.id)).rejects.toBeDefined())
         expect(yield* Effect.promise(selectCalculationRequests)).toEqual(requests)
       })
+  )
+
+  it.effect("completion retains an existing historical scope without an active run", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() =>
+        runPg(
+          Effect.flatMap(drizzle, (db) =>
+            db.insert(schema.activeCalculationRuns).values({
+              principalId: TEST_PRINCIPAL_ID,
+              jurisdiction: "DE",
+              taxYear: 2023,
+              reportingCurrency: "EUR",
+              runId: null,
+            })
+          )
+        )
+      )
+      const job = yield* Effect.promise(() => createJob())
+      yield* Effect.promise(() => claimJob({ jobId: job.id }))
+      yield* Effect.promise(() => completeInBerlin2026(job.id))
+      const requests = yield* Effect.promise(selectCalculationRequests)
+      expect(requests.map(({ taxYear }) => taxYear)).toEqual([2023, 2024, 2026])
+      expect(
+        requests.every(
+          ({ sourceJobId, principalId, status }) =>
+            sourceJobId === job.id && principalId === TEST_PRINCIPAL_ID && status === "queued"
+        )
+      ).toBe(true)
+    })
   )
 
   it.effect(

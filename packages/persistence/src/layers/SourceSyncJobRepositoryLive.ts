@@ -1044,8 +1044,7 @@ const make = Effect.gen(function* () {
               and(
                 eq(schema.activeCalculationRuns.principalId, job.principalId),
                 eq(schema.activeCalculationRuns.jurisdiction, "DE"),
-                eq(schema.activeCalculationRuns.reportingCurrency, "EUR"),
-                isNotNull(schema.activeCalculationRuns.runId)
+                eq(schema.activeCalculationRuns.reportingCurrency, "EUR")
               )
             )
             .pipe(wrapSyncEngineSqlError("sourceSyncJobRepository.completeJob.scopes"))
