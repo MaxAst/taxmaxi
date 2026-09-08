@@ -65,6 +65,13 @@ const rowToEmailVerificationRequest = (
   )
 }
 
+/**
+ * `last_sent_at` never moves backward. A writer captures its `sentAt` before
+ * it takes the user lock, so a slow writer can reach the row after a faster
+ * one already recorded a later send.
+ */
+const laterOf = (stored: Date, sentAt: Date): Date => (sentAt > stored ? sentAt : stored)
+
 const make = Effect.gen(function* () {
   const db = yield* drizzle
 
@@ -146,7 +153,10 @@ const make = Effect.gen(function* () {
 
           const now = yield* DateTime.nowAsDate
           const [active] = yield* tx
-            .select({ id: emailVerificationRequests.id })
+            .select({
+              id: emailVerificationRequests.id,
+              lastSentAt: emailVerificationRequests.lastSentAt,
+            })
             .from(emailVerificationRequests)
             .where(
               and(
@@ -160,15 +170,19 @@ const make = Effect.gen(function* () {
           if (active !== undefined) {
             const [reused] = yield* tx
               .update(emailVerificationRequests)
-              .set({ lastSentAt: start.sentAt.toDate(), updatedAt: now })
+              .set({
+                lastSentAt: laterOf(active.lastSentAt, start.sentAt.toDate()),
+                updatedAt: now,
+              })
               .where(eq(emailVerificationRequests.id, active.id))
               .returning(selectFields)
             const request = Option.fromNullishOr(reused).pipe(
               Option.flatMap((value) => rowToEmailVerificationRequest(value))
             )
 
-            // `consume` does not take the user lock, so a verify can delete the
-            // row between the select and this update; then start fresh below.
+            // Every writer of this user's rows, `consume` included, holds the
+            // user lock, so the row selected above is still here. The Option
+            // only covers the row mapping's nullable user column.
             if (Option.isSome(request)) {
               return request.value
             }
@@ -236,6 +250,7 @@ const make = Effect.gen(function* () {
 
           const now = yield* DateTime.nowAsDate
           const sendCount = locked.sendCount + 1
+          const lastSentAt = laterOf(locked.lastSentAt, renewal.sentAt.toDate())
 
           yield* tx.insert(emailVerificationRequests).values({
             id: renewal.replacementId,
@@ -244,7 +259,7 @@ const make = Effect.gen(function* () {
             code: renewal.code,
             expiresAt: renewal.expiresAt.toDate(),
             sendCount,
-            lastSentAt: renewal.sentAt.toDate(),
+            lastSentAt,
             createdAt: now,
             updatedAt: now,
           })
@@ -261,7 +276,7 @@ const make = Effect.gen(function* () {
               code: renewal.code,
               expiresAt: renewal.expiresAt,
               sendCount,
-              lastSentAt: renewal.sentAt,
+              lastSentAt: Timestamp.make({ epochMillis: lastSentAt.getTime() }),
               createdAt: Timestamp.make({ epochMillis: now.getTime() }),
               updatedAt: Timestamp.make({ epochMillis: now.getTime() }),
             })
@@ -297,16 +312,35 @@ const make = Effect.gen(function* () {
     }).pipe(wrapSqlError("findByUserId"))
 
   const consume: EmailVerificationRequestRepositoryService["consume"] = (id) =>
-    Effect.gen(function* () {
-      const [row] = yield* db
-        .delete(emailVerificationRequests)
-        .where(eq(emailVerificationRequests.id, id))
-        .returning(selectFields)
+    db
+      .transaction((tx) =>
+        Effect.gen(function* () {
+          // Same shape as `renew`: the user is read only to know which lock to
+          // take, and the delete runs after the lock so it cannot pull a row
+          // out from under another writer's select.
+          const [owner] = yield* tx
+            .select({ userId: emailVerificationRequests.userId })
+            .from(emailVerificationRequests)
+            .where(eq(emailVerificationRequests.id, id))
+            .limit(1)
 
-      return Option.fromNullishOr(row).pipe(
-        Option.flatMap((value) => rowToEmailVerificationRequest(value))
+          if (owner === undefined || owner.userId === null) {
+            return Option.none()
+          }
+
+          yield* lockUserRequests({ executor: tx, userId: AuthUserId.make(owner.userId) })
+
+          const [row] = yield* tx
+            .delete(emailVerificationRequests)
+            .where(eq(emailVerificationRequests.id, id))
+            .returning(selectFields)
+
+          return Option.fromNullishOr(row).pipe(
+            Option.flatMap((value) => rowToEmailVerificationRequest(value))
+          )
+        })
       )
-    }).pipe(wrapSqlError("consume"))
+      .pipe(wrapSqlError("consume"))
 
   const deleteExpired: EmailVerificationRequestRepositoryService["deleteExpired"] = (now) =>
     Effect.gen(function* () {

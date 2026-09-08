@@ -87,10 +87,12 @@ export interface EmailVerificationRequestRepositoryService {
    * Reuse the user's active request or start a fresh one, in one transaction
    * under the user's write lock.
    *
-   * When an unexpired request exists, its `lastSentAt` moves to `sentAt` and
-   * `sendCount` stays; the returned request carries the existing id and code.
-   * Otherwise the user's expired rows are deleted and a fresh request is
-   * inserted with `sendCount` 1. The caller sends the returned request's code.
+   * When an unexpired request exists, its `lastSentAt` moves to `sentAt`
+   * unless the stored value is already later (it never moves backward), and
+   * `sendCount` stays; the returned request carries the existing id, code,
+   * and stored `lastSentAt`. Otherwise the user's expired rows are deleted and
+   * a fresh request is inserted with `sendCount` 1. The caller sends the
+   * returned request's code.
    */
   readonly startOrReuse: (
     start: EmailVerificationRequestStart
@@ -101,8 +103,9 @@ export interface EmailVerificationRequestRepositoryService {
    * write lock.
    *
    * Inserts the replacement with the replaced row's `sendCount` plus one and
-   * deletes the replaced row. Returns none when the request is gone, which is
-   * also what the second of two concurrent renewals sees.
+   * the later of the replaced row's `lastSentAt` and `sentAt`, then deletes
+   * the replaced row. Returns none when the request is gone, which is also
+   * what the second of two concurrent renewals sees.
    */
   readonly renew: (
     renewal: EmailVerificationRequestRenewal
@@ -123,7 +126,9 @@ export interface EmailVerificationRequestRepositoryService {
   ) => Effect.Effect<Option.Option<EmailVerificationRequest>, PersistenceError>
 
   /**
-   * Atomically read and delete a verification request.
+   * Atomically read and delete a verification request, in one transaction
+   * under the owning user's write lock, so no other writer of that user's
+   * rows loses a row it has already selected.
    */
   readonly consume: (
     id: EmailVerificationRequestId
