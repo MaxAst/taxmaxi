@@ -22,14 +22,32 @@ import { clearAuthSessionCookie, getAuthStatus } from "#/server-functions/auth"
 import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 
 /**
+ * Waits for every read to settle, then rethrows the first 401 among them.
+ * Nothing in the loader may race SDK reads with a fail-fast `Promise.all`:
+ * a 500 that settles before a 401 would hide the 401, and the route would
+ * render an error instead of redirecting to login. What any other failure
+ * means is up to the caller.
+ */
+const settleReads = async <T extends readonly unknown[] | []>(reads: T) => {
+  const results = await Promise.allSettled(reads)
+
+  const unauthorized = results.find(
+    (result) => result.status === "rejected" && isTaxMaxiUnauthorizedError(result.reason)
+  )
+  if (unauthorized?.status === "rejected") throw unauthorized.reason
+
+  return results
+}
+
+/**
  * Loads everything the `/app` page needs before it renders: the sources with
  * their overviews, the account (for `welcomeSeenAt`), and the billing status
- * (#108 D08). All three reads run together and every one settles before the
- * result is judged, so a 401 from any read is rethrown (the route redirects
+ * (#108 D08). All reads, including one overview per source, go through
+ * `settleReads`, so a 401 from any of them is rethrown (the route redirects
  * to login) even when another read failed first for a different reason. A
  * non-401 billing failure does not block the page: `billing` is `null` and
  * the first-sync wizard shows `billing_unknown` with a retry. Any other
- * failure is rethrown.
+ * failure is rethrown, the first one in read order when several fail.
  */
 export const loadAppPageData = async ({
   loadAccount,
@@ -47,21 +65,26 @@ export const loadAppPageData = async ({
   readonly overviews: ReadonlyArray<SourceOverview>
   readonly sourceList: SourceList
 }> => {
-  const [sources, account, billing] = await Promise.allSettled([
+  const loadOverviews = async (sourceList: SourceList) => {
+    const overviews = await settleReads(
+      sourceList.sources.map((source) => loadSourceOverview(source.id))
+    )
+
+    const failed = overviews.find((result) => result.status === "rejected")
+    if (failed?.status === "rejected") throw failed.reason
+
+    return overviews.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []))
+  }
+
+  const [sources, account, billing] = await settleReads([
     loadSources().then(async (sourceList) => ({
-      overviews: await Promise.all(
-        sourceList.sources.map((source) => loadSourceOverview(source.id))
-      ),
+      overviews: await loadOverviews(sourceList),
       sourceList,
     })),
     loadAccount(),
     loadBilling(),
   ])
 
-  const unauthorized = [sources, account, billing].find(
-    (result) => result.status === "rejected" && isTaxMaxiUnauthorizedError(result.reason)
-  )
-  if (unauthorized?.status === "rejected") throw unauthorized.reason
   if (sources.status === "rejected") throw sources.reason
   if (account.status === "rejected") throw account.reason
 

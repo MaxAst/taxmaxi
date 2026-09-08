@@ -170,6 +170,38 @@ describe("loadAppPageData (#108 D08)", () => {
     ).rejects.toBe(error)
   })
 
+  it("prefers a later 401 from one overview over an earlier 500 from another", async () => {
+    const error = unauthorized()
+
+    await expect(
+      loadAppPageData(
+        loaders({
+          loadSourceOverview: vi.fn((sourceId: string) =>
+            sourceId === SOURCE_A
+              ? Promise.reject(unavailable())
+              : rejectLater<SourceOverview>(error)
+          ),
+        })
+      )
+    ).rejects.toBe(error)
+  })
+
+  it("rethrows the first overview failure in source order when none is a 401", async () => {
+    const error = unavailable()
+
+    await expect(
+      loadAppPageData(
+        loaders({
+          loadSourceOverview: vi.fn((sourceId: string) =>
+            sourceId === SOURCE_A
+              ? rejectLater<SourceOverview>(error)
+              : Promise.reject(new Error("Overview B is unavailable"))
+          ),
+        })
+      )
+    ).rejects.toBe(error)
+  })
+
   it("rethrows a non-401 sources failure, not the billing failure, when both fail", async () => {
     const error = unavailable()
 
