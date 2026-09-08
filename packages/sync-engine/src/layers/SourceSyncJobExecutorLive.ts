@@ -502,16 +502,14 @@ const make = Effect.gen(function* () {
         failedRawRecordIds: new Set(),
       }
 
-      // A sync clears lastSyncedAt while it runs and stamps it on completion.
-      // A replay (prepared records present) must leave the stored timestamp
-      // of the last real provider fetch untouched.
-      const lastSyncedAtUpdate = preparedReplayRecords === undefined ? { lastSyncedAt: null } : {}
-
+      // lastSyncedAt means the last successful sync completion. Only the
+      // completion write stamps it; every other progress write omits the field
+      // so a running, failed, or credit-stopped sync keeps the previous value.
+      // Replays never touch it either.
       yield* sourceSyncStateRepository.persistProgress({
         sourceId: source.id,
         jobId,
         state: initialClassification.execution,
-        ...lastSyncedAtUpdate,
         lastErrorMessage: null,
       })
 
@@ -569,7 +567,6 @@ const make = Effect.gen(function* () {
             sourceId: source.id,
             jobId,
             state: execution,
-            ...lastSyncedAtUpdate,
             lastErrorMessage: null,
           })
           yield* heartbeatSourceSyncJob({ jobId, workerId })
@@ -795,7 +792,6 @@ const make = Effect.gen(function* () {
         sourceId: source.id,
         jobId,
         state: initialLoop.execution,
-        lastSyncedAt: null,
         lastErrorMessage: null,
       })
 
@@ -854,7 +850,6 @@ const make = Effect.gen(function* () {
             sourceId: source.id,
             jobId,
             state: nextExecution,
-            lastSyncedAt: null,
             lastErrorMessage: null,
           })
           yield* heartbeatSourceSyncJob({ jobId, workerId })
@@ -933,7 +928,6 @@ const make = Effect.gen(function* () {
         sourceId: source.id,
         jobId,
         state: reconciliationExecution,
-        lastSyncedAt: null,
         lastErrorMessage: null,
       })
       const reconciliationSummary = yield* reconcilePrincipalTransfers({
