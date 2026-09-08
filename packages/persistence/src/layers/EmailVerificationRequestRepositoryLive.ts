@@ -18,7 +18,7 @@ import {
   EmailVerificationRequest,
   EmailVerificationRequestId,
 } from "@my/core/authentication"
-import { Timestamp } from "@my/core/shared/values/Timestamp"
+import { Timestamp, addMillis } from "@my/core/shared/values/Timestamp"
 import { wrapSqlError } from "../errors/RepositoryError.ts"
 import {
   emailVerificationRequests,
@@ -184,12 +184,17 @@ const make = Effect.gen(function* () {
             .delete(emailVerificationRequests)
             .where(eq(emailVerificationRequests.userId, start.userId))
 
+          // The expiry counts from the same in-lock send time, so a wait on
+          // the lock does not shorten the code's life.
+          const sentAt = Timestamp.make({ epochMillis: now.getTime() })
+          const expiresAt = addMillis(sentAt, start.lifetimeMillis)
+
           yield* tx.insert(emailVerificationRequests).values({
             id: start.id,
             userId: start.userId,
             email: start.email,
             code: start.code,
-            expiresAt: start.expiresAt.toDate(),
+            expiresAt: expiresAt.toDate(),
             sendCount: 1,
             lastSentAt: now,
             createdAt: now,
@@ -201,11 +206,11 @@ const make = Effect.gen(function* () {
             userId: start.userId,
             email: start.email,
             code: start.code,
-            expiresAt: start.expiresAt,
+            expiresAt,
             sendCount: 1,
-            lastSentAt: Timestamp.make({ epochMillis: now.getTime() }),
-            createdAt: Timestamp.make({ epochMillis: now.getTime() }),
-            updatedAt: Timestamp.make({ epochMillis: now.getTime() }),
+            lastSentAt: sentAt,
+            createdAt: sentAt,
+            updatedAt: sentAt,
           })
         })
       )
@@ -240,8 +245,11 @@ const make = Effect.gen(function* () {
             return Option.none()
           }
 
-          // Taken after the lock, like in `startOrReuse`.
+          // Taken after the lock, like in `startOrReuse`, and the expiry
+          // counts from it.
           const now = yield* DateTime.nowAsDate
+          const sentAt = Timestamp.make({ epochMillis: now.getTime() })
+          const expiresAt = addMillis(sentAt, renewal.lifetimeMillis)
           const sendCount = locked.sendCount + 1
 
           yield* tx.insert(emailVerificationRequests).values({
@@ -249,7 +257,7 @@ const make = Effect.gen(function* () {
             userId: locked.userId,
             email: locked.email,
             code: renewal.code,
-            expiresAt: renewal.expiresAt.toDate(),
+            expiresAt: expiresAt.toDate(),
             sendCount,
             lastSentAt: now,
             createdAt: now,
@@ -266,11 +274,11 @@ const make = Effect.gen(function* () {
               userId: AuthUserId.make(locked.userId),
               email: Email.make(locked.email),
               code: renewal.code,
-              expiresAt: renewal.expiresAt,
+              expiresAt,
               sendCount,
-              lastSentAt: Timestamp.make({ epochMillis: now.getTime() }),
-              createdAt: Timestamp.make({ epochMillis: now.getTime() }),
-              updatedAt: Timestamp.make({ epochMillis: now.getTime() }),
+              lastSentAt: sentAt,
+              createdAt: sentAt,
+              updatedAt: sentAt,
             })
           )
         })

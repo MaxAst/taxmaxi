@@ -750,8 +750,9 @@ const make = Effect.gen(function* () {
    * Reuse the user's active request or start a fresh one. The repository does
    * both under the user's write lock and takes the send time inside it: an
    * active request gets `lastSentAt` set to that time and keeps its
-   * `sendCount`; otherwise a fresh request is written with `sendCount` 1. The
-   * caller hands the returned code to delivery.
+   * `sendCount`; otherwise a fresh request is written with `sendCount` 1 and
+   * an expiry counted from that same time. The caller hands the returned code
+   * to delivery.
    */
   const startOrReuseEmailVerificationRequest = ({
     userId,
@@ -761,7 +762,6 @@ const make = Effect.gen(function* () {
     readonly email: AuthUser["email"]
   }): Effect.Effect<EmailVerificationRequest, AuthProcessingError> =>
     Effect.gen(function* () {
-      const now = Timestamp.now()
       const { id, code } = yield* generateEmailVerificationIdAndCode
 
       return yield* emailVerificationRequestRepo
@@ -770,7 +770,7 @@ const make = Effect.gen(function* () {
           userId,
           email: sanitizeEmail(email),
           code,
-          expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
+          lifetimeMillis: EMAIL_VERIFICATION_TTL_MILLIS,
         })
         .pipe(Effect.mapError((cause) => authProcessingError("start-email-verification", cause)))
     })
@@ -786,7 +786,6 @@ const make = Effect.gen(function* () {
     readonly requestId: EmailVerificationRequestId
   }): Effect.Effect<Option.Option<EmailVerificationRequest>, AuthProcessingError> =>
     Effect.gen(function* () {
-      const now = Timestamp.now()
       const { id, code } = yield* generateEmailVerificationIdAndCode
 
       return yield* emailVerificationRequestRepo
@@ -794,7 +793,7 @@ const make = Effect.gen(function* () {
           id: requestId,
           replacementId: id,
           code,
-          expiresAt: Timestamp.addMillis(now, EMAIL_VERIFICATION_TTL_MILLIS),
+          lifetimeMillis: EMAIL_VERIFICATION_TTL_MILLIS,
         })
         .pipe(Effect.mapError((cause) => authProcessingError("renew-email-verification", cause)))
     })

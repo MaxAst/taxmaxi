@@ -41,31 +41,33 @@ export interface EmailVerificationRequestInsert {
  * EmailVerificationRequestStart - Input to send a code to a user who may
  * already have an active request.
  *
- * `id`, `code`, and `expiresAt` are used only when no active request exists
- * and a fresh one is inserted. The send time is taken by the repository inside
- * the user's write lock; it also decides which existing request still counts
- * as active.
+ * `id`, `code`, and `lifetimeMillis` are used only when no active request
+ * exists and a fresh one is inserted. The send time is taken by the repository
+ * inside the user's write lock; it decides which existing request still counts
+ * as active, and the fresh request expires `lifetimeMillis` after it, so a
+ * wait on the lock does not shorten the code's life.
  */
 export interface EmailVerificationRequestStart {
   readonly id: EmailVerificationRequestId
   readonly userId: AuthUserId
   readonly email: Email
   readonly code: EmailVerificationCode
-  readonly expiresAt: Timestamp
+  readonly lifetimeMillis: number
 }
 
 /**
  * EmailVerificationRequestRenewal - Input to replace a request with a fresh code.
  *
  * `id` names the request being replaced. The replacement keeps its user and
- * email, takes the replaced request's `sendCount` plus one, and records the
- * send time taken by the repository inside the user's write lock.
+ * email, takes the replaced request's `sendCount` plus one, records the send
+ * time taken by the repository inside the user's write lock, and expires
+ * `lifetimeMillis` after that time.
  */
 export interface EmailVerificationRequestRenewal {
   readonly id: EmailVerificationRequestId
   readonly replacementId: EmailVerificationRequestId
   readonly code: EmailVerificationCode
-  readonly expiresAt: Timestamp
+  readonly lifetimeMillis: number
 }
 
 /**
@@ -86,12 +88,14 @@ export interface EmailVerificationRequestRepositoryService {
    * Reuse the user's active request or start a fresh one, in one transaction
    * under the user's write lock.
    *
-   * The send time is taken once inside the lock and decides both which
-   * request is still active and the written `lastSentAt`. When an unexpired
-   * request exists, its `lastSentAt` moves to that time and `sendCount` stays;
-   * the returned request carries the existing id and code. Otherwise the
-   * user's expired rows are deleted and a fresh request is inserted with
-   * `sendCount` 1. The caller sends the returned request's code.
+   * The send time is taken once inside the lock and decides which request is
+   * still active, the written `lastSentAt`, and the fresh request's
+   * `expiresAt`. When an unexpired request exists, its `lastSentAt` moves to
+   * that time and `sendCount` and `expiresAt` stay; the returned request
+   * carries the existing id and code. Otherwise the user's expired rows are
+   * deleted and a fresh request is inserted with `sendCount` 1 and
+   * `expiresAt` set to the send time plus `lifetimeMillis`. The caller sends
+   * the returned request's code.
    */
   readonly startOrReuse: (
     start: EmailVerificationRequestStart
@@ -101,10 +105,11 @@ export interface EmailVerificationRequestRepositoryService {
    * Replace a request with a fresh code in one transaction under the user's
    * write lock.
    *
-   * Inserts the replacement with the replaced row's `sendCount` plus one and
-   * the send time taken inside the lock as `lastSentAt`, then deletes the
-   * replaced row. Returns none when the request is gone, which is also what
-   * the second of two concurrent renewals sees.
+   * Inserts the replacement with the replaced row's `sendCount` plus one, the
+   * send time taken inside the lock as `lastSentAt`, and that time plus
+   * `lifetimeMillis` as `expiresAt`, then deletes the replaced row. Returns
+   * none when the request is gone, which is also what the second of two
+   * concurrent renewals sees.
    */
   readonly renew: (
     renewal: EmailVerificationRequestRenewal

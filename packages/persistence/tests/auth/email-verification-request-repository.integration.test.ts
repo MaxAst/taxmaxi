@@ -24,6 +24,7 @@ await Effect.runPromise(context.recreateTestDatabase())
 const TEST_FIRST_USER_ID = AuthUserId.make("00000000-4000-4000-8000-000000000701")
 const TEST_SECOND_USER_ID = AuthUserId.make("00000000-4000-4000-8000-000000000702")
 const TEST_FIRST_SENT_AT = Timestamp.Timestamp.make({ epochMillis: 1_757_300_000_000 })
+const TEST_LIFETIME_MILLIS = 10 * 60 * 1000
 
 const runRepository = <A, E>(effect: Effect.Effect<A, E, EmailVerificationRequestRepository>) =>
   Effect.runPromise(
@@ -217,7 +218,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
               userId: TEST_FIRST_USER_ID,
               email: Email.make("verification-one@example.com"),
               code: EmailVerificationCode.make("REUSE002"),
-              expiresAt: Timestamp.addMinutes(now, 10),
+              lifetimeMillis: TEST_LIFETIME_MILLIS,
             })
           )
         )
@@ -287,7 +288,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
               userId: TEST_FIRST_USER_ID,
               email: Email.make("verification-one@example.com"),
               code: EmailVerificationCode.make("REUSE003"),
-              expiresAt: Timestamp.addMinutes(Timestamp.now(), 10),
+              lifetimeMillis: TEST_LIFETIME_MILLIS,
             })
           )
         )
@@ -296,6 +297,8 @@ describe("EmailVerificationRequestRepositoryLive", () => {
       expect(fresh.code).toBe(EmailVerificationCode.make("REUSE003"))
       expect(fresh.sendCount).toBe(1)
       expect(fresh.lastSentAt.epochMillis).toBeGreaterThan(expiresAt.epochMillis)
+      // The expiry counts from the same in-lock send time as `lastSentAt`.
+      expect(fresh.expiresAt.epochMillis).toBe(fresh.lastSentAt.epochMillis + TEST_LIFETIME_MILLIS)
 
       const rows = yield* Effect.promise(() => selectUserRows(TEST_FIRST_USER_ID))
       expect(rows).toHaveLength(1)
@@ -336,7 +339,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                   userId: TEST_FIRST_USER_ID,
                   email: Email.make("verification-one@example.com"),
                   code: EmailVerificationCode.make("MIXED002"),
-                  expiresAt: Timestamp.addMinutes(now, 10),
+                  lifetimeMillis: TEST_LIFETIME_MILLIS,
                 })
               )
             )
@@ -348,7 +351,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                   id: requestId,
                   replacementId,
                   code: EmailVerificationCode.make("MIXED003"),
-                  expiresAt: Timestamp.addMinutes(now, 10),
+                  lifetimeMillis: TEST_LIFETIME_MILLIS,
                 })
               )
             )
@@ -404,7 +407,6 @@ describe("EmailVerificationRequestRepositoryLive", () => {
     Effect.gen(function* () {
       const firstFreshId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000761")
       const secondFreshId = EmailVerificationRequestId.make("00000000-4000-4000-8000-000000000762")
-      const now = Timestamp.now()
 
       const startWith = ({
         id,
@@ -421,7 +423,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                 userId: TEST_FIRST_USER_ID,
                 email: Email.make("verification-one@example.com"),
                 code,
-                expiresAt: Timestamp.addMinutes(now, 10),
+                lifetimeMillis: TEST_LIFETIME_MILLIS,
               })
             )
           )
@@ -489,7 +491,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                 id: requestId,
                 replacementId,
                 code,
-                expiresAt: Timestamp.addMinutes(now, 10),
+                lifetimeMillis: TEST_LIFETIME_MILLIS,
               })
             )
           )
@@ -547,7 +549,7 @@ describe("EmailVerificationRequestRepositoryLive", () => {
                 "00000000-4000-4000-8000-000000000744"
               ),
               code: EmailVerificationCode.make("RACE0004"),
-              expiresAt: Timestamp.addMinutes(now, 10),
+              lifetimeMillis: TEST_LIFETIME_MILLIS,
             })
           )
         )

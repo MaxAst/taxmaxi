@@ -265,7 +265,7 @@ const makeEmailVerificationRequestRepo = (
     state.verificationRequests.set(verificationRequest.id, verificationRequest)
     return Effect.succeed(verificationRequest)
   },
-  startOrReuse: ({ id, userId, email, code, expiresAt }) => {
+  startOrReuse: ({ id, userId, email, code, lifetimeMillis }) => {
     const now = Timestamp.now()
     const active = Array.from(state.verificationRequests.values()).find(
       (request) => request.userId === userId && request.expiresAt.epochMillis > now.epochMillis
@@ -292,7 +292,7 @@ const makeEmailVerificationRequestRepo = (
       userId,
       email,
       code,
-      expiresAt,
+      expiresAt: Timestamp.addMillis(now, lifetimeMillis),
       sendCount: 1,
       lastSentAt: now,
       createdAt: now,
@@ -301,7 +301,7 @@ const makeEmailVerificationRequestRepo = (
     state.verificationRequests.set(id, fresh)
     return Effect.succeed(fresh)
   },
-  renew: ({ id, replacementId, code, expiresAt }) => {
+  renew: ({ id, replacementId, code, lifetimeMillis }) => {
     const existing = state.verificationRequests.get(id)
     if (existing === undefined) {
       return Effect.succeed(Option.none())
@@ -313,7 +313,7 @@ const makeEmailVerificationRequestRepo = (
       userId: existing.userId,
       email: existing.email,
       code,
-      expiresAt,
+      expiresAt: Timestamp.addMillis(now, lifetimeMillis),
       sendCount: existing.sendCount + 1,
       lastSentAt: now,
       createdAt: now,
