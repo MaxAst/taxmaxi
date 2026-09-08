@@ -1,8 +1,8 @@
 {
   "version": "8",
   "dialect": "postgres",
-  "id": "272f92b4-5816-496f-9db2-a2ee2c2d90b4",
-  "prevIds": ["1f3944e8-802f-4c6f-85b3-a7853cf613b9"],
+  "id": "81fb4257-060c-4b19-aea3-fe69ebb30992",
+  "prevIds": ["53deea49-ba38-42ce-85aa-e3fad61d413a"],
   "ddl": [
     {
       "values": ["evm", "solana", "bitcoin"],
@@ -5043,6 +5043,32 @@
       "generated": null,
       "identity": null,
       "name": "expires_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "email_verification_requests"
+    },
+    {
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "send_count",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "email_verification_requests"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "last_sent_at",
       "entityType": "columns",
       "schema": "public",
       "table": "email_verification_requests"
