@@ -15,7 +15,7 @@ import {
 import { appSurfaceClassName } from "#/components/app-workspace"
 import { CalculationStatus } from "#/components/calculation-status"
 import { AssetsTable } from "#/components/assets-table"
-import { FirstSyncWizard } from "#/components/first-sync-wizard"
+import { FIRST_SYNC_WELCOME_VIDEO_ID, FirstSyncWizard } from "#/components/first-sync-wizard"
 import { SourceCards } from "#/components/source-cards"
 import { Button } from "#/components/ui/button"
 import {
@@ -331,15 +331,45 @@ export function Dashboard({
     enabled: !authenticationLost && !anySourceSynced,
   })
 
+  // The welcome is gated by one server fact, `welcomeSeenAt` (#108 D01). The
+  // `/app` loader seeds the account into the cache; Continue and Skip on the
+  // welcome mark it seen and write the returned account back. The step leaves
+  // as soon as the user clicks, even when the mark fails: the server fact is
+  // the gate, and the next visit shows the welcome again for a retry.
+  const accountQuery = useQuery({
+    ...queries.account(taxmaxi),
+    enabled: !authenticationLost,
+  })
+  const [welcomeDismissed, setWelcomeDismissed] = useState(false)
+  const welcomePending = accountQuery.data?.account.welcomeSeenAt === null && !welcomeDismissed
+  const finishWelcome = useCallback(() => {
+    setWelcomeDismissed(true)
+    taxmaxi.auth.markWelcomeSeen().then(
+      (account) => queryClient.setQueryData(queryKeys.account(), account),
+      (error: unknown) => {
+        if (isTaxMaxiUnauthorizedError(error)) {
+          void handleUnauthorized()
+        }
+      }
+    )
+  }, [handleUnauthorized, queryClient, taxmaxi])
+
   useEffect(() => {
     if (
       isTaxMaxiUnauthorizedError(portfolioQuery.error) ||
       isTaxMaxiUnauthorizedError(transactionQuery.error) ||
-      isTaxMaxiUnauthorizedError(billingQuery.error)
+      isTaxMaxiUnauthorizedError(billingQuery.error) ||
+      isTaxMaxiUnauthorizedError(accountQuery.error)
     ) {
       void handleUnauthorized()
     }
-  }, [billingQuery.error, handleUnauthorized, portfolioQuery.error, transactionQuery.error])
+  }, [
+    accountQuery.error,
+    billingQuery.error,
+    handleUnauthorized,
+    portfolioQuery.error,
+    transactionQuery.error,
+  ])
 
   const goToNextTransactionPage = () => {
     const nextCursor = transactionQuery.data?.page.nextCursor
@@ -580,8 +610,10 @@ export function Dashboard({
 
   // The island stays mounted above whichever body shows, so a first sync's
   // progress is visible over the wizard and over the tabs alike (#108 D06).
+  // An unseen welcome shows even in `done`, so a user whose sources synced
+  // before the welcome existed sees it once and then the tabs (#108 D01, D09).
   const body =
-    firstSync.state === "done" ? null : (
+    firstSync.state === "done" && !welcomePending ? null : (
       <FirstSyncWizard
         billing={billing}
         billingRefreshing={billingQuery.isFetching}
@@ -589,9 +621,12 @@ export function Dashboard({
         islandItemShown={islandShowsTarget}
         onRetryBilling={() => void billingQuery.refetch()}
         onStart={startFirstSync}
+        onWelcomeFinish={finishWelcome}
         resolveName={resolveName}
         sourceName={firstSyncTarget?.name ?? null}
         state={firstSync.state}
+        welcomePending={welcomePending}
+        welcomeVideoId={FIRST_SYNC_WELCOME_VIDEO_ID}
       />
     )
 

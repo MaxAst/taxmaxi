@@ -4,8 +4,8 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { createElement, type ReactNode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { FirstSyncWizard, type FirstSyncWizardState } from "#/components/first-sync-wizard"
-import type { FirstSyncBilling } from "#/lib/first-sync-state"
+import { FirstSyncWizard } from "#/components/first-sync-wizard"
+import type { FirstSyncBilling, FirstSyncState } from "#/lib/first-sync-state"
 import { setLocale } from "#/paraglide/runtime"
 
 vi.mock("@tanstack/react-router", () => ({
@@ -62,16 +62,21 @@ const renderWizard = ({
   islandItemShown = false,
   sourceName = "Coinbase",
   state,
+  welcomePending = false,
+  welcomeVideoId = null,
 }: {
   readonly billing?: FirstSyncBilling
   readonly billingRefreshing?: boolean
   readonly createWalletSource?: (walletAddress: string) => Promise<void>
   readonly islandItemShown?: boolean
   readonly sourceName?: string | null
-  readonly state: FirstSyncWizardState
+  readonly state: FirstSyncState
+  readonly welcomePending?: boolean
+  readonly welcomeVideoId?: string | null
 }) => {
   const onRetryBilling = vi.fn()
   const onStart = vi.fn()
+  const onWelcomeFinish = vi.fn()
   const props = {
     billing: billingStatus,
     billingRefreshing,
@@ -79,13 +84,18 @@ const renderWizard = ({
     islandItemShown,
     onRetryBilling,
     onStart,
+    onWelcomeFinish,
     sourceName,
     state,
+    welcomePending,
+    welcomeVideoId,
   }
   const view = render(<FirstSyncWizard {...props} />)
   return {
+    container: view.container,
     onRetryBilling,
     onStart,
+    onWelcomeFinish,
     rerender: (next: Partial<typeof props>) =>
       view.rerender(<FirstSyncWizard {...props} {...next} />),
   }
@@ -339,6 +349,174 @@ describe("FirstSyncWizard steps and accessibility", () => {
     motionState.reduceMotion = true
     renderWizard({ state: "ready" })
     const region = screen.getByRole("region", { name: "Ready when you are" })
+    const card = region.querySelector("[data-initial]")
+
+    expect(region.getAttribute("data-motion")).toBe("reduced")
+    expect(card?.getAttribute("data-initial")).toBe("none")
+    expect(card?.getAttribute("data-transition-duration")).toBe("0")
+  })
+})
+
+describe("FirstSyncWizard welcome step (#108 T07)", () => {
+  const VIDEO_ID = "dQw4w9WgXcQ"
+
+  const currentStep = () =>
+    screen.getByRole("list", { name: "Setup steps" }).querySelector("[aria-current='step']")
+      ?.textContent
+
+  const next = () => fireEvent.click(screen.getByRole("button", { name: "Next" }))
+
+  it("shows the letter ahead of the state step while the welcome is pending, and never otherwise", () => {
+    const { onStart, onWelcomeFinish, rerender } = renderWizard({
+      state: "ready",
+      welcomePending: true,
+    })
+
+    expect(screen.getByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+    expect(screen.queryByRole("heading", { name: "Ready when you are" })).toBeNull()
+    expect(screen.queryByText("Coinbase connected")).toBeNull()
+    expect(currentStep()).toBe("Step 1 of 5: Welcome")
+    expect(onWelcomeFinish).not.toHaveBeenCalled()
+    expect(onStart).not.toHaveBeenCalled()
+
+    rerender({ welcomePending: false })
+
+    expect(screen.queryByRole("heading", { name: "Hi, I'm Max." })).toBeNull()
+    expect(screen.getByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(currentStep()).toBe("Step 4 of 5: First sync")
+  })
+
+  it("shows the letter over done, and nothing once the welcome is over", () => {
+    const { container, rerender } = renderWizard({ state: "done", welcomePending: true })
+
+    expect(screen.getByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+    expect(currentStep()).toBe("Step 1 of 5: Welcome")
+
+    rerender({ welcomePending: false })
+
+    expect(container.innerHTML).toBe("")
+  })
+
+  it("walks three screens with Next, announcing each and moving focus to its heading, and Continue finishes once", () => {
+    const { onWelcomeFinish } = renderWizard({
+      billing: billing(0),
+      state: "needs_credits",
+      welcomePending: true,
+    })
+    const live = screen.getByRole("status", { name: "First sync updates" })
+
+    expect(live.textContent).toBe("Hi, I'm Max.")
+    expect(document.activeElement).toBe(document.body)
+    expect(screen.getByText("1 of 3")).toBeTruthy()
+    expect(buttons()).toEqual(["Skip", "Next"])
+
+    next()
+
+    expect(live.textContent).toBe("What TaxMaxi stands on")
+    expect(document.activeElement).toBe(
+      screen.getByRole("heading", { name: "What TaxMaxi stands on" })
+    )
+    expect(screen.getByText("2 of 3")).toBeTruthy()
+    expect(screen.getByText("Users first.")).toBeTruthy()
+    expect(screen.getByText("Open.")).toBeTruthy()
+    expect(screen.getByText("Modular and extendible.")).toBeTruthy()
+
+    next()
+
+    expect(live.textContent).toBe("Thanks for being here")
+    expect(document.activeElement).toBe(
+      screen.getByRole("heading", { name: "Thanks for being here" })
+    )
+    expect(screen.getByText("3 of 3")).toBeTruthy()
+    expect(screen.getByText("— Max")).toBeTruthy()
+    expect(buttons()).toEqual(["Continue"])
+    expect(onWelcomeFinish).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }))
+
+    expect(onWelcomeFinish).toHaveBeenCalledTimes(1)
+  })
+
+  it("Skip finishes once from any screen", () => {
+    const { onWelcomeFinish } = renderWizard({ state: "ready", welcomePending: true })
+
+    next()
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }))
+
+    expect(onWelcomeFinish).toHaveBeenCalledTimes(1)
+  })
+
+  it("Escape skips the welcome once, from the page or from inside the wizard, and never once it is over", () => {
+    const { onWelcomeFinish, rerender } = renderWizard({ state: "ready", welcomePending: true })
+
+    fireEvent.keyDown(document.body, { key: "Escape" })
+    expect(onWelcomeFinish).toHaveBeenCalledTimes(1)
+
+    const nextButton = screen.getByRole("button", { name: "Next" })
+    nextButton.focus()
+    fireEvent.keyDown(nextButton, { key: "Escape" })
+    expect(onWelcomeFinish).toHaveBeenCalledTimes(2)
+
+    rerender({ welcomePending: false })
+    fireEvent.keyDown(document.body, { key: "Escape" })
+    expect(onWelcomeFinish).toHaveBeenCalledTimes(2)
+  })
+
+  it("leaves Escape alone when it is aimed at another surface or already handled", () => {
+    const { onWelcomeFinish } = renderWizard({ state: "ready", welcomePending: true })
+    const menu = document.body.appendChild(document.createElement("button"))
+
+    fireEvent.keyDown(menu, { key: "Escape" })
+    expect(onWelcomeFinish).not.toHaveBeenCalled()
+
+    const handled = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" })
+    handled.preventDefault()
+    document.body.dispatchEvent(handled)
+    expect(onWelcomeFinish).not.toHaveBeenCalled()
+
+    menu.remove()
+  })
+
+  it("adds the video screen before the sign-off when the video id is set", () => {
+    renderWizard({ state: "ready", welcomePending: true, welcomeVideoId: VIDEO_ID })
+
+    expect(screen.getByText("1 of 4")).toBeTruthy()
+    next()
+    next()
+    expect(screen.getByRole("heading", { name: "A short look around" })).toBeTruthy()
+    const video = screen.getByTitle("TaxMaxi introduction video")
+    expect(video.tagName).toBe("IFRAME")
+    expect(video.getAttribute("src")).toBe(`https://www.youtube-nocookie.com/embed/${VIDEO_ID}`)
+    next()
+    expect(screen.getByRole("heading", { name: "Thanks for being here" })).toBeTruthy()
+    expect(buttons()).toEqual(["Continue"])
+  })
+
+  it("leaves the video screen out while the video id is unset", () => {
+    renderWizard({ state: "ready", welcomePending: true })
+
+    expect(screen.getByText("1 of 3")).toBeTruthy()
+    next()
+    next()
+    expect(screen.getByRole("heading", { name: "Thanks for being here" })).toBeTruthy()
+    expect(screen.queryByTitle("TaxMaxi introduction video")).toBeNull()
+    expect(document.querySelector("iframe")).toBeNull()
+  })
+
+  it("animates welcome screens only when motion is allowed", () => {
+    renderWizard({ state: "ready", welcomePending: true })
+    const region = screen.getByRole("region", { name: "Hi, I'm Max." })
+    const card = region.querySelector("[data-initial]")
+
+    expect(region.getAttribute("data-motion")).toBe("full")
+    expect(card?.getAttribute("data-initial")).toBe("animated")
+    expect(card?.getAttribute("data-transition-duration")).toBe("0.25")
+  })
+
+  it("honors reduced motion on welcome screens", () => {
+    motionState.reduceMotion = true
+    renderWizard({ state: "ready", welcomePending: true })
+    const region = screen.getByRole("region", { name: "Hi, I'm Max." })
     const card = region.querySelector("[data-initial]")
 
     expect(region.getAttribute("data-motion")).toBe("reduced")

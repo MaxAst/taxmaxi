@@ -255,6 +255,45 @@
         "done": "Fertig"
       },
       "connected": "{sourceName} verbunden",
+      "welcome": {
+        "screenProgress": "{current} von {total}",
+        "next": "Weiter",
+        "continue": "Los geht's",
+        "skip": "Überspringen",
+        "promise": {
+          "headline": "Hi, ich bin Max.",
+          "thanks": "Danke, dass du TaxMaxi ausprobierst. Ich baue es als das letzte Krypto-Steuer-Tool, das du je brauchen wirst.",
+          "next": "Das ist ein großes Versprechen. Auf den nächsten Seiten erzähle ich dir, worauf es steht."
+        },
+        "values": {
+          "headline": "Worauf TaxMaxi steht",
+          "intro": "Drei Dinge leiten jede Entscheidung, die wir treffen:",
+          "usersFirst": {
+            "title": "Nutzer zuerst.",
+            "body": "Deine Daten und deine Entscheidungen bleiben deine. Nichts läuft und nichts wird abgerechnet ohne einen Klick von dir."
+          },
+          "open": {
+            "title": "Offen.",
+            "body": "Der Code ist öffentlich. Du kannst nachlesen, wie jede Zahl berechnet wird, und uns sagen, wenn wir etwas falsch gemacht haben."
+          },
+          "modular": {
+            "title": "Modular und erweiterbar.",
+            "body": "Jede Börse, jede Chain und jede Steuerregel ist ein Modul. So wächst TaxMaxi mit allem, was du on-chain tust."
+          }
+        },
+        "video": {
+          "headline": "Ein kurzer Rundgang",
+          "body": "Zwei Minuten dazu, was zwischen dem Verbinden einer Quelle und deinem ersten Steuerbericht passiert.",
+          "title": "TaxMaxi-Einführungsvideo"
+        },
+        "signoff": {
+          "headline": "Danke, dass du hier bist",
+          "yourCall": "Es wurde noch nichts importiert. Du entscheidest, wann das passiert, und du kannst jederzeit aufhören.",
+          "writeToMe": "Wenn sich etwas falsch oder unklar anfühlt, schreib mir. Ich lese jede Nachricht.",
+          "signature": "— Max",
+          "founder": "Max Ast, Gründer von TaxMaxi"
+        }
+      },
       "credits": {
         "one": "1 Credit verfügbar",
         "many": "{count} Credits verfügbar"

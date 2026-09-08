@@ -255,6 +255,45 @@
         "done": "Done"
       },
       "connected": "{sourceName} connected",
+      "welcome": {
+        "screenProgress": "{current} of {total}",
+        "next": "Next",
+        "continue": "Continue",
+        "skip": "Skip",
+        "promise": {
+          "headline": "Hi, I'm Max.",
+          "thanks": "Thanks for trying TaxMaxi. I'm building it to be the last crypto tax tool you'll ever need.",
+          "next": "That's a big promise, so over the next few screens I'll tell you what it stands on."
+        },
+        "values": {
+          "headline": "What TaxMaxi stands on",
+          "intro": "Three things guide every decision we make:",
+          "usersFirst": {
+            "title": "Users first.",
+            "body": "Your data and your decisions stay yours. Nothing runs and nothing is charged without a click from you."
+          },
+          "open": {
+            "title": "Open.",
+            "body": "The code is public. You can read how every number is calculated, and tell us when we got something wrong."
+          },
+          "modular": {
+            "title": "Modular and extendible.",
+            "body": "Every exchange, chain, and tax rule is a module, so TaxMaxi grows with whatever you do on-chain."
+          }
+        },
+        "video": {
+          "headline": "A short look around",
+          "body": "Two minutes on what happens between connecting a source and your first tax report.",
+          "title": "TaxMaxi introduction video"
+        },
+        "signoff": {
+          "headline": "Thanks for being here",
+          "yourCall": "Nothing has been imported yet. You decide when that happens, and you can stop at any point.",
+          "writeToMe": "If anything feels off or unclear, write to me. I read every message.",
+          "signature": "— Max",
+          "founder": "Max Ast, founder of TaxMaxi"
+        }
+      },
       "credits": {
         "one": "1 credit available",
         "many": "{count} credits available"
