@@ -48,6 +48,8 @@ const settleReads = async <T extends readonly unknown[] | []>(reads: T) => {
  * non-401 billing failure does not block the page: `billing` is `null` and
  * the first-sync wizard shows `billing_unknown` with a retry. Any other
  * failure is rethrown, the first one in read order when several fail.
+ * The route wires every read through the query client, so a session change
+ * (`clearSessionQueries`) cancels them and a cancelled read writes nothing.
  */
 export const loadAppPageData = async ({
   loadAccount,
@@ -118,11 +120,12 @@ export const Route = createFileRoute("/app")({
           }),
         loadSourceOverview: (sourceId) =>
           context.queryClient.ensureQueryData(queries.sourceOverview(taxmaxi, sourceId)),
-        loadSources: async () => {
-          const sourceList = await taxmaxi.sources.list()
-          context.queryClient.setQueryData(queryKeys.sourceList(), sourceList)
-          return sourceList
-        },
+        // Fetched through the query client, not with a direct SDK call, so
+        // `clearSessionQueries` can cancel it when the session changes hands
+        // and a late response cannot write the previous person's sources.
+        // `staleTime: 0` keeps the loader fetching a fresh list on every load.
+        loadSources: () =>
+          context.queryClient.fetchQuery({ ...queries.sourceList(taxmaxi), staleTime: 0 }),
       })
     } catch (error) {
       if (!isTaxMaxiUnauthorizedError(error)) {

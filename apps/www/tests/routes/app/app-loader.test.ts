@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
+import { CancelledError, QueryClient } from "@tanstack/react-query"
 import {
+  TaxMaxi,
   TaxMaxiError,
   type Account,
   type BillingStatus,
@@ -9,7 +11,8 @@ import {
 } from "taxmaxi"
 import { describe, expect, it, vi } from "vitest"
 
-import { loadAppPageData } from "#/routes/app"
+import { clearSessionQueries, queryKeys } from "#/integrations/taxmaxi/queries"
+import { Route, loadAppPageData } from "#/routes/app"
 
 vi.mock("#/server-functions/auth", () => ({
   clearAuthSessionCookie: vi.fn(),
@@ -213,5 +216,74 @@ describe("loadAppPageData (#108 D08)", () => {
         })
       )
     ).rejects.toBe(error)
+  })
+})
+
+// A session change (`clearSessionQueries`) must cancel the loader's reads, so
+// a response that resolves after the clear cannot refill the cache with the
+// previous person's data (#133, PR #360 review finding 3967706889).
+describe("the /app route loader across a session change", () => {
+  it("does not write a source list whose request was cancelled by clearSessionQueries", async () => {
+    let releaseSources: () => void = () => undefined
+    const sourcesReleased = new Promise<void>((resolve) => {
+      releaseSources = resolve
+    })
+    const requestedPaths: Array<string> = []
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://loader.example.test",
+      fetch: async (input) => {
+        const path = new URL(input instanceof Request ? input.url : input.toString()).pathname
+        requestedPaths.push(path)
+        if (path === "/v1/sources") return sourcesReleased.then(() => Response.json(sourceList))
+        return Response.json(overview(path.split("/")[3] ?? ""))
+      },
+    })
+    const queryClient = new QueryClient()
+    // Account and billing are cached and fresh, so the source list is the only read.
+    queryClient.setQueryData(queryKeys.account(), account)
+    queryClient.setQueryData(queryKeys.billingStatus(), billing)
+    const loader = Route.options.loader
+    expect(loader).toBeTypeOf("function")
+    if (typeof loader !== "function") return
+
+    const load = Promise.resolve(
+      loader({
+        abortController: new AbortController(),
+        cause: "enter",
+        context: { queryClient, taxmaxi: () => taxmaxi },
+        deps: {},
+        location: {
+          external: false,
+          hash: "",
+          href: "/app",
+          pathname: "/app",
+          publicHref: "/app",
+          search: {},
+          searchStr: "",
+          state: { __TSR_index: 0 },
+        },
+        navigate: () => Promise.resolve(),
+        params: {},
+        parentMatchPromise: new Promise<never>(() => undefined),
+        preload: false,
+        route: Route,
+      })
+    )
+    await vi.waitFor(() => expect(requestedPaths).toEqual(["/v1/sources"]))
+
+    // Person A's load is abandoned and person B's login clears the session.
+    await clearSessionQueries(queryClient)
+    // A's source list arrives after the clear.
+    releaseSources()
+    const outcome = await load.then(
+      () => "resolved",
+      (error: unknown) => error
+    )
+
+    expect(queryClient.getQueryData(queryKeys.sourceList())).toBeUndefined()
+    expect(queryClient.getQueryCache().findAll({ queryKey: queryKeys.all })).toHaveLength(0)
+    expect(outcome).toBeInstanceOf(CancelledError)
+    expect(requestedPaths).toEqual(["/v1/sources"])
+    queryClient.clear()
   })
 })
