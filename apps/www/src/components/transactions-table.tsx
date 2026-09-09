@@ -1,5 +1,6 @@
 import { ChevronLeft, ChevronRight, CircleAlert, Landmark, WalletCards } from "lucide-react"
 import type { TransactionListItem } from "taxmaxi"
+import { z } from "zod"
 
 import { Badge } from "#/components/ui/badge"
 import { Button } from "#/components/ui/button"
@@ -11,7 +12,17 @@ import {
   transactionTypeLabel,
 } from "#/lib/transaction-display"
 
-export const TRANSACTION_PAGE_SIZE = 7
+export const TRANSACTION_PAGE_SIZE = 25
+export const TRANSACTION_PAGE_SIZES = [25, 50, 100, 500] as const
+export type TransactionPageSize = (typeof TRANSACTION_PAGE_SIZES)[number]
+const pageSizeSchema = z.coerce
+  .number()
+  .pipe(z.union([z.literal(25), z.literal(50), z.literal(100), z.literal(500)]))
+
+export function parseTransactionPageSize(value: unknown): TransactionPageSize {
+  const parsed = pageSizeSchema.safeParse(value)
+  return parsed.success ? parsed.data : TRANSACTION_PAGE_SIZE
+}
 
 const formatDate = (timestamp: string): string =>
   new Intl.DateTimeFormat(getLocale(), {
@@ -37,6 +48,8 @@ export function TransactionsTable({
   onPreviousPage,
   onRetry,
   pageIndex,
+  pageSize,
+  onPageSizeChange,
   totalCount,
   transactions,
 }: {
@@ -50,11 +63,13 @@ export function TransactionsTable({
   readonly onPreviousPage: () => void
   readonly onRetry: () => void
   readonly pageIndex: number
+  readonly pageSize: TransactionPageSize
+  readonly onPageSizeChange: (size: TransactionPageSize) => void
   readonly totalCount: number
   readonly transactions: ReadonlyArray<TransactionListItem>
 }) {
-  const visibleStart = transactions.length === 0 ? 0 : pageIndex * TRANSACTION_PAGE_SIZE + 1
-  const visibleEnd = Math.min(pageIndex * TRANSACTION_PAGE_SIZE + transactions.length, totalCount)
+  const visibleStart = transactions.length === 0 ? 0 : pageIndex * pageSize + 1
+  const visibleEnd = Math.min(pageIndex * pageSize + transactions.length, totalCount)
   const totalLabel =
     totalCount === 1
       ? m["app.dashboard.transactions.totalOne"]({ count: totalCount })
@@ -82,9 +97,28 @@ export function TransactionsTable({
             {m["app.dashboard.transactions.description"]()}
           </p>
         </div>
-        <Badge className="w-fit" variant="secondary">
-          {totalLabel}
-        </Badge>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-sm text-muted-foreground">
+            {m["app.dashboard.transactions.pageSize"]()}
+            <select
+              className="min-h-11 rounded-md border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+              value={pageSize}
+              disabled={disabled}
+              onChange={(event) =>
+                onPageSizeChange(parseTransactionPageSize(event.currentTarget.value))
+              }
+            >
+              {TRANSACTION_PAGE_SIZES.map((size) => (
+                <option key={size} value={size}>
+                  {m["app.dashboard.transactions.pageSizeOption"]({ count: size })}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Badge className="w-fit" variant="secondary">
+            {totalLabel}
+          </Badge>
+        </div>
       </header>
 
       <div className="overflow-hidden rounded-xl border bg-background shadow-sm">

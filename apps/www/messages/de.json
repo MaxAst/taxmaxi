@@ -494,6 +494,8 @@
         "realizedGainLoss": "Realisierter Gewinn/Verlust",
         "gainLossPending": "Ausstehend",
         "gainLossNotApplicable": "Nicht anwendbar",
+        "pageSize": "Zeilen pro Seite",
+        "pageSizeOption": "{count}",
         "pageUnavailable": "Seite nicht verfügbar",
         "pageRange": "{start}–{end} von {total}",
         "pagesLabel": "Transaktionsseiten",

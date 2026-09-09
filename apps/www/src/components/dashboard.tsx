@@ -41,7 +41,12 @@ import {
   type TaxYear,
 } from "#/lib/dashboard-types"
 import { queries, queryKeys, setSessionQueryData } from "#/integrations/taxmaxi/queries"
-import { TRANSACTION_PAGE_SIZE, TransactionsTable } from "./transactions-table"
+import {
+  TRANSACTION_PAGE_SIZE,
+  TransactionsTable,
+  parseTransactionPageSize,
+  type TransactionPageSize,
+} from "./transactions-table"
 import { TransactionInspector } from "./transaction-inspector"
 import { SourceSyncIsland, type SourceSyncIslandItem } from "./source-sync-island"
 
@@ -137,6 +142,8 @@ function findUnreadCreditStops({
   }
   return [...jobIds].filter((jobId) => !readJobIds.has(jobId))
 }
+
+const TRANSACTION_PAGE_SIZE_STORAGE_KEY = "taxmaxi.transactions.page-size.v1"
 
 export function Dashboard({
   accounts = mockAccounts,
@@ -236,6 +243,34 @@ export function Dashboard({
   const [accountScope, setAccountScope] = useState<AccountScope>(ALL_ACCOUNTS)
   const [taxYear] = useState<TaxYear>(2025)
   const [transactionCursors, setTransactionCursors] = useState<ReadonlyArray<string | null>>([null])
+  const [transactionPageSize, setTransactionPageSize] =
+    useState<TransactionPageSize>(TRANSACTION_PAGE_SIZE)
+  const [pageSizeLoaded, setPageSizeLoaded] = useState(false)
+
+  useEffect(() => {
+    try {
+      setTransactionPageSize(
+        parseTransactionPageSize(window.localStorage.getItem(TRANSACTION_PAGE_SIZE_STORAGE_KEY))
+      )
+    } catch {
+      // Browsing works when privacy settings make storage unavailable.
+      setTransactionPageSize(TRANSACTION_PAGE_SIZE)
+    }
+    setPageSizeLoaded(true)
+  }, [])
+
+  const changeTransactionPageSize = (size: TransactionPageSize) => {
+    if (size === transactionPageSize) return
+    setTransactionPageSize(size)
+    setTransactionCursors([null])
+    setSelectedTransaction(null)
+    transactionOpenerRef.current = null
+    try {
+      window.localStorage.setItem(TRANSACTION_PAGE_SIZE_STORAGE_KEY, String(size))
+    } catch {
+      // The current session keeps the chosen size even if saving is blocked.
+    }
+  }
 
   const accountsById = useMemo(
     () => new Map(accounts.map((account) => [account.id, account])),
@@ -273,9 +308,9 @@ export function Dashboard({
   const transactionQuery = useQuery({
     ...queries.transactionList(taxmaxi, {
       cursor: transactionCursor,
-      limit: TRANSACTION_PAGE_SIZE,
+      limit: transactionPageSize,
     }),
-    enabled: !authenticationLost,
+    enabled: !authenticationLost && pageSizeLoaded,
   })
 
   const survivingRow = transactionQuery.data?.transactions.find(
@@ -751,6 +786,8 @@ export function Dashboard({
                       onPreviousPage={goToPreviousTransactionPage}
                       onRetry={() => void transactionQuery.refetch()}
                       pageIndex={transactionCursors.length - 1}
+                      pageSize={transactionPageSize}
+                      onPageSizeChange={changeTransactionPageSize}
                       totalCount={transactionQuery.data?.totalCount ?? 0}
                       transactions={transactionQuery.data?.transactions ?? []}
                     />

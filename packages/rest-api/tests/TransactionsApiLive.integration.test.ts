@@ -15,6 +15,7 @@ import { CalculationRunId } from "../../persistence/src/services/CalculationRunR
 import { SourceSyncQueueUnexpectedTestLive } from "./support/SourceSyncQueueUnexpectedTestLive.ts"
 import { prepareMovementLegFixtures } from "../../persistence/tests/support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
+import * as Statement from "effect/unstable/sql/Statement"
 import { HttpClient, HttpClientRequest, HttpRouter, HttpServer } from "effect/unstable/http"
 import { HttpApiClient } from "effect/unstable/httpapi"
 import { NodeHttpServer } from "@effect/platform-node"
@@ -576,6 +577,105 @@ await Effect.runPromise(context.recreateTestDatabase())
 
 describe("TransactionsApiLive", () => {
   beforeEach(() => Effect.runPromise(Effect.asVoid(context.recreateTestDatabase())))
+
+  it.effect("pages 1204 transactions at 500 and hydrates only the selected movement IDs", () => {
+    const statements: Array<{ text: string; params: ReadonlyArray<unknown> }> = []
+    const capture: Statement.Transformer = (statement) =>
+      Effect.sync(() => {
+        const [text, params] = statement.compile()
+        statements.push({ text, params })
+        return statement
+      })
+    return Effect.gen(function* () {
+      const fixture = yield* seedSyncEngineRepositoryFixture({
+        principalId: fixtureIds.principalId,
+        userId: fixtureIds.userId,
+        sourceId: fixtureIds.sourceId,
+      })
+      yield* seedSyncEngineAssets(fixture)
+      const db = yield* drizzle
+      const inputs = Array.from({ length: 1204 }, (_, index) => ({
+        id: `20000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+        principalId: fixture.principalId,
+        sourceId: fixture.sourceId,
+        externalId: `pagination-${index}`,
+        timestamp: DateTime.toDateUtc(
+          DateTime.add(DateTime.makeUnsafe("2025-01-01T00:00:00Z"), { minutes: index })
+        ),
+        transactionType: "buy_fiat",
+      }))
+      yield* db.insert(schema.transactions).values(inputs)
+      yield* db.insert(schema.transactionLegs).values(
+        yield* prepareMovementLegFixtures(
+          inputs.map((transaction, index) => ({
+            principalId: fixture.principalId,
+            sourceId: fixture.sourceId,
+            transactionId: transaction.id,
+            timestamp: transaction.timestamp,
+            externalId: `${transaction.externalId}:acquisition`,
+            movementIdentity: {
+              sourceRecordKey: transaction.externalId,
+              componentKey: "principal",
+            },
+            assetId: TEST_BTC_ASSET_ID,
+            amount: String(index + 1),
+            kind: "acquisition" as const,
+            provenance: "deterministic",
+            originKind: "none" as const,
+          }))
+        )
+      )
+      const client = yield* makeAuthenticatedClient({ userId: fixture.userId })
+      const defaultPage = yield* client.transactions.listTransactions({ query: {} })
+      expect(defaultPage.transactions).toHaveLength(25)
+      const expectedIds = inputs.map(({ id }) => id).reverse()
+      const seen: string[] = []
+      let cursor: string | undefined
+      for (const count of [500, 500, 204]) {
+        statements.length = 0
+        const response = yield* client.transactions.listTransactions({
+          query: { limit: 500, cursor },
+        })
+        const selectedIds = response.transactions.map(({ transactionId }) => transactionId)
+        expect(selectedIds).toEqual(expectedIds.slice(seen.length, seen.length + count))
+        expect(response.totalCount).toBe(1204)
+        expect(response.transactions).toHaveLength(count)
+        expect(response.transactions.every(({ movements }) => movements.length === 1)).toBe(true)
+        const hydration = statements.filter(
+          ({ text }) =>
+            text.startsWith("select ") &&
+            text.includes('from "transaction_legs"') &&
+            text.includes('join "assets"')
+        )
+        expect(hydration).toHaveLength(1)
+        expect(hydration[0]?.text).toContain('"transaction_legs"."transaction_id" in (')
+        expect(hydration[0]?.params).toEqual([
+          fixture.principalId,
+          fixture.principalId,
+          ...selectedIds,
+        ])
+        seen.push(...selectedIds)
+        expect(response.page.hasMore).toBe(seen.length < 1204)
+        if (seen.length < 1204) {
+          expect(response.page.nextCursor).not.toBeNull()
+          cursor = response.page.nextCursor ?? undefined
+        } else {
+          expect(response.page.nextCursor).toBeNull()
+        }
+      }
+      expect(new Set(seen).size).toBe(1204)
+      expect(
+        yield* getAuthenticatedStatus({
+          path: "/v1/transactions?limit=501",
+          userId: fixture.userId,
+        })
+      ).toBe(400)
+    }).pipe(
+      Effect.provide(HttpLive),
+      Effect.provideService(Statement.CurrentTransformer, capture),
+      Effect.scoped
+    )
+  })
 
   it.effect(
     "returns active income separately from gains and withholds blocked or pending income",
