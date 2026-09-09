@@ -1972,6 +1972,35 @@ describe("Dashboard first-sync body (#108 T05, T06, T07)", () => {
     expect(billingReads).toBe(1)
   })
 
+  // #133 T09b: closing the overlay invalidates `billingStatus` (D07). When the
+  // status the API now returns carries the subscription, the wizard moves to
+  // `ready` from that re-read alone, with no reload.
+  it("moves from needs_credits to ready when the overlay closes and the re-read status carries credits", async () => {
+    respondBilling = async () => billingStatus(0)
+    mount([sourceOverview()])
+
+    expect(
+      await screen.findByRole("heading", { name: "Pick a plan to unlock your import" })
+    ).toBeTruthy()
+    await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
+    expect(billingReads).toBe(1)
+    const liveRegion = screen.getByRole("status", { name: "First sync updates" })
+
+    // Stripe's webhook landed while the overlay was open; closing it
+    // invalidates the query exactly as `closeOverlay` in app.billing.tsx does.
+    respondBilling = async () => billingStatus(10_000, "active")
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: billingKey() })
+    })
+
+    expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+    expect(screen.getByText("10,000 credits available")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Start my first sync" })).toBeTruthy()
+    expect(screen.queryByRole("link", { name: "Choose a plan" })).toBeNull()
+    expect(screen.getByRole("status", { name: "First sync updates" })).toBe(liveRegion)
+    expect(billingReads).toBe(2)
+  })
+
   it("moves from paused to resumable when the billing overlay writes credits into the cache, and Continue restarts the same source", async () => {
     queryClient.setQueryData(billingKey(), billingStatus(0))
     respondBilling = async () => billingStatus(0)

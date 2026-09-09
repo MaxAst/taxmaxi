@@ -174,7 +174,14 @@
         "description": "10.000 Transaktionsguthaben mit jährlicher Verlängerung.",
         "priceSuffix": "/ Jahr, {taxLabel}",
         "manage": "Abo verwalten",
-        "subscribe": "Für {price} abonnieren"
+        "subscribe": "Für {price} abonnieren",
+        "confirming": "Abo wird bestätigt…"
+      },
+      "checkoutReturn": {
+        "confirming": "Stripe bestätigt deine Zahlung. Dein Tarif und dein Guthaben erscheinen gleich hier.",
+        "unconfirmed": "Stripe hat deine Zahlung noch nicht bestätigt. Prüfe es gleich noch einmal.",
+        "checkAgain": "Erneut prüfen",
+        "checking": "Wird geprüft…"
       },
       "topUp": {
         "title": "Zusätzliches Transaktionspaket",
