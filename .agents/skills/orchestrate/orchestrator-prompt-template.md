@@ -38,6 +38,7 @@ The rules you enforce live in their durable homes, not in this prompt: `AGENTS.m
 - Close defect classes, not instances. The same finding shape twice: enumerate every affected site in the PR, put the guard where the data enters, prefer typed error tags over string matching.
 - A PR that keeps growing under review pressure was cut wrong. Prefer the fix that deletes code. If growth continues, split the task and tell the maintainer.
 - When a review finding shows a reader guessing which row a decision belongs to, the fix is a recorded fact at the writer, treated as a prerequisite task — not a review fix (ADR 0012).
+- A review loop is a stop signal, not a queue. Once a PR has had a pass with no P0 or P1 and the remaining findings are corner cases of shapes already fixed, record them in one follow-up gap issue, answer the threads, and merge on the current head. Each further fix commit widens the state space the next round probes; #108 T05 took five rounds and twelve P2s before this rule.
 - {{SPEC_JUDGMENT_RULES: the spec's core rules — a PR bending any of them is on the wrong track regardless of green tests}}
 - When the maintainer asks a question, give the assessment and stop. Do not start fixing unless asked.
 

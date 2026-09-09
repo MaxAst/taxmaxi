@@ -201,6 +201,8 @@ Select only needed columns. Do not use `SELECT *`.
 8. In Effect-based packages, load environment variables with Effect Config instead of `process.env` directly. `apps/www` uses its generated Cloudflare environment types and must not add Effect only for configuration loading.
 9. Keep `.env` files local. They are intentionally present for this working copy but must not be committed.
 10. In `apps/www`, every user-visible string must come from paraglide messages (`m["..."]()` with keys in `apps/www/messages/en.json` and `de.json`). Do not hardcode English copy in components. Backend responses carry machine-readable codes, not display text; the frontend maps codes to localized copy.
+11. An endpoint that promises repeat calls change nothing writes set-once at the writer (for example `UPDATE ... WHERE welcome_seen_at IS NULL`, then read back), never read-then-write in the handler and never `COALESCE` inside a generic update that still bumps `updated_at`.
+12. In `apps/www`, a write into the `taxmaxi` query cache that can resolve after a logout (a mutation result, a poll, a focus refresh) goes through `setSessionQueryData` in `apps/www/src/integrations/taxmaxi/queries.ts`, so a late response never repopulates a logged-out session's data for the next login. Loader writes that run before the page renders are exempt.
 
 ## Delivery PRs and Reviews
 
