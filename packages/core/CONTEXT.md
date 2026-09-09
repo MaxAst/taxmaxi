@@ -12,6 +12,26 @@ _Avoid_: Fiat asset, canonical asset
 A fiat currency description received from a provider's dedicated fiat catalog. An exact supported currency code resolves without provider asset review; unknown or conflicting evidence fails closed.
 _Avoid_: Provider asset
 
+**Provider consideration**:
+The fiat amount a provider explicitly records as paid or received for an exchange. It describes the executed exchange, not a market estimate. Fees are separate when the provider records them separately.
+_Avoid_: Market valuation, tax basis
+
+**Market valuation**:
+An estimate of an asset movement’s fiat value at a stated time, derived from market price evidence. It is not proof of the amount actually paid or received.
+_Avoid_: Purchase price (unless actual provider consideration is meant)
+
+**Tax basis**:
+The amount assigned to an acquisition or lot under the accounting rules and used to calculate gain or loss on disposal. It may differ from provider consideration or market valuation.
+_Avoid_: Price paid
+
+**Proceeds**:
+The disposal amount used by the accounting calculation before subtracting tax basis to determine gain or loss. Its valuation and fee treatment follow the applicable accounting rules; it is not itself the gain.
+_Avoid_: Profit, gain
+
+**Income**:
+The fiat amount the accounting calculation records for an income event, such as a reward receipt. It is distinct from realized disposal gain and does not by itself state whether or how the jurisdiction taxes it.
+_Avoid_: Realized gain, proceeds
+
 ## Tax accounting language
 
 **Accounting event**:
