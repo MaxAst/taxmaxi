@@ -22,6 +22,7 @@ import type {
   CustodyUnitMembership,
   CalculationRunCorrectionInput,
   FactualLedgerInputBlockerCode,
+  MovementFactualProjection,
 } from "./FactualLedgerRepository.ts"
 
 /** Stable, caller-assigned identity of one immutable calculation run. */
@@ -128,6 +129,18 @@ export type CalculationRunResult = Omit<TaxAccountingResult, "blockers"> & {
   readonly blockers: ReadonlyArray<CalculationRunResultBlocker>
 }
 
+/** Completed movement inputs, without duplicating separately retained correction history. */
+export type CalculationRunMovementInput = Omit<MovementFactualProjection, "corrections">
+
+/** Exact encoded engine selection; absent events and custody movements are not evaluated. */
+export type CalculationRunMovementValuation =
+  | { readonly _tag: "not_evaluated" | "missing" | "ambiguous" }
+  | {
+      readonly _tag: "selected"
+      readonly kind: "user_valuation" | "observed_consideration" | "market_quote"
+      readonly total: { readonly amount: string; readonly currency: string }
+    }
+
 /** Input required to write one terminal calculation run and compare it for activation. */
 export interface PersistCalculationRunParams {
   /** Finalization never recreates a run removed since start; atomic writes create a new run. */
@@ -139,6 +152,8 @@ export interface PersistCalculationRunParams {
   readonly valuationRevision: ValuationRevision
   readonly syncCapture: CalculationRunSyncCapture
   readonly correctionInputs: ReadonlyArray<CalculationRunCorrectionInput>
+  /** Complete inputs read in the same factual snapshot as the engine ledger. */
+  readonly movements: ReadonlyMap<string, MovementFactualProjection>
   readonly result: CalculationRunResult
 }
 
