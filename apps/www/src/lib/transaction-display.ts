@@ -1,10 +1,15 @@
 import type { TransactionListItem } from "taxmaxi"
 import { z } from "zod"
+import * as BigDecimal from "effect/BigDecimal"
+import * as Option from "effect/Option"
 import { m } from "#/paraglide/messages"
 import { getLocale } from "#/paraglide/runtime"
 
 const decimal = z.custom<`${number}`>(
-  (value) => typeof value === "string" && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)
+  (value) =>
+    typeof value === "string" &&
+    /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(value) &&
+    Option.isSome(BigDecimal.fromString(value))
 )
 
 /** Format exact decimal strings without hiding known nonzero sub-cent values. */
@@ -22,8 +27,9 @@ export function formatTransactionAmount({
     return m["app.dashboard.transactions.valueUnavailable"]()
   }
   const amount = parsed.data
-  const zero = /^-?0(?:\.0+)?$/.test(amount)
-  const tiny = !zero && /^-?0\.00\d*$/.test(amount)
+  const exact = BigDecimal.fromStringUnsafe(amount)
+  const zero = BigDecimal.isZero(exact)
+  const tiny = !zero && BigDecimal.isLessThan(BigDecimal.abs(exact), BigDecimal.make(1n, 2))
   const formatter = new Intl.NumberFormat(locale, {
     currency,
     minimumFractionDigits: 2,
@@ -49,9 +55,12 @@ export function transactionResults(transaction: TransactionListItem) {
       amount: label(transaction.income),
     })
   if (
-    !hasIncome ||
     transaction.realizedGainLoss !== null ||
-    transaction.movements.some(({ kind }) => kind === "disposal" || kind === "fee")
+    transaction.movements.some(
+      ({ kind }) =>
+        kind === "fee" ||
+        (kind === "disposal" && transaction.transactionType !== "internal_transfer")
+    )
   ) {
     results.push({
       label: m["app.dashboard.transactions.realizedGainLoss"](),
@@ -72,8 +81,12 @@ export function transactionMovements(transaction: TransactionListItem) {
     if (movement.kind === "fee")
       return m["app.dashboard.transactions.feeMovement"]({ amount: value })
     return movement.kind === "acquisition" || movement.kind === "income"
-      ? m["app.dashboard.transactions.receivedMovement"]({ amount: value })
-      : m["app.dashboard.transactions.sentMovement"]({ amount: value })
+      ? m["app.dashboard.transactions.receivedMovement"]({
+          amount: amount === null ? value : `+${value}`,
+        })
+      : m["app.dashboard.transactions.sentMovement"]({
+          amount: amount === null ? value : `−${value}`,
+        })
   })
 }
 
