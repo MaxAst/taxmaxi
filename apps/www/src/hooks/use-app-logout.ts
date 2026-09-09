@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "@tanstack/react-router"
 import { useCallback } from "react"
 
-import { queryKeys } from "#/integrations/taxmaxi/queries"
+import { clearSessionQueries } from "#/integrations/taxmaxi/queries"
 import { logoutFromApp } from "#/lib/auth-session"
 import { logoutAuthSession } from "#/server-functions/auth"
 
@@ -14,7 +14,7 @@ export const useAppLogout = (): (() => Promise<void>) => {
     () =>
       logoutFromApp({
         logout: logoutAuthSession,
-        clearClientState: () => queryClient.removeQueries({ queryKey: queryKeys.all }),
+        clearClientState: () => clearSessionQueries(queryClient),
         navigateToLogin: () => navigate({ to: "/login", replace: true }),
       }),
     [navigate, queryClient]

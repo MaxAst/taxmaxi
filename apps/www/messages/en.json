@@ -90,6 +90,26 @@
       "alreadyAccount": "Already have an account?",
       "logIn": "Log in",
       "agreementIntro": "By signing up to TaxMaxi, you agree to our"
+    },
+    "or": "or",
+    "noProviders": "No login method is available right now.",
+    "form": {
+      "email": "Email",
+      "password": "Password",
+      "submitLogin": "Log in",
+      "submitSignUp": "Create account",
+      "emailTaken": "This email is already registered.",
+      "emailTakenLogIn": "Log in instead",
+      "passwordWeak": "Your password needs:",
+      "passwordRules": {
+        "minLength": "at least {minPasswordLength} characters",
+        "lowercase": "a lowercase letter",
+        "uppercase": "an uppercase letter",
+        "number": "a number",
+        "specialChar": "a special character"
+      },
+      "wrongCredentials": "Wrong email or password.",
+      "unknownError": "Something went wrong. Please try again."
     }
   },
   "app": {

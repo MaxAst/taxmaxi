@@ -90,6 +90,26 @@
       "alreadyAccount": "Du hast bereits einen Account?",
       "logIn": "Anmelden",
       "agreementIntro": "Mit der Registrierung stimmst du folgendem zu:"
+    },
+    "or": "oder",
+    "noProviders": "Derzeit ist keine Anmeldemethode verfügbar.",
+    "form": {
+      "email": "E-Mail",
+      "password": "Passwort",
+      "submitLogin": "Anmelden",
+      "submitSignUp": "Account erstellen",
+      "emailTaken": "Diese E-Mail ist bereits registriert.",
+      "emailTakenLogIn": "Stattdessen anmelden",
+      "passwordWeak": "Dein Passwort braucht:",
+      "passwordRules": {
+        "minLength": "mindestens {minPasswordLength} Zeichen",
+        "lowercase": "einen Kleinbuchstaben",
+        "uppercase": "einen Großbuchstaben",
+        "number": "eine Zahl",
+        "specialChar": "ein Sonderzeichen"
+      },
+      "wrongCredentials": "Falsche E-Mail oder falsches Passwort.",
+      "unknownError": "Etwas ist schiefgelaufen. Bitte versuche es erneut."
     }
   },
   "app": {
