@@ -104,6 +104,16 @@ export const setSessionQueryData = <TData>({
   queryClient.setQueryData(queryKey, data)
 }
 
+/**
+ * Drop every cached `taxmaxi` query when the session changes hands (logout, a
+ * new login, a verified sign-up). In-flight fetches are cancelled first so a
+ * late response from the previous session cannot refill the cache.
+ */
+export const clearSessionQueries = async (queryClient: QueryClient): Promise<void> => {
+  await queryClient.cancelQueries({ queryKey: queryKeys.all })
+  queryClient.removeQueries({ queryKey: queryKeys.all })
+}
+
 /** Refresh list and selected detail after a writer signal, dropping older in-flight delivery. */
 export const refreshTransactionQueries = async (queryClient: QueryClient): Promise<void> => {
   await queryClient.cancelQueries({ queryKey: queryKeys.transactions() })

@@ -4,10 +4,10 @@ export const logoutFromApp = async ({
   navigateToLogin,
 }: {
   readonly logout: () => Promise<unknown>
-  readonly clearClientState: () => void
+  readonly clearClientState: () => Promise<void>
   readonly navigateToLogin: () => Promise<unknown>
 }): Promise<void> => {
   await logout()
-  clearClientState()
+  await clearClientState()
   await navigateToLogin()
 }

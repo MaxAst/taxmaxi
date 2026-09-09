@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import {
   Outlet,
   RouterProvider,
@@ -13,6 +14,7 @@ import { TaxMaxi, type AuthProvider } from "taxmaxi"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { AuthPage } from "#/components/auth-page"
+import { queryKeys } from "#/integrations/taxmaxi/queries"
 
 const BASE_URL = "https://api.example.test"
 
@@ -134,9 +136,17 @@ const renderAuthPage = async ({
     path: mode === "login" ? "/sign-up" : "/login",
     component: () => <p>Other auth page</p>,
   })
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  // How many `taxmaxi` queries are still cached at the moment the app is entered.
+  const cachedQueriesOnAppEntry: Array<number> = []
   const appRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/app",
+    beforeLoad: () => {
+      cachedQueriesOnAppEntry.push(
+        queryClient.getQueryCache().findAll({ queryKey: queryKeys.all }).length
+      )
+    },
     component: () => <p>App dashboard</p>,
   })
   const verifyEmailRoute = createRoute({
@@ -149,9 +159,13 @@ const renderAuthPage = async ({
   const router = createRouter({ history, routeTree })
 
   await router.load()
-  render(<RouterProvider router={router} />)
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>
+  )
 
-  return { history, requests }
+  return { cachedQueriesOnAppEntry, history, queryClient, requests }
 }
 
 const fillAndSubmit = ({
@@ -285,6 +299,26 @@ describe("AuthPage login", () => {
         },
       },
     ])
+  })
+
+  it("drops the previous session's cached queries before entering the app", async () => {
+    const { cachedQueriesOnAppEntry, history, queryClient } = await renderAuthPage({
+      mode: "login",
+      providers: [provider("local")],
+      respond: async () => Response.json(LOGIN),
+    })
+    // User A loaded the app in this tab; B now logs in.
+    queryClient.setQueryData(queryKeys.account(), {
+      account: { id: "00000000-0000-4000-8000-000000000001", email: "a@example.com" },
+      loginMethods: [],
+    })
+    queryClient.setQueryData(queryKeys.sourceList(), [])
+
+    fillAndSubmit({ email: "b@example.com", password: "Str0ngPass", submit: "Log in" })
+
+    await waitFor(() => expect(history.location.pathname).toBe("/app"))
+    expect(cachedQueriesOnAppEntry).toEqual([0])
+    expect(queryClient.getQueryCache().findAll({ queryKey: queryKeys.all })).toEqual([])
   })
 
   it("shows one generic message for wrong credentials", async () => {

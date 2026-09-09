@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate } from "@tanstack/react-router"
 import { Loader2 } from "lucide-react"
 import {
@@ -12,6 +13,7 @@ import {
 
 import { Button } from "#/components/ui/button"
 import { Input } from "#/components/ui/input"
+import { clearSessionQueries } from "#/integrations/taxmaxi/queries"
 import { cn } from "#/lib/utils"
 import { m } from "#/paraglide/messages"
 
@@ -113,6 +115,7 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
   const isLogin = mode === "login"
   const id = useId()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const emailRef = useRef<HTMLInputElement>(null)
   const passwordRef = useRef<HTMLInputElement>(null)
   const alertRef = useRef<HTMLParagraphElement>(null)
@@ -141,6 +144,9 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
 
     if (isLogin) {
       await client.auth.login({ email, password })
+      // The API has replaced the session cookie. Anything cached from the
+      // previous session in this tab must not be read by the new one.
+      await clearSessionQueries(queryClient)
       await navigate({ to: "/app" })
       return
     }

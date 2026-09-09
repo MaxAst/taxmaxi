@@ -123,7 +123,7 @@ describe("logoutFromApp", () => {
       logout: async () => {
         calls.push("backend")
       },
-      clearClientState: () => {
+      clearClientState: async () => {
         calls.push("client")
       },
       navigateToLogin: async () => {
