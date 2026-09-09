@@ -15,6 +15,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { useRef, useState, type ComponentProps, type ReactElement } from "react"
 
 import { setLocale } from "#/paraglide/runtime"
+import * as BigDecimal from "effect/BigDecimal"
 
 import { TransactionsTable } from "#/components/transactions-table"
 import { TransactionInspector } from "#/components/transaction-inspector"
@@ -169,7 +170,7 @@ describe("TransactionsTable", () => {
     render(<TransactionsWithInspector {...defaultProps} />)
 
     expect(screen.getByText("Sold Bitcoin")).toBeTruthy()
-    expect(screen.getByText("0.4 BTC")).toBeTruthy()
+    expect(screen.getByText("Sent −0.4 BTC")).toBeTruthy()
     expect(screen.getByText("Coinbase")).toBeTruthy()
     expect(screen.getByText("1 transaction")).toBeTruthy()
     expect(screen.getByText("1–1 of 1")).toBeTruthy()
@@ -202,6 +203,189 @@ describe("TransactionsTable", () => {
     fireEvent.click(opener)
     expect(defaultProps.onSelect).not.toHaveBeenCalled()
     expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  it.each(["complete", "partial"] as const)(
+    "shows staking income with %s calculation",
+    (calculationState) => {
+      render(
+        <TransactionsWithInspector
+          {...defaultProps}
+          transactions={[
+            {
+              ...transaction,
+              transactionType: "staking_reward",
+              description: "Staking reward",
+              movements: [{ amount: "0.01", assetSymbol: "ETH", kind: "income" }],
+              realizedGainLoss: null,
+              income: "12.34",
+              calculationState,
+            },
+          ]}
+        />
+      )
+      expect(screen.getByText("Staking reward")).toBeTruthy()
+      expect(screen.getAllByText(/Income/).length).toBe(2)
+      expect(screen.queryByText("Realized gain/loss")).toBeNull()
+      expect(
+        screen.getAllByText(calculationState === "complete" ? "+€12.34" : "Pending").length
+      ).toBe(2)
+    }
+  )
+
+  it("shows income alongside disposal gains", () => {
+    render(
+      <TransactionsWithInspector
+        {...defaultProps}
+        transactions={[{ ...transaction, income: "2", realizedGainLoss: "-0.25" }]}
+      />
+    )
+    expect(screen.getAllByText("+€2.00").length).toBe(2)
+    expect(screen.getAllByText("−€0.25").length).toBe(2)
+  })
+
+  it.each([
+    ["0.004", "+<€0.01"],
+    ["-0.004", "−<€0.01"],
+    ["0", "€0.00"],
+  ])("preserves tiny and zero results in rows: %s", (income, expected) => {
+    render(
+      <TransactionsWithInspector
+        {...defaultProps}
+        transactions={[
+          {
+            ...transaction,
+            transactionType: "staking_reward",
+            description: null,
+            movements: [{ amount: "0.004", assetSymbol: "ETH", kind: "income" }],
+            income,
+            realizedGainLoss: null,
+          },
+        ]}
+      />
+    )
+    expect(screen.getAllByText(expected)).toHaveLength(2)
+    expect(screen.getAllByText("Staking reward")).toHaveLength(1)
+    expect(screen.queryByText("Not applicable")).toBeNull()
+  })
+
+  it("separates incoming, outgoing, and fee movements without rounding token quantities", () => {
+    render(
+      <TransactionsWithInspector
+        {...defaultProps}
+        transactions={[
+          {
+            ...transaction,
+            movements: [
+              { amount: "0.000000000000000001", assetSymbol: "ETH", kind: "acquisition" },
+              { amount: "20", assetSymbol: "EUR", kind: "disposal" },
+              { amount: "0", assetSymbol: "ETH", kind: "fee" },
+            ],
+          },
+        ]}
+      />
+    )
+    expect(screen.getByText("Received +0.000000000000000001 ETH")).toBeTruthy()
+    expect(screen.getByText("Sent −20 EUR")).toBeTruthy()
+    expect(screen.getByText("Fee: 0 ETH")).toBeTruthy()
+  })
+
+  it.each(["buy_fiat", "internal_transfer"])(
+    "omits inapplicable gain/loss for %s",
+    (transactionType) => {
+      render(
+        <TransactionsWithInspector
+          {...defaultProps}
+          transactions={[
+            {
+              ...transaction,
+              transactionType,
+              description: null,
+              income: null,
+              realizedGainLoss: null,
+              fiatCurrency: null,
+              movements:
+                transactionType === "internal_transfer"
+                  ? [
+                      { amount: "1", assetSymbol: "ETH", kind: "acquisition" },
+                      { amount: "1", assetSymbol: "ETH", kind: "disposal" },
+                    ]
+                  : [{ amount: "1", assetSymbol: "ETH", kind: "acquisition" }],
+            },
+          ]}
+        />
+      )
+      expect(screen.queryByText("Realized gain/loss")).toBeNull()
+      expect(screen.queryByText("Unavailable")).toBeNull()
+    }
+  )
+
+  it.each([false, true])(
+    "retains an internal transfer's actual result or separate fee: %s",
+    (hasFee) => {
+      render(
+        <TransactionsWithInspector
+          {...defaultProps}
+          transactions={[
+            {
+              ...transaction,
+              transactionType: "internal_transfer",
+              description: null,
+              realizedGainLoss: hasFee ? null : "-0.25",
+              movements: [{ amount: "1", assetSymbol: "ETH", kind: hasFee ? "fee" : "disposal" }],
+            },
+          ]}
+        />
+      )
+      expect(screen.getAllByText(/Realized gain\/loss/)).toHaveLength(2)
+      expect(screen.getAllByText(hasFee ? "Unavailable" : "−€0.25")).toHaveLength(2)
+    }
+  )
+
+  it("renders scientific decimal strings from the server serializer across all row fields", () => {
+    const encoded = BigDecimal.format(BigDecimal.fromStringUnsafe("0.000000000000000001"))
+    const loss = BigDecimal.format(BigDecimal.fromStringUnsafe("-0.000000000000000001"))
+    expect(encoded).toBe("1e-18")
+    expect(loss).toBe("-1e-18")
+    render(
+      <TransactionsWithInspector
+        {...defaultProps}
+        transactions={[
+          {
+            ...transaction,
+            transactionType: "staking_reward",
+            description: null,
+            income: encoded,
+            realizedGainLoss: loss,
+            movements: [
+              { amount: encoded, assetSymbol: "ETH", kind: "income" },
+              { amount: encoded, assetSymbol: "ETH", kind: "fee" },
+            ],
+          },
+        ]}
+      />
+    )
+    expect(screen.getByText("Received +1e-18 ETH")).toBeTruthy()
+    expect(screen.getByText("Fee: 1e-18 ETH")).toBeTruthy()
+    expect(screen.getAllByText("+<€0.01")).toHaveLength(2)
+    expect(screen.getAllByText("−<€0.01")).toHaveLength(2)
+    expect(screen.queryByText(/Unavailable/)).toBeNull()
+  })
+
+  it("keeps unavailable movement amounts unsigned", () => {
+    render(
+      <TransactionsWithInspector
+        {...defaultProps}
+        transactions={[
+          {
+            ...transaction,
+            movements: [{ amount: "invalid", assetSymbol: "ETH", kind: "acquisition" }],
+          },
+        ]}
+      />
+    )
+    expect(screen.getByText("Received Unavailable")).toBeTruthy()
+    expect(screen.queryByText(/Received \+Unavailable/)).toBeNull()
   })
 
   it("shows incomplete valuation as pending without hiding the transaction row", () => {
@@ -237,7 +421,7 @@ describe("TransactionsTable", () => {
       />
     )
 
-    expect(screen.getAllByText("Not applicable")).toHaveLength(2)
+    expect(screen.getAllByText("Unavailable")).toHaveLength(2)
   })
 
   it("shows gain and calculation state in the compact mobile row", () => {
