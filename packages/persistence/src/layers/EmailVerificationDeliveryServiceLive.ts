@@ -4,10 +4,13 @@
  * Resend-backed delivery for local email verification codes.
  */
 
+import * as Clock from "effect/Clock"
 import * as Config from "effect/Config"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
 import * as Redacted from "effect/Redacted"
+import * as Schema from "effect/Schema"
 import { Resend } from "resend"
 import {
   EmailVerificationDeliveryError,
@@ -18,6 +21,56 @@ import {
 const DEFAULT_VERIFICATION_FROM = "TaxMaxi <taxmaxi@updates.taxmaxi.com>"
 const RESEND_DELIVERY_MODE = "resend"
 const LOG_DELIVERY_MODE = "log"
+const RESEND_DEFAULT_BASE_URL = "https://api.resend.com"
+const RESEND_PROBE_PATH = "/domains"
+const RESEND_PROBE_TIMEOUT_MS = 8_000
+const SEND_FAILURE_MESSAGE = "Failed to send verification email"
+
+/**
+ * Error object the Resend SDK returns instead of throwing. A fetch failure
+ * inside the SDK becomes `application_error` with `statusCode: null`, which
+ * hides the real network error.
+ */
+const ResendErrorResponse = Schema.Struct({
+  name: Schema.String,
+  statusCode: Schema.NullOr(Schema.Finite),
+  message: Schema.String,
+})
+
+const decodeResendErrorResponse = Schema.decodeUnknownOption(ResendErrorResponse)
+
+/**
+ * Own fields a thrown error may carry beyond `name` and `message`, such as a
+ * Node system error code (`ENOTFOUND`, `ECONNREFUSED`).
+ */
+const ThrownErrorFields = Schema.Struct({
+  code: Schema.optional(Schema.Union([Schema.String, Schema.Finite])),
+})
+
+const decodeThrownErrorFields = Schema.decodeUnknownOption(ThrownErrorFields)
+
+const summarizeThrown = (cause: unknown) => ({
+  name: cause instanceof Error ? cause.name : undefined,
+  message: cause instanceof Error ? cause.message : String(cause),
+  code: Option.getOrUndefined(decodeThrownErrorFields(cause))?.code,
+})
+
+/**
+ * Turns a thrown value into a loggable `{ name, message, code, cause }` with
+ * the nested cause summarized one level deep. Node's fetch throws
+ * `TypeError: fetch failed` and keeps the real network error as `cause`.
+ */
+const describeThrown = (cause: unknown) => ({
+  ...summarizeThrown(cause),
+  cause:
+    cause instanceof Error && cause.cause !== undefined ? summarizeThrown(cause.cause) : undefined,
+})
+
+const isUnresolvedRequest = (error: typeof ResendErrorResponse.Type) =>
+  error.name === "application_error" && error.statusCode === null
+
+const elapsedSince = (startedAt: number) =>
+  Clock.currentTimeMillis.pipe(Effect.map((now) => now - startedAt))
 
 const verificationEmailHtml = (code: string) => `<!doctype html>
 <html lang="en">
@@ -48,6 +101,8 @@ const make = Effect.gen(function* () {
   )
 
   if (deliveryMode === LOG_DELIVERY_MODE) {
+    yield* Effect.logInfo({ deliveryMode, fromAddress }, "Email verification delivery configured")
+
     const sendVerificationCode: EmailVerificationDeliveryServiceShape["sendVerificationCode"] = ({
       email,
       code,
@@ -67,12 +122,81 @@ const make = Effect.gen(function* () {
   }
 
   const resendApiKey = yield* Config.redacted("RESEND_API_KEY")
+  // The SDK reads the same variable itself; we read it only to log and probe.
+  const resendBaseUrl = yield* Config.string("RESEND_BASE_URL").pipe(
+    Config.withDefault(RESEND_DEFAULT_BASE_URL)
+  )
   const resend = new Resend(Redacted.value(resendApiKey))
 
-  const sendVerificationCode: EmailVerificationDeliveryServiceShape["sendVerificationCode"] = ({
+  yield* Effect.logInfo(
+    { deliveryMode, fromAddress, resendBaseUrl },
+    "Email verification delivery configured"
+  )
+
+  /**
+   * One plain GET against the Resend API with the same key, so a failed send
+   * can be told apart as DNS, TLS, proxy, or timeout. Runs only when the SDK
+   * reported the generic "could not be resolved" error, and never changes the
+   * outcome of the send.
+   */
+  const probeResendHost = Effect.gen(function* () {
+    const probeUrl = new URL(RESEND_PROBE_PATH, resendBaseUrl).toString()
+    const startedAt = yield* Clock.currentTimeMillis
+
+    yield* Effect.tryPromise({
+      try: () =>
+        // Plain fetch on purpose: the probe mirrors what the Resend SDK does
+        // and must not add an HttpClient requirement to this layer.
+        // @effect-diagnostics-next-line globalFetchInEffect:off
+        fetch(probeUrl, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${Redacted.value(resendApiKey)}` },
+          signal: AbortSignal.timeout(RESEND_PROBE_TIMEOUT_MS),
+        }),
+      catch: describeThrown,
+    }).pipe(
+      Effect.flatMap((response) =>
+        elapsedSince(startedAt).pipe(
+          Effect.flatMap((elapsedMs) =>
+            Effect.logInfo(
+              { probeUrl, status: response.status, elapsedMs },
+              "Resend host probe reached the API"
+            )
+          )
+        )
+      ),
+      Effect.tapError((error) =>
+        elapsedSince(startedAt).pipe(
+          Effect.flatMap((elapsedMs) =>
+            Effect.logError({ probeUrl, elapsedMs, error }, "Resend host probe failed")
+          )
+        )
+      )
+    )
+  }).pipe(Effect.ignore)
+
+  const logSendFailure = ({
     email,
-    code,
+    elapsedMs,
+    cause,
+  }: {
+    readonly email: string
+    readonly elapsedMs: number
+    readonly cause: unknown
   }) =>
+    Option.match(decodeResendErrorResponse(cause), {
+      onNone: () =>
+        Effect.logError(
+          { email, elapsedMs, deliveryMode, error: describeThrown(cause) },
+          SEND_FAILURE_MESSAGE
+        ),
+      onSome: (error) =>
+        Effect.logError({ email, elapsedMs, deliveryMode, error }, SEND_FAILURE_MESSAGE).pipe(
+          Effect.andThen(isUnresolvedRequest(error) ? probeResendHost : Effect.void)
+        ),
+    })
+
+  const sendThroughResend = ({ email, code }: { readonly email: string; readonly code: string }) =>
     Effect.tryPromise({
       try: () =>
         resend.emails.send({
@@ -84,32 +208,44 @@ const make = Effect.gen(function* () {
         }),
       catch: (cause) =>
         new EmailVerificationDeliveryError({
-          message: "Failed to send verification email",
+          message: SEND_FAILURE_MESSAGE,
           cause,
         }),
     }).pipe(
       Effect.flatMap((result) =>
         result.error === null
-          ? Effect.void
+          ? Effect.succeed(result.data.id)
           : Effect.fail(
               new EmailVerificationDeliveryError({
-                message: "Failed to send verification email",
+                message: SEND_FAILURE_MESSAGE,
                 cause: result.error,
               })
             )
-      ),
-      Effect.tap(() => Effect.logInfo({ email }, "Sent verification email")),
-      Effect.tapError((error) =>
-        Effect.logError(
-          {
-            email,
-            cause: error.cause,
-            deliveryMode,
-          },
-          "Failed to send verification email"
-        )
       )
     )
+
+  const sendVerificationCode: EmailVerificationDeliveryServiceShape["sendVerificationCode"] = ({
+    email,
+    code,
+  }) =>
+    Effect.gen(function* () {
+      const startedAt = yield* Clock.currentTimeMillis
+
+      yield* sendThroughResend({ email, code }).pipe(
+        Effect.tap((resendId) =>
+          elapsedSince(startedAt).pipe(
+            Effect.flatMap((elapsedMs) =>
+              Effect.logInfo({ email, elapsedMs, resendId }, "Sent verification email")
+            )
+          )
+        ),
+        Effect.tapError((error) =>
+          elapsedSince(startedAt).pipe(
+            Effect.flatMap((elapsedMs) => logSendFailure({ email, elapsedMs, cause: error.cause }))
+          )
+        )
+      )
+    })
 
   return {
     sendVerificationCode,
