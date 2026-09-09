@@ -163,7 +163,7 @@ A short-lived confirmation of account-email access tied to the current authentic
 _Avoid_: Email verification status, login session
 
 **Verification request**:
-One pending proof that a person can read an account email, created by a local sign-up and answered with an eight-character code. A new request and an explicit resend give the code a fresh ten-minute lifetime; an unverified login that reuses an active request re-sends the same code with its original expiry. A resend replaces the request's code but keeps its lineage; a new sign-up or an unverified login after expiry starts a new request. Each request records its send attempts (ADR 0016).
+One pending proof that a person can read an account email, created by a local sign-up or by an unverified login when no active request exists (`startOrReuse` inserts a fresh one), and answered with an eight-character code. A new request and an explicit resend give the code a fresh ten-minute lifetime; an unverified login that reuses an active request re-sends the same code with its original expiry. A resend replaces the request's code but keeps its lineage; a new sign-up or an unverified login after expiry starts a new request. Each request records its send attempts (ADR 0016).
 _Avoid_: Verification code, security verification, verification cookie
 
 **Send attempt**:
