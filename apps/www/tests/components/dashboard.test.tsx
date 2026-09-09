@@ -595,7 +595,7 @@ describe("Dashboard calculation refresh", () => {
         .every((url) => url.searchParams.get("taxYear") === "2024")
     ).toBe(true)
     const listRequests = requests.filter((url) => url.pathname.endsWith("/transactions"))
-    expect(listRequests).toHaveLength(3)
+    expect(listRequests).toHaveLength(4)
     expect(new Set(listRequests.map((url) => url.search)).size).toBe(1)
     const settledReads = requests.filter((url) => url.pathname.endsWith(row.transactionId)).length
     await tick(4_000)

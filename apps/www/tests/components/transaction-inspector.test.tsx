@@ -925,6 +925,7 @@ describe("selected transaction refresh", () => {
       expect(urls.filter((url) => new URL(url).pathname.endsWith("/transactions"))).toEqual([
         "https://refresh.example.test/v1/transactions?cursor=kept-page&limit=7",
         "https://refresh.example.test/v1/transactions?cursor=kept-page&limit=7",
+        "https://refresh.example.test/v1/transactions?cursor=kept-page&limit=7",
       ])
       const count = urls.length
       await advanceRefresh(10_000)
@@ -1013,7 +1014,7 @@ describe("selected transaction refresh", () => {
       act(() => focusManager.setFocused(false))
       act(() => focusManager.setFocused(true))
       await advanceRefresh()
-      expect(list).toHaveBeenCalledTimes(3)
+      expect(list).toHaveBeenCalledTimes(4)
       expect(screen.getByText(`Returned run: ${IDS.run} · 2025 · DE · EUR`)).toBeTruthy()
     } finally {
       unsubscribe()
@@ -1171,7 +1172,7 @@ describe("selected transaction refresh", () => {
           release?.()
         })
         await advanceRefresh()
-        expect(list).toHaveBeenCalledTimes(action === "auth" ? 1 : 2)
+        expect(list).toHaveBeenCalledTimes(action === "auth" ? 2 : action === "change" ? 4 : 3)
       } finally {
         release?.()
         unsubscribe()
@@ -1484,38 +1485,57 @@ describe("selected transaction refresh", () => {
     expect(document.activeElement?.tagName).toBe("SECTION")
     expect(screen.queryByRole("button", { name: "Refresh results" })).toBeNull()
   })
-  it("retains a newer displayed result when an older status snapshot arrives later", async () => {
-    let completeStatus: ((response: Response) => void) | undefined
-    const body = settledDetail()
-    if (!body.calculation.run) throw new Error("Fixture run missing")
-    const newer = {
-      ...body,
-      calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+  it.each([true, false])(
+    "rechecks an older status snapshot, converging when possible (%s)",
+    async (converges) => {
+      let completeStatus: ((response: Response) => void) | undefined
+      const body = settledDetail()
+      if (!body.calculation.run) throw new Error("Fixture run missing")
+      const newer = {
+        ...body,
+        calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+      }
+      let statusReads = 0
+      let detailReads = 0
+      const taxmaxi = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://late-status.example.test",
+        fetch: async (input) => {
+          if (String(input).includes("calculation-status")) {
+            statusReads += 1
+            return statusReads === 1
+              ? new Promise((resolve) => {
+                  completeStatus = resolve
+                })
+              : Response.json(
+                  selectedWork({
+                    status: converges ? "succeeded" : "failed",
+                    activeRunId: converges ? IDS.other : IDS.run,
+                  })
+                )
+          }
+          detailReads += 1
+          return Response.json(newer)
+        },
+      })
+      mount(taxmaxi, { readStatus: true })
+      await advanceRefresh()
+      await act(async () => {
+        completeStatus?.(Response.json(selectedWork({ status: "not_requested" })))
+      })
+      await advanceRefresh()
+      expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+      expect(detailReads).toBe(2)
+      expect(statusReads).toBe(2)
+      await advanceRefresh(10_000)
+      expect([detailReads, statusReads]).toEqual([2, 2])
+      expect(screen.getByText("Current calculation work").parentElement?.textContent).toContain(
+        converges ? "Complete" : "Failed"
+      )
+      expect(screen.getByText("Current calculation work").parentElement?.textContent).not.toContain(
+        "Covered"
+      )
     }
-    let detailReads = 0
-    const taxmaxi = TaxMaxi.fromBrowserSession({
-      baseUrl: "https://late-status.example.test",
-      fetch: async (input) => {
-        if (String(input).includes("calculation-status"))
-          return new Promise((resolve) => {
-            completeStatus = resolve
-          })
-        detailReads += 1
-        return Response.json(newer)
-      },
-    })
-    mount(taxmaxi, { readStatus: true })
-    await advanceRefresh()
-    await act(async () => {
-      completeStatus?.(Response.json(selectedWork({ status: "not_requested" })))
-    })
-    await advanceRefresh()
-    expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
-    expect(detailReads).toBe(2)
-    expect(screen.getByText("Current calculation work").parentElement?.textContent).not.toContain(
-      "Covered"
-    )
-  })
+  )
 
   it("backs off a failed status read with retained pending work and resumes discovery", async () => {
     let statusReads = 0
@@ -1545,5 +1565,51 @@ describe("selected transaction refresh", () => {
     )
     await advanceRefresh(30_000)
     expect(statusReads).toBe(3)
+  })
+  it("refreshes a cached list when the first selected detail already has the completed run", async () => {
+    const body = settledDetail()
+    if (!body.calculation.run) throw new Error("Fixture run missing")
+    const newer = {
+      ...body,
+      calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+    }
+    let listReads = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://reopen.example.test",
+      fetch: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : String(input))
+        if (url.pathname.endsWith("calculation-status"))
+          return Response.json(selectedWork({ status: "succeeded", activeRunId: IDS.other }))
+        if (url.pathname.endsWith("transactions")) {
+          listReads += 1
+          return Response.json({
+            transactions: [],
+            totalCount: 2,
+            page: { hasMore: false, nextCursor: null },
+          })
+        }
+        return Response.json(newer)
+      },
+    })
+    const view = mount(taxmaxi, { selection: null, readStatus: true })
+    const options = queries.transactionList(taxmaxi, { cursor: "retained-page", limit: 7 })
+    view.client.setQueryData(options.queryKey, {
+      transactions: [],
+      totalCount: 1,
+      page: { hasMore: false, nextCursor: null },
+    })
+    const list = new QueryObserver(view.client, options)
+    const unsubscribe = list.subscribe(() => undefined)
+    try {
+      await advanceRefresh()
+      expect(listReads).toBe(0)
+      view.select(SELECTION)
+      await advanceRefresh()
+      expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+      expect(listReads).toBe(1)
+      expect(view.client.getQueryData(options.queryKey)?.totalCount).toBe(2)
+    } finally {
+      unsubscribe()
+    }
   })
 })

@@ -169,14 +169,10 @@ function InspectorRequest({
     enabled: !authenticationLost && !detailUnavailable,
   })
   const queryClient = useQueryClient()
-  const observedRunId = useRef<string | null | undefined>(undefined)
   const listRefreshRunId = useRef<string | null | undefined>(undefined)
   const runId = detail.data?.calculation.run?.id ?? null
   useEffect(() => {
     if (!detail.isSuccess) return
-    const previousRunId = observedRunId.current
-    observedRunId.current = runId
-    if (previousRunId === undefined || previousRunId === runId) return
     if (listRefreshRunId.current === runId) return
     listRefreshRunId.current = runId
     const refreshList = async () => {
@@ -214,6 +210,17 @@ function InspectorRequest({
           : Promise.resolve(),
         selected ? queryClient.invalidateQueries({ queryKey, exact: true }) : Promise.resolve(),
       ])
+      if (!selected || !refreshAllowed.current) return
+      const refreshedDetail = queryClient.getQueryData(
+        queries.transactionDetail(taxmaxi, { transactionId, taxYear }).queryKey
+      )
+      if ((refreshedDetail?.calculation.run?.id ?? null) !== statusRunId) {
+        // The status snapshot may predate the result. Re-read that side once too.
+        const statusKey = queryKeys.transactionCalculationStatus(taxYear)
+        await queryClient.cancelQueries({ queryKey: statusKey, exact: true })
+        if (selected && refreshAllowed.current)
+          await queryClient.invalidateQueries({ queryKey: statusKey, exact: true })
+      }
     }
     void refreshResult()
     return () => {
@@ -228,6 +235,7 @@ function InspectorRequest({
     transactionId,
     taxYear,
     statusRunId,
+    taxmaxi,
   ])
   const regionRef = useRef<HTMLElement>(null)
   useEffect(() => {
