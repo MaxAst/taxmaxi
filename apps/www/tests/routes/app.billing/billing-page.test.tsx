@@ -288,6 +288,199 @@ describe("BillingPageContent", () => {
     }
   )
 
+  // #133 T09b: after a Stripe return the overlay only reads status. Until the
+  // status shows the purchase (the webhook that records it can land after the
+  // person is back), the annual card offers no second Subscribe, because that
+  // asks the API for a new Checkout and the API refuses it: Stripe already has
+  // the subscription. The page says it is confirming instead of showing an error.
+  it("waits for Stripe on an annual return without offering a second Subscribe", async () => {
+    vi.useFakeTimers()
+    const initialStatus = { ...status(null), credits: 0 }
+    const confirmedStatus = { ...status("active"), credits: 10_000 }
+    const annualCheckout = vi.fn().mockResolvedValue({ url: "https://stripe.test/annual" })
+    const loadStatus = vi
+      .fn<() => Promise<BillingStatus>>()
+      .mockResolvedValueOnce(initialStatus)
+      .mockResolvedValueOnce(initialStatus)
+      .mockResolvedValue(confirmedStatus)
+    try {
+      const { queryClient } = await renderBillingPage({
+        annualCheckout,
+        checkoutReturnKind: "annual",
+        initialStatus,
+        loadStatus,
+      })
+
+      const confirming = () =>
+        screen.queryByText(
+          "Stripe is confirming your payment. Your plan and credits appear here in a moment."
+        )
+      expect(confirming()).toBeTruthy()
+      expect(screen.queryByRole("button", { name: /Subscribe for/ })).toBeNull()
+      expect(
+        screen.getByRole("button", { name: "Confirming subscription…" }).hasAttribute("disabled")
+      ).toBe(true)
+      expect(screen.queryByRole("alert")).toBeNull()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      expect(loadStatus).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(loadStatus).toHaveBeenCalledTimes(2)
+      expect(confirming()).toBeTruthy()
+      expect(screen.queryByRole("button", { name: /Subscribe for/ })).toBeNull()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+
+      expect(loadStatus).toHaveBeenCalledTimes(3)
+      expect(confirming()).toBeNull()
+      expect(screen.getByRole("button", { name: "Manage subscription" })).toBeTruthy()
+      expect(screen.getByText(new Intl.NumberFormat().format(10_000))).toBeTruthy()
+      expect(queryClient.getQueryData(queryKeys.billingStatus())).toEqual(confirmedStatus)
+      expect(screen.queryByRole("alert")).toBeNull()
+      expect(annualCheckout).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The loader reads status fresh on the full-page return, so when Stripe's
+  // webhooks landed before the redirect (the common case) the subscription is
+  // already visible; a revisit of the return URL after the credits were spent
+  // looks the same. Neither has anything left to wait for.
+  it.each([10_000, 0])(
+    "shows the plan right away when the loader already carries the annual subscription with %i credits",
+    async (credits) => {
+      vi.useFakeTimers()
+      const loadStatus = vi.fn<() => Promise<BillingStatus>>()
+      try {
+        await renderBillingPage({
+          checkoutReturnKind: "annual",
+          initialStatus: { ...status("active"), credits },
+          loadStatus,
+        })
+
+        expect(screen.getByRole("button", { name: "Manage subscription" })).toBeTruthy()
+        expect(screen.queryByRole("status")).toBeNull()
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(60_000)
+        })
+
+        // Nothing is left to wait for, so the poll does not run.
+        expect(loadStatus).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
+  // A top-up only shows as a higher balance, and the loader may already carry
+  // it, so the overlay cannot tell "not in yet" from "already in". It keeps
+  // the silent poll and leaves Buy credits available: a second top-up is a
+  // real purchase, unlike a second annual Checkout.
+  it("shows no confirming notice on a top-up return and keeps Buy credits available", async () => {
+    vi.useFakeTimers()
+    const initialStatus = { ...status("active"), credits: 11_000 }
+    const loadStatus = vi.fn<() => Promise<BillingStatus>>().mockResolvedValue(initialStatus)
+    try {
+      await renderBillingPage({ checkoutReturnKind: "topUp", initialStatus, loadStatus })
+
+      expect(screen.queryByRole("status")).toBeNull()
+      expect(
+        screen.getByRole("button", { name: "Buy 1,000 credits" }).hasAttribute("disabled")
+      ).toBe(false)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6 * 60_000)
+      })
+
+      expect(loadStatus).toHaveBeenCalledTimes(15)
+      expect(screen.queryByRole("status")).toBeNull()
+      expect(screen.queryByRole("button", { name: "Check again" })).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // AGENTS.md rule 12: the poll carries the user id it started under, so its
+  // result does not land in the cache of a user who signed in meanwhile.
+  it("drops the poll's cache write when another user signed in before it resolved", async () => {
+    vi.useFakeTimers()
+    const initialStatus = { ...status(null), credits: 0 }
+    const pending = deferred<BillingStatus>()
+    const loadStatus = vi.fn(() => pending.promise)
+    try {
+      const { queryClient } = await renderBillingPage({
+        checkoutReturnKind: "annual",
+        initialStatus,
+        loadStatus,
+      })
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      expect(loadStatus).toHaveBeenCalledTimes(1)
+
+      const otherAccount: Account = {
+        ...sessionAccount,
+        account: { ...sessionAccount.account, id: "00000000-0000-4000-8000-000000000002" },
+      }
+      queryClient.setQueryData(queryKeys.account(), otherAccount)
+      queryClient.setQueryData(queryKeys.billingStatus(), { ...status("active"), credits: 3 })
+      pending.resolve({ ...status("active"), credits: 10_000 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      expect(queryClient.getQueryData(queryKeys.billingStatus())).toEqual({
+        ...status("active"),
+        credits: 3,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("offers Check again once the poll gives up without a confirmation", async () => {
+    vi.useFakeTimers()
+    const initialStatus = { ...status(null), credits: 0 }
+    const confirmedStatus = { ...status("active"), credits: 10_000 }
+    const loadStatus = vi.fn<() => Promise<BillingStatus>>().mockResolvedValue(initialStatus)
+    try {
+      await renderBillingPage({ checkoutReturnKind: "annual", initialStatus, loadStatus })
+
+      // Fifteen attempts with the capped backoff take about five minutes.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6 * 60_000)
+      })
+
+      expect(loadStatus).toHaveBeenCalledTimes(15)
+      expect(
+        screen.getByText("Stripe has not confirmed your payment yet. Check again in a moment.")
+      ).toBeTruthy()
+      expect(screen.queryByRole("button", { name: /Subscribe for/ })).toBeNull()
+      expect(screen.queryByRole("alert")).toBeNull()
+
+      loadStatus.mockResolvedValue(confirmedStatus)
+      fireEvent.click(screen.getByRole("button", { name: "Check again" }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      expect(loadStatus).toHaveBeenCalledTimes(16)
+      expect(screen.getByRole("button", { name: "Manage subscription" })).toBeTruthy()
+      expect(screen.queryByText(/Stripe has not confirmed/)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("handles an unauthorized status refresh after Checkout", async () => {
     vi.useFakeTimers()
     const onUnauthorized = vi.fn().mockResolvedValue(undefined)

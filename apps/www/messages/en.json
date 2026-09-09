@@ -174,7 +174,14 @@
         "description": "10,000 transaction credits with annual renewal.",
         "priceSuffix": "/ year, {taxLabel}",
         "manage": "Manage subscription",
-        "subscribe": "Subscribe for {price}"
+        "subscribe": "Subscribe for {price}",
+        "confirming": "Confirming subscription…"
+      },
+      "checkoutReturn": {
+        "confirming": "Stripe is confirming your payment. Your plan and credits appear here in a moment.",
+        "unconfirmed": "Stripe has not confirmed your payment yet. Check again in a moment.",
+        "checkAgain": "Check again",
+        "checking": "Checking…"
       },
       "topUp": {
         "title": "Extra transaction pack",

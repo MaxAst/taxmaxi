@@ -4,6 +4,7 @@ import { CreditCard, Plus } from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
 import {
   isTaxMaxiUnauthorizedError,
+  type Account,
   type BillingCatalog,
   type BillingPromiseResource,
   type BillingStatus,
@@ -14,6 +15,7 @@ import { AppOverlay, useAppOverlayClose } from "#/components/app-overlay"
 import { appPanelClassName } from "#/components/app-workspace"
 import { Button } from "#/components/ui/button"
 import { Text } from "#/components/ui/typography"
+import { hasActiveSubscription } from "#/lib/first-sync-state"
 import { cn } from "#/lib/utils"
 import { m } from "#/paraglide/messages"
 import { getLocale, type Locale } from "#/paraglide/runtime"
@@ -75,6 +77,30 @@ export const isTopUpActionDisabled = ({
   readonly pendingAction: boolean
 }): boolean => !hasCatalogPrice || pendingAction
 
+/**
+ * Whether `status` already shows the purchase the person returned from.
+ * Stripe writes it into TaxMaxi through webhooks that can land after the
+ * person is back on this page (#133 T09b). An annual purchase shows once the
+ * subscription is active or trialing and its credit grant has arrived; a
+ * loader status that already carried the subscription has nothing left to
+ * wait for. A top-up only shows as a higher balance than the one the overlay
+ * loaded with, so a loader status that already carries it cannot be told
+ * apart from one that does not.
+ */
+export const statusShowsPurchase = ({
+  initialStatus,
+  kind,
+  status,
+}: {
+  readonly initialStatus: BillingStatus
+  readonly kind: CheckoutReturnKind
+  readonly status: BillingStatus
+}): boolean =>
+  kind === "annual"
+    ? hasActiveSubscription(status) &&
+      (status.credits > initialStatus.credits || hasActiveSubscription(initialStatus))
+    : status.credits > initialStatus.credits
+
 export const refreshBillingStatusAfterCheckout = async ({
   initialStatus,
   kind,
@@ -101,12 +127,7 @@ export const refreshBillingStatusAfterCheckout = async ({
       if (isTaxMaxiUnauthorizedError(error)) throw error
       continue
     }
-    if (
-      (kind === "annual" &&
-        (latest.subscriptionStatus === "active" || latest.subscriptionStatus === "trialing") &&
-        latest.credits > initialStatus.credits) ||
-      (kind === "topUp" && latest.credits > initialStatus.credits)
-    ) {
+    if (statusShowsPurchase({ initialStatus, kind, status: latest })) {
       return latest
     }
   }
@@ -153,6 +174,14 @@ function BillingPage() {
     void navigate({ to: "/app/billing", search: {}, replace: true })
   }, [checkoutReturnKind, navigate])
 
+  // Stable on purpose: the post-Checkout effect below lists it as a
+  // dependency, and the search-stripping navigation above re-renders this
+  // component; a new function per render would restart the poll.
+  const onUnauthorized = useCallback(async () => {
+    await clearAuthSessionCookie()
+    await navigate({ to: "/login", replace: true })
+  }, [navigate])
+
   return (
     <BillingPageContent
       assignLocation={(url) => window.location.assign(url)}
@@ -160,10 +189,7 @@ function BillingPage() {
       catalog={catalog}
       checkoutReturnKind={checkoutReturnKind}
       onClose={onClose}
-      onUnauthorized={async () => {
-        await clearAuthSessionCookie()
-        await navigate({ to: "/login", replace: true })
-      }}
+      onUnauthorized={onUnauthorized}
       status={status}
     />
   )
@@ -191,12 +217,25 @@ export function BillingPageContent({
   const [liveStatus, setLiveStatus] = useState(status)
   const [pendingAction, setPendingAction] = useState<"annual" | "portal" | "topUp" | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // After a Checkout return the poll below reads status until it shows the
+  // purchase. `pollGaveUp` is set when it stops without seeing it, so the
+  // notice can offer a manual re-read; `checkingStatus` covers that re-read.
+  const [pollGaveUp, setPollGaveUp] = useState(false)
+  const [checkingStatus, setCheckingStatus] = useState(false)
   const subscribed =
     liveStatus.subscriptionStatus !== null &&
     liveStatus.subscriptionStatus !== "canceled" &&
     liveStatus.subscriptionStatus !== "incomplete_expired"
-  const topUpEligible =
-    liveStatus.subscriptionStatus === "active" || liveStatus.subscriptionStatus === "trialing"
+  const topUpEligible = hasActiveSubscription(liveStatus)
+  // Stripe's webhook can land after the person is back here, so the visible
+  // status may still predate the purchase. While it does, the annual card
+  // must not offer Subscribe again: a second annual Checkout is refused by
+  // the API because Stripe already has the subscription (#133 T09b). A
+  // top-up return gets no such notice: its status cannot say whether the
+  // purchase is in yet, and a second top-up is a real purchase.
+  const confirmingAnnual =
+    checkoutReturnKind === "annual" &&
+    !statusShowsPurchase({ initialStatus: status, kind: "annual", status: liveStatus })
 
   // The overlay renders above the mounted dashboard, whose first-sync wizard
   // reads billing through the `billingStatus` query. Every refreshed status is
@@ -204,12 +243,25 @@ export function BillingPageContent({
   // `ready`, or from `paused` to `resumable`, while the overlay is still open
   // (#108 D07).
   const applyRefreshedStatus = useCallback(
-    (refreshed: BillingStatus) => {
+    (refreshed: BillingStatus, userId: string | undefined) => {
       setLiveStatus(refreshed)
       // The post-Checkout poll can run for tens of seconds and outlive a
-      // logout; the write is dropped once the session's account entry is gone.
-      setSessionQueryData({ data: refreshed, queryClient, queryKey: queryKeys.billingStatus() })
+      // logout; the write is dropped once the session's account entry is gone
+      // or belongs to someone who signed in after the read started.
+      setSessionQueryData({
+        data: refreshed,
+        queryClient,
+        queryKey: queryKeys.billingStatus(),
+        userId,
+      })
     },
+    [queryClient]
+  )
+
+  // The status response names no user, so the id the read started under is
+  // the session's cached account at that moment (AGENTS.md rule 12).
+  const readSessionUserId = useCallback(
+    () => queryClient.getQueryData<Account>(queryKeys.account())?.account.id,
     [queryClient]
   )
 
@@ -223,29 +275,45 @@ export function BillingPageContent({
     onClose()
   }, [onClose, queryClient])
 
-  useEffect(() => {
-    if (checkoutReturnKind === null) return
-    let active = true
-
-    const handleRefreshError = async (cause: unknown) => {
-      if (!active || !isTaxMaxiUnauthorizedError(cause)) return
-      await onUnauthorized()
-    }
-
-    const refreshOnce = async () => {
+  // One status read outside the poll: the focus and visibility refreshes
+  // while the poll runs, and Check again after it gave up. The result is
+  // applied only while `shouldApply` says so, so a read that resolves after
+  // the overlay closed does not write over the dashboard's own re-read. A
+  // 401 leaves the app; any other failure keeps the visible status as it is.
+  const readStatusOnce = useCallback(
+    async (shouldApply: () => boolean = () => true) => {
+      const userId = readSessionUserId()
+      setCheckingStatus(true)
       try {
         const refreshed = await billing.status()
-        if (active) applyRefreshedStatus(refreshed)
+        if (shouldApply()) applyRefreshedStatus(refreshed, userId)
       } catch (cause) {
-        await handleRefreshError(cause)
+        if (shouldApply() && isTaxMaxiUnauthorizedError(cause)) await onUnauthorized()
+      } finally {
+        setCheckingStatus(false)
       }
-    }
+    },
+    [applyRefreshedStatus, billing, onUnauthorized, readSessionUserId]
+  )
 
+  useEffect(() => {
+    if (checkoutReturnKind === null) return
+    const purchaseShown = (latest: BillingStatus) =>
+      statusShowsPurchase({ initialStatus: status, kind: checkoutReturnKind, status: latest })
+    // The loader's status already shows the purchase (the webhook landed
+    // before the redirect, or this is a revisit of the return URL): nothing
+    // to wait for.
+    if (purchaseShown(status)) return
+    const userId = readSessionUserId()
+    let active = true
+    setPollGaveUp(false)
+
+    const refreshOnFocus = () => void readStatusOnce(() => active)
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void refreshOnce()
+      if (document.visibilityState === "visible") refreshOnFocus()
     }
 
-    window.addEventListener("focus", refreshOnce)
+    window.addEventListener("focus", refreshOnFocus)
     document.addEventListener("visibilitychange", refreshWhenVisible)
 
     void refreshBillingStatusAfterCheckout({
@@ -256,18 +324,30 @@ export function BillingPageContent({
       wait: (delayMs) => new Promise((resolve) => window.setTimeout(resolve, delayMs)),
     })
       .then((refreshed) => {
+        if (!active) return
         // When every poll failed, `refreshed` is the loader-time `status`
         // itself, not a read; writing it would put a stale snapshot over a
         // fresher value the focus refresh or the dashboard may have cached.
-        if (active && refreshed !== status) applyRefreshedStatus(refreshed)
+        if (refreshed !== status) applyRefreshedStatus(refreshed, userId)
+        if (!purchaseShown(refreshed)) setPollGaveUp(true)
       })
-      .catch(handleRefreshError)
+      .catch(async (cause: unknown) => {
+        if (active && isTaxMaxiUnauthorizedError(cause)) await onUnauthorized()
+      })
     return () => {
       active = false
-      window.removeEventListener("focus", refreshOnce)
+      window.removeEventListener("focus", refreshOnFocus)
       document.removeEventListener("visibilitychange", refreshWhenVisible)
     }
-  }, [applyRefreshedStatus, billing, checkoutReturnKind, onUnauthorized, status])
+  }, [
+    applyRefreshedStatus,
+    billing,
+    checkoutReturnKind,
+    onUnauthorized,
+    readSessionUserId,
+    readStatusOnce,
+    status,
+  ])
 
   const redirectToStripe = async (action: "annual" | "portal" | "topUp") => {
     setPendingAction(action)
@@ -309,9 +389,32 @@ export function BillingPageContent({
           </p>
         )}
 
+        {confirmingAnnual ? (
+          <div className="flex flex-wrap items-center gap-3" role="status">
+            <Text size="bodySm" tone="muted">
+              {pollGaveUp
+                ? m["app.billing.checkoutReturn.unconfirmed"]()
+                : m["app.billing.checkoutReturn.confirming"]()}
+            </Text>
+            {pollGaveUp ? (
+              <Button
+                disabled={checkingStatus}
+                onClick={() => void readStatusOnce()}
+                size="sm"
+                variant="outline"
+              >
+                {checkingStatus
+                  ? m["app.billing.checkoutReturn.checking"]()
+                  : m["app.billing.checkoutReturn.checkAgain"]()}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="grid gap-4 lg:grid-cols-2">
           <AnnualBillingCard
             catalog={catalog}
+            confirming={confirmingAnnual}
             disabled={pendingAction !== null}
             onAction={() => void redirectToStripe(subscribed ? "portal" : "annual")}
             pending={pendingAction === (subscribed ? "portal" : "annual")}
@@ -335,6 +438,7 @@ export function BillingPageContent({
 
 function AnnualBillingCard({
   catalog,
+  confirming,
   disabled,
   onAction,
   pending,
@@ -343,6 +447,8 @@ function AnnualBillingCard({
   subscribed,
 }: {
   readonly catalog: BillingCatalog | null
+  /** True while a returned-from Checkout is not yet visible in `status`; hides Subscribe. */
+  readonly confirming: boolean
   readonly disabled: boolean
   readonly onAction: () => void
   readonly pending: boolean
@@ -352,6 +458,24 @@ function AnnualBillingCard({
 }) {
   const price = catalog?.prices.find((item) => item.lookupKey === "taxmaxi_annual_10k_eur")
   const displayedPrice = price === undefined ? null : formatCatalogPrice(price, locale)
+  const action =
+    confirming && !subscribed ? (
+      <Button disabled>
+        <CreditCard data-icon="inline-start" />
+        {m["app.billing.annual.confirming"]()}
+      </Button>
+    ) : (
+      <Button disabled={disabled || (!subscribed && displayedPrice === null)} onClick={onAction}>
+        <CreditCard data-icon="inline-start" />
+        {pending
+          ? m["app.billing.openingStripe"]()
+          : subscribed
+            ? m["app.billing.annual.manage"]()
+            : displayedPrice === null
+              ? m["app.billing.priceUnavailable"]()
+              : m["app.billing.annual.subscribe"]({ price: displayedPrice })}
+      </Button>
+    )
   return (
     <section className={cn(appPanelClassName, "flex flex-col gap-4 p-5")}>
       <div className="flex flex-col gap-1">
@@ -372,18 +496,7 @@ function AnnualBillingCard({
           {new Intl.NumberFormat(locale).format(status.credits)}
         </span>
       </p>
-      <div>
-        <Button disabled={disabled || (!subscribed && displayedPrice === null)} onClick={onAction}>
-          <CreditCard data-icon="inline-start" />
-          {pending
-            ? m["app.billing.openingStripe"]()
-            : subscribed
-              ? m["app.billing.annual.manage"]()
-              : displayedPrice === null
-                ? m["app.billing.priceUnavailable"]()
-                : m["app.billing.annual.subscribe"]({ price: displayedPrice })}
-        </Button>
-      </div>
+      <div>{action}</div>
     </section>
   )
 }
