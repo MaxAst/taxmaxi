@@ -16,6 +16,7 @@ import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ImprintRouteImport } from './routes/imprint'
 import { Route as CoinbaseSignInRouteImport } from './routes/coinbase-sign-in'
+import { Route as AtelierRouteImport } from './routes/atelier'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as SlugRouteImport } from './routes/$slug'
@@ -76,6 +77,11 @@ const ImprintRoute = ImprintRouteImport.update({
 const CoinbaseSignInRoute = CoinbaseSignInRouteImport.update({
   id: '/coinbase-sign-in',
   path: '/coinbase-sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AtelierRoute = AtelierRouteImport.update({
+  id: '/atelier',
+  path: '/atelier',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AppRoute = AppRouteImport.update({
@@ -214,6 +220,7 @@ export interface FileRoutesByFullPath {
   '/$slug': typeof SlugRoute
   '/about': typeof AboutRoute
   '/app': typeof AppRouteWithChildren
+  '/atelier': typeof AtelierRoute
   '/coinbase-sign-in': typeof CoinbaseSignInRoute
   '/imprint': typeof ImprintRoute
   '/login': typeof LoginRoute
@@ -249,6 +256,7 @@ export interface FileRoutesByTo {
   '/$slug': typeof SlugRoute
   '/about': typeof AboutRoute
   '/app': typeof AppRouteWithChildren
+  '/atelier': typeof AtelierRoute
   '/coinbase-sign-in': typeof CoinbaseSignInRoute
   '/imprint': typeof ImprintRoute
   '/login': typeof LoginRoute
@@ -285,6 +293,7 @@ export interface FileRoutesById {
   '/$slug': typeof SlugRoute
   '/about': typeof AboutRoute
   '/app': typeof AppRouteWithChildren
+  '/atelier': typeof AtelierRoute
   '/coinbase-sign-in': typeof CoinbaseSignInRoute
   '/imprint': typeof ImprintRoute
   '/login': typeof LoginRoute
@@ -322,6 +331,7 @@ export interface FileRouteTypes {
     | '/$slug'
     | '/about'
     | '/app'
+    | '/atelier'
     | '/coinbase-sign-in'
     | '/imprint'
     | '/login'
@@ -357,6 +367,7 @@ export interface FileRouteTypes {
     | '/$slug'
     | '/about'
     | '/app'
+    | '/atelier'
     | '/coinbase-sign-in'
     | '/imprint'
     | '/login'
@@ -392,6 +403,7 @@ export interface FileRouteTypes {
     | '/$slug'
     | '/about'
     | '/app'
+    | '/atelier'
     | '/coinbase-sign-in'
     | '/imprint'
     | '/login'
@@ -428,6 +440,7 @@ export interface RootRouteChildren {
   SlugRoute: typeof SlugRoute
   AboutRoute: typeof AboutRoute
   AppRoute: typeof AppRouteWithChildren
+  AtelierRoute: typeof AtelierRoute
   CoinbaseSignInRoute: typeof CoinbaseSignInRoute
   ImprintRoute: typeof ImprintRoute
   LoginRoute: typeof LoginRoute
@@ -505,6 +518,13 @@ declare module '@tanstack/react-router' {
       path: '/coinbase-sign-in'
       fullPath: '/coinbase-sign-in'
       preLoaderRoute: typeof CoinbaseSignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/atelier': {
+      id: '/atelier'
+      path: '/atelier'
+      fullPath: '/atelier'
+      preLoaderRoute: typeof AtelierRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/app': {
@@ -711,6 +731,7 @@ const rootRouteChildren: RootRouteChildren = {
   SlugRoute: SlugRoute,
   AboutRoute: AboutRoute,
   AppRoute: AppRouteWithChildren,
+  AtelierRoute: AtelierRoute,
   CoinbaseSignInRoute: CoinbaseSignInRoute,
   ImprintRoute: ImprintRoute,
   LoginRoute: LoginRoute,
