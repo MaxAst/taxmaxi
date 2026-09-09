@@ -13,19 +13,19 @@ A fiat currency description received from a provider's dedicated fiat catalog. A
 _Avoid_: Provider asset
 
 **Provider consideration**:
-The fiat amount a provider explicitly records as paid or received for an exchange. It describes the executed exchange, not a market estimate. Fees are separate when the provider records them separately.
-_Avoid_: Market valuation, tax basis
+The fiat amount a provider records for an accounting event, including an exchange amount paid or received and a provider-reported reward value. The factual ledger records this evidence as `observed_consideration`; the event need not be an exchange. A reward value does not prove that fiat was paid or received, so use those labels only when the provider evidence establishes an executed exchange. Fees are separate when the provider records them separately.
+_Avoid_: Price paid (for a provider-reported reward value), cost basis
 
 **Market valuation**:
 An estimate of an asset movement’s fiat value at a stated time, derived from market price evidence. It is not proof of the amount actually paid or received.
 _Avoid_: Purchase price (unless actual provider consideration is meant)
 
-**Tax basis**:
-The amount assigned to an acquisition or lot under the accounting rules and used to calculate gain or loss on disposal. It may differ from provider consideration or market valuation.
-_Avoid_: Price paid
+**Cost basis** (also called **tax basis**):
+The amount assigned to an acquisition or lot under the accounting rules and used to calculate gain or loss on disposal. It may differ from provider consideration or market valuation. Cost basis is the preferred term, matching the existing engine and API field `costBasis`; tax basis is an alias for the same value, not a separate fact or a new `taxBasis` field.
+_Avoid_: Price paid, tax basis as a separate value
 
 **Proceeds**:
-The disposal amount used by the accounting calculation before subtracting tax basis to determine gain or loss. Its valuation and fee treatment follow the applicable accounting rules; it is not itself the gain.
+The disposal amount used by the accounting calculation before subtracting cost basis to determine gain or loss. Its valuation and fee treatment follow the applicable accounting rules; it is not itself the gain.
 _Avoid_: Profit, gain
 
 **Income**:
