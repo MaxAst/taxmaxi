@@ -55,7 +55,8 @@ export const Route = createFileRoute("/atelier")({ beforeLoad: () => { throw not
             if (
               /\/src\/(components\/atelier\/|routes\/atelier\.|paraglide\/messages\/atelier_)/.test(
                 id
-              )
+              ) ||
+              /\/node_modules\/(?:\.pnpm\/)?(?:dialkit|agentation)(?:@|\/)/.test(id)
             ) {
               this.error(`Atelier entered the production ${this.environment.name} graph: ${id}`)
             }
