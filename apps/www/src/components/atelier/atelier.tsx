@@ -5,6 +5,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "#/components/ui/tabs"
 import { Heading, Text } from "#/components/ui/typography"
 import { m } from "#/paraglide/messages"
 
+import { PrimitiveExperiments } from "./primitive-experiments"
+
 import { ApprovedExamples } from "./approved-examples"
 import {
   AtelierComparisonControls,
@@ -39,7 +41,10 @@ export function Atelier() {
             <ApprovedExamples />
           </TabsContent>
           <TabsContent value="experiments" className="pt-6">
-            <AtelierTuningExample theme={theme} />
+            <div className="flex flex-col gap-12">
+              <PrimitiveExperiments />
+              <AtelierTuningExample theme={theme} />
+            </div>
           </TabsContent>
         </Tabs>
         <AtelierFeedback />
