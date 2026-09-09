@@ -95,8 +95,8 @@
       "title": "Verify your email",
       "description": "Enter the code we sent to your email address.",
       "code": "Verification code",
+      "codePlaceholder": "ABCDEFGH",
       "submit": "Verify",
-      "resendPrompt": "Didn't get a code?",
       "resend": "Send a new code",
       "resent": "A new code is on its way.",
       "resendWait": "You can ask for a new code in {seconds} s.",
@@ -111,6 +111,8 @@
     "form": {
       "email": "Email",
       "password": "Password",
+      "emailPlaceholder": "satoshi.nakamoto@example.com",
+      "passwordPlaceholder": "****************",
       "submitLogin": "Log in",
       "submitSignUp": "Create account",
       "emailTaken": "This email is already registered.",

@@ -204,6 +204,23 @@ describe("AuthPage provider rendering", () => {
     expect(screen.queryByLabelText("Email")).toBeNull()
     expect(screen.getByText("No login method is available right now.")).toBeTruthy()
   })
+
+  it("renders every control at the touch size", async () => {
+    await renderAuthPage({ mode: "login", providers: [provider("local"), provider("coinbase")] })
+
+    const controls = [
+      screen.getByLabelText("Email"),
+      screen.getByLabelText("Password"),
+      screen.getByRole("button", { name: "Log in" }),
+      screen.getByRole("link", { name: /Continue with Coinbase/ }),
+    ]
+    expect(controls.map((control) => control.classList.contains("h-11"))).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ])
+  })
 })
 
 describe("AuthPage sign-up", () => {

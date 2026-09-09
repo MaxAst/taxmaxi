@@ -53,11 +53,7 @@ export function AuthPage({ mode, providers, taxmaxi }: AuthPageProps) {
               ) : null}
 
               {hasCoinbase ? (
-                <Button
-                  asChild
-                  className="h-12 gap-2 rounded-xl border-[#d9d2bc] bg-white text-[#1e4d40] hover:bg-[#f5f2e8] dark:border-[#2a3a35] dark:bg-[#202724] dark:text-[#f7f0e3] dark:hover:bg-[#26312d]"
-                  variant="outline"
-                >
+                <Button asChild size="touch" variant="surface">
                   <Link to="/coinbase-sign-in">
                     <img src={CoinbaseIcon} alt="Coinbase" width={22} height={22} />
                     {m["auth.continueCoinbase"]()}

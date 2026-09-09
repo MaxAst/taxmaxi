@@ -156,6 +156,17 @@ const countdown = (seconds: number) =>
   })
 
 describe("VerifyEmailPage verify", () => {
+  it("renders every control at the touch size", async () => {
+    await renderVerifyEmailPage()
+
+    const controls = [codeField(), screen.getByRole("button", { name: "Verify" }), resendButton()]
+    expect(controls.map((control) => control.classList.contains("h-11"))).toEqual([
+      true,
+      true,
+      true,
+    ])
+  })
+
   it("sends the trimmed uppercase code, disables submit while pending, then enters the app", async () => {
     const response = deferred<Response>()
     const { cachedQueriesOnAppEntry, history, queryClient, requests } = await renderVerifyEmailPage(

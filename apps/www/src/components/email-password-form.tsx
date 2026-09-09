@@ -92,10 +92,7 @@ const passwordRuleMessage = ({
   }
 }
 
-const fieldClassName =
-  "h-11 rounded-xl border-[#d9d2bc] bg-white px-3.5 text-base text-[#1e4d40] placeholder:text-[#2a6857]/50 dark:border-[#2a3a35] dark:bg-[#202724] dark:text-[#f7f0e3] dark:placeholder:text-[#a3c4b5]/50"
-
-const labelClassName = "text-sm font-medium text-[#1e4d40] dark:text-[#f7f0e3]"
+const labelClassName = "text-sm leading-none font-medium text-[#1e4d40] dark:text-[#8ab4a3]"
 
 const errorClassName = "text-sm text-destructive"
 
@@ -198,8 +195,8 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
       : passwordErrorId
 
   return (
-    <form aria-busy={pending} className="grid gap-3" onSubmit={handleSubmit}>
-      <div className="grid gap-1.5">
+    <form aria-busy={pending} className="grid gap-4" onSubmit={handleSubmit}>
+      <div className="grid gap-2">
         <label className={labelClassName} htmlFor={emailId}>
           {m["auth.form.email"]()}
         </label>
@@ -207,17 +204,19 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
           aria-describedby={emailDescribedBy}
           aria-invalid={emailInvalid}
           autoComplete="email"
-          className={fieldClassName}
           disabled={pending}
           id={emailId}
           inputMode="email"
           name="email"
           onChange={(event) => setEmail(event.target.value)}
+          placeholder={m["auth.form.emailPlaceholder"]()}
           ref={emailRef}
           required
+          size="touch"
           spellCheck={false}
           type="email"
           value={email}
+          variant="auth"
         />
         {/* A reserved line keeps the password field still when a message appears. */}
         <div className="min-h-5">
@@ -232,7 +231,7 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
         </div>
       </div>
 
-      <div className="grid gap-1.5">
+      <div className="grid gap-2">
         <label className={labelClassName} htmlFor={passwordId}>
           {m["auth.form.password"]()}
         </label>
@@ -240,15 +239,17 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
           aria-describedby={passwordDescribedBy}
           aria-invalid={passwordInvalid}
           autoComplete={isLogin ? "current-password" : "new-password"}
-          className={fieldClassName}
           disabled={pending}
           id={passwordId}
           name="password"
           onChange={(event) => setPassword(event.target.value)}
+          placeholder={m["auth.form.passwordPlaceholder"]()}
           ref={passwordRef}
           required
+          size="touch"
           type="password"
           value={password}
+          variant="auth"
         />
         <div className="min-h-5">
           {error?.kind === "password_weak" ? (
@@ -282,11 +283,7 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
         ) : null}
       </div>
 
-      <Button
-        className="h-12 gap-2 rounded-xl bg-[#1e4d40] text-[#f7f0e3] hover:bg-[#2a6857] dark:bg-[#8ab4a3] dark:text-[#1a1f1d] dark:hover:bg-[#a3c4b5]"
-        disabled={pending}
-        type="submit"
-      >
+      <Button className="mt-2" disabled={pending} size="touch" type="submit" variant="cta">
         {pending ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
         {isLogin ? m["auth.form.submitLogin"]() : m["auth.form.submitSignUp"]()}
       </Button>
