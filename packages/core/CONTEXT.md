@@ -167,7 +167,7 @@ One pending proof that a person can read an account email, created by a local si
 _Avoid_: Verification code, security verification, verification cookie
 
 **Send attempt**:
-One hand-off of a verification code to email delivery, recorded on the verification request as `send_count` and `last_sent_at` before delivery runs. A failed delivery still counts. The one-minute cooldown and the five-send cap read these facts (ADR 0016).
+One hand-off of a verification code to email delivery, recorded on the verification request before delivery runs. Every attempt sets `last_sent_at`. `send_count` is set to 1 by the request's first send and grows by 1 on each explicit resend; an unverified login that reuses an active request leaves it unchanged. A failed delivery still counts. The one-minute cooldown reads `last_sent_at` and the five-send cap reads `send_count` (ADR 0016).
 _Avoid_: Delivered email, successful send
 
 **Source connection**:
