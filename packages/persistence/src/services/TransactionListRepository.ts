@@ -59,6 +59,8 @@ export interface TransactionListItem {
   readonly description: string | null
   readonly externalId: string | null
   readonly movements: ReadonlyArray<TransactionListMovement>
+  /** Income value from the active calculation, separate from disposal gains. */
+  readonly income: string | null
   readonly realizedGainLoss: string | null
   readonly fiatCurrency: string | null
   readonly calculationState: "complete" | "partial"

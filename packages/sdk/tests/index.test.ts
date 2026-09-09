@@ -688,6 +688,7 @@ describe("TaxMaxi Promise client", () => {
             description: null,
             externalId: null,
             movements: [{ amount: "0.1", assetSymbol: "BTC", kind: "acquisition" }],
+            income: null,
             realizedGainLoss: null,
             fiatCurrency: null,
             calculationState: "partial",
