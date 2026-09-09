@@ -5,6 +5,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import { Ellipsis, RotateCcw } from "lucide-react"
 import {
   isTaxMaxiUnauthorizedError,
+  type Account as TaxMaxiAccount,
   type SourceOverview,
   type SourceSyncJob,
   type SourceSyncJobInput,
@@ -202,6 +203,7 @@ export function Dashboard({
   const [pendingCompletions, setPendingCompletions] = useState<ReadonlyArray<PendingCompletion>>([])
   const observedRunIds = useRef(new Set<string | null>())
   const dependentReadsAllowed = useRef(false)
+  const assetsTabRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     dependentReadsAllowed.current = true
@@ -342,16 +344,32 @@ export function Dashboard({
   })
   const [welcomeDismissed, setWelcomeDismissed] = useState(false)
   const welcomePending = accountQuery.data?.account.welcomeSeenAt === null && !welcomeDismissed
+  const focusTabsAfterWelcome = useRef(false)
   const finishWelcome = useCallback(() => {
+    focusTabsAfterWelcome.current = true
     setWelcomeDismissed(true)
-    taxmaxi.auth.markWelcomeSeen().then(
-      (account) => queryClient.setQueryData(queryKeys.account(), account),
-      (error: unknown) => {
-        if (isTaxMaxiUnauthorizedError(error)) {
-          void handleUnauthorized()
-        }
+
+    const writeMarkedAccount = async () => {
+      const marked = await taxmaxi.auth.markWelcomeSeen()
+      // An account read that started before the mark would answer with the
+      // older `welcomeSeenAt: null`; cancel it so it cannot replace the mark.
+      await queryClient.cancelQueries({ queryKey: queryKeys.account() })
+      // Write only into the session the mark belongs to. Logout unmounts the
+      // dashboard and removes the account entry, and a later login in the
+      // same tab caches another user's account, which must stay untouched.
+      const cached = queryClient.getQueryData<TaxMaxiAccount>(queryKeys.account())
+      if (!dependentReadsAllowed.current || cached?.account.id !== marked.account.id) {
+        return
       }
-    )
+
+      queryClient.setQueryData(queryKeys.account(), marked)
+    }
+
+    writeMarkedAccount().catch((error: unknown) => {
+      if (isTaxMaxiUnauthorizedError(error)) {
+        void handleUnauthorized()
+      }
+    })
   }, [handleUnauthorized, queryClient, taxmaxi])
 
   useEffect(() => {
@@ -612,23 +630,39 @@ export function Dashboard({
   // progress is visible over the wizard and over the tabs alike (#108 D06).
   // An unseen welcome shows even in `done`, so a user whose sources synced
   // before the welcome existed sees it once and then the tabs (#108 D01, D09).
-  const body =
-    firstSync.state === "done" && !welcomePending ? null : (
-      <FirstSyncWizard
-        billing={billing}
-        billingRefreshing={billingQuery.isFetching}
-        createWalletSource={createWalletSource === undefined ? undefined : connectWalletSource}
-        islandItemShown={islandShowsTarget}
-        onRetryBilling={() => void billingQuery.refetch()}
-        onStart={startFirstSync}
-        onWelcomeFinish={finishWelcome}
-        resolveName={resolveName}
-        sourceName={firstSyncTarget?.name ?? null}
-        state={firstSync.state}
-        welcomePending={welcomePending}
-        welcomeVideoId={FIRST_SYNC_WELCOME_VIDEO_ID}
-      />
-    )
+  const wizardShown = firstSync.state !== "done" || welcomePending
+
+  // The wizard moves focus to its next heading on every screen change, but
+  // when finishing the welcome removes the wizard itself (the dashboard was
+  // already synced) that heading is gone and focus would drop to the body.
+  // The first tab takes it instead, once, right after the finish.
+  useEffect(() => {
+    if (welcomePending || !focusTabsAfterWelcome.current) {
+      return
+    }
+
+    focusTabsAfterWelcome.current = false
+    if (!wizardShown) {
+      assetsTabRef.current?.focus({ preventScroll: true })
+    }
+  }, [welcomePending, wizardShown])
+
+  const body = !wizardShown ? null : (
+    <FirstSyncWizard
+      billing={billing}
+      billingRefreshing={billingQuery.isFetching}
+      createWalletSource={createWalletSource === undefined ? undefined : connectWalletSource}
+      islandItemShown={islandShowsTarget}
+      onRetryBilling={() => void billingQuery.refetch()}
+      onStart={startFirstSync}
+      onWelcomeFinish={finishWelcome}
+      resolveName={resolveName}
+      sourceName={firstSyncTarget?.name ?? null}
+      state={firstSync.state}
+      welcomePending={welcomePending}
+      welcomeVideoId={FIRST_SYNC_WELCOME_VIDEO_ID}
+    />
+  )
 
   return (
     <div className="text-marketing-foreground flex min-h-screen flex-col pt-28 pb-8 sm:pt-32">
@@ -677,7 +711,9 @@ export function Dashboard({
 
               <Tabs defaultValue="assets" className="gap-y-8">
                 <TabsList>
-                  <TabsTrigger value="assets">{m["app.dashboard.tabs.assets"]()}</TabsTrigger>
+                  <TabsTrigger ref={assetsTabRef} value="assets">
+                    {m["app.dashboard.tabs.assets"]()}
+                  </TabsTrigger>
                   <TabsTrigger value="transactions">
                     {m["app.dashboard.tabs.transactions"]()}
                   </TabsTrigger>

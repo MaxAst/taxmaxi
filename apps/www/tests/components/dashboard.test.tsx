@@ -9,7 +9,7 @@ import {
   useQuery,
 } from "@tanstack/react-query"
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
-import type { ReactNode } from "react"
+import type { ReactNode, Ref } from "react"
 import {
   TaxMaxi,
   type Account as TaxMaxiAccount,
@@ -205,7 +205,13 @@ vi.mock("#/components/source-sync-island", () => ({
 vi.mock("#/components/ui/tabs", () => ({
   Tabs: ({ children }: { readonly children: ReactNode }) => <div>{children}</div>,
   TabsList: ({ children }: { readonly children: ReactNode }) => <div>{children}</div>,
-  TabsTrigger: ({ children }: { readonly children: ReactNode }) => <button>{children}</button>,
+  TabsTrigger: ({
+    children,
+    ref,
+  }: {
+    readonly children: ReactNode
+    readonly ref?: Ref<HTMLButtonElement>
+  }) => <button ref={ref}>{children}</button>,
   TabsContent: ({ children }: { readonly children: ReactNode }) => <div>{children}</div>,
 }))
 
@@ -1264,6 +1270,8 @@ describe("Dashboard first-sync body (#108 T05, T06, T07)", () => {
   let respondBilling: () => Promise<BillingStatus>
   let welcomeMarks: number
   let respondWelcomeMark: () => Promise<TaxMaxiAccount>
+  let accountReads: number
+  let respondAccountRead: () => Promise<TaxMaxiAccount>
 
   beforeEach(() => {
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -1272,9 +1280,15 @@ describe("Dashboard first-sync body (#108 T05, T06, T07)", () => {
     respondBilling = async () => billingStatus(1)
     welcomeMarks = 0
     respondWelcomeMark = async () => sdkAccount(WELCOME_SEEN_AT)
+    accountReads = 0
+    respondAccountRead = async () => sdkAccount(null)
     syncState.activeSyncs = []
     testTaxMaxi = {
       auth: {
+        account: vi.fn(async () => {
+          accountReads += 1
+          return respondAccountRead()
+        }),
         markWelcomeSeen: vi.fn(async () => {
           welcomeMarks += 1
           return respondWelcomeMark()
@@ -1325,6 +1339,12 @@ describe("Dashboard first-sync body (#108 T05, T06, T07)", () => {
     const cachedWelcomeSeenAt = () =>
       queryClient.getQueryData<TaxMaxiAccount>(queryKeys.account())?.account.welcomeSeenAt
     const seedWelcomeUnseen = () => queryClient.setQueryData(queryKeys.account(), sdkAccount(null))
+    // This describe runs on real timers; let a resolved promise chain and React Query's
+    // notifications run to completion.
+    const settle = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
 
     it("shows the welcome ahead of the state step while welcomeSeenAt is null; Continue marks it seen once and writes the account back", async () => {
       seedWelcomeUnseen()
@@ -1390,6 +1410,102 @@ describe("Dashboard first-sync body (#108 T05, T06, T07)", () => {
       })
       expect(cachedWelcomeSeenAt()).toBeNull()
       expect(welcomeHeading()).toBeNull()
+    })
+
+    it("moves focus to the first tab when finishing the welcome shows the tabs", async () => {
+      seedWelcomeUnseen()
+      mount(syncedOverviews)
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }))
+
+      await waitFor(() => expect(assetsTab()).toBeTruthy())
+      expect(document.activeElement).toBe(assetsTab())
+      expect(welcomeHeading()).toBeNull()
+    })
+
+    it("drops a mark that resolves after logout removed the client state", async () => {
+      let resolveWelcomeMark: (account: TaxMaxiAccount) => void = () => {}
+      respondWelcomeMark = () =>
+        new Promise((resolve) => {
+          resolveWelcomeMark = resolve
+        })
+      seedWelcomeUnseen()
+      const { unmount } = mount(syncedOverviews)
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }))
+      expect(welcomeMarks).toBe(1)
+
+      // Logout: the dashboard unmounts and the taxmaxi queries are removed.
+      unmount()
+      queryClient.removeQueries({ queryKey: queryKeys.all })
+
+      resolveWelcomeMark(sdkAccount(WELCOME_SEEN_AT))
+      await settle()
+
+      expect(queryClient.getQueryData(queryKeys.account())).toBeUndefined()
+    })
+
+    it("never writes a late mark over another user's cached account", async () => {
+      let resolveWelcomeMark: (account: TaxMaxiAccount) => void = () => {}
+      respondWelcomeMark = () =>
+        new Promise((resolve) => {
+          resolveWelcomeMark = resolve
+        })
+      seedWelcomeUnseen()
+      mount(syncedOverviews)
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }))
+      expect(welcomeMarks).toBe(1)
+
+      // Another user logs in in the same tab before the first user's mark resolves.
+      const unseen = sdkAccount(null)
+      const otherUser: TaxMaxiAccount = {
+        ...unseen,
+        account: {
+          ...unseen.account,
+          email: "other@example.test",
+          id: "00000000-0000-4000-8000-000000000002",
+        },
+      }
+      queryClient.removeQueries({ queryKey: queryKeys.all })
+      queryClient.setQueryData(queryKeys.account(), otherUser)
+
+      resolveWelcomeMark(sdkAccount(WELCOME_SEEN_AT))
+      await settle()
+
+      expect(queryClient.getQueryData(queryKeys.account())).toEqual(otherUser)
+    })
+
+    it("keeps the mark when an account read that started earlier resolves later with the old fact", async () => {
+      let resolveAccountRead: (account: TaxMaxiAccount) => void = () => {}
+      respondAccountRead = () =>
+        new Promise((resolve) => {
+          resolveAccountRead = resolve
+        })
+      // A stale cached account starts a background read when the query mounts.
+      queryClient.setQueryData(queryKeys.account(), sdkAccount(null), {
+        updatedAt: Date.now() - 6 * 60 * 1000,
+      })
+      mount([sourceOverview()])
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+      await waitFor(() => expect(accountReads).toBe(1))
+
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }))
+      expect(welcomeMarks).toBe(1)
+      await waitFor(() => expect(cachedWelcomeSeenAt()).toBe(WELCOME_SEEN_AT))
+
+      resolveAccountRead(sdkAccount(null))
+      await settle()
+
+      expect(cachedWelcomeSeenAt()).toBe(WELCOME_SEEN_AT)
+      expect(accountReads).toBe(1)
     })
   })
 

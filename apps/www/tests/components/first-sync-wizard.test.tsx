@@ -462,19 +462,22 @@ describe("FirstSyncWizard welcome step (#108 T07)", () => {
     expect(onWelcomeFinish).toHaveBeenCalledTimes(2)
   })
 
-  it("leaves Escape alone when it is aimed at another surface or already handled", () => {
+  it("Escape skips from a header control outside the wizard, but not once an open surface handled it", () => {
     const { onWelcomeFinish } = renderWizard({ state: "ready", welcomePending: true })
-    const menu = document.body.appendChild(document.createElement("button"))
+    const headerButton = document.body.appendChild(document.createElement("button"))
+    headerButton.focus()
 
-    fireEvent.keyDown(menu, { key: "Escape" })
-    expect(onWelcomeFinish).not.toHaveBeenCalled()
+    fireEvent.keyDown(headerButton, { key: "Escape" })
+    expect(onWelcomeFinish).toHaveBeenCalledTimes(1)
 
+    // An open overlay or menu (Radix) takes Escape in the capture phase and
+    // prevents its default before the key reaches the wizard's listener.
     const handled = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" })
     handled.preventDefault()
-    document.body.dispatchEvent(handled)
-    expect(onWelcomeFinish).not.toHaveBeenCalled()
+    headerButton.dispatchEvent(handled)
+    expect(onWelcomeFinish).toHaveBeenCalledTimes(1)
 
-    menu.remove()
+    headerButton.remove()
   })
 
   it("adds the video screen before the sign-off when the video id is set", () => {

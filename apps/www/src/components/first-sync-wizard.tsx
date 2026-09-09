@@ -126,7 +126,6 @@ export function FirstSyncWizard(props: FirstSyncWizardProps) {
   // One key per screen the user can be on: a welcome screen or a D03 state.
   const screenKey = welcomeScreen === null ? state : `welcome:${welcomeScreen}`
   const headline = getScreenHeadline({ billing, sourceName, state, welcomeScreen })
-  const sectionRef = useRef<HTMLElement>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const seenScreenRef = useRef<string | null>(null)
 
@@ -142,8 +141,10 @@ export function FirstSyncWizard(props: FirstSyncWizardProps) {
   }, [screenKey])
 
   // Escape skips the welcome (#108 T07). Only while the welcome shows, and
-  // only when the key was not aimed at some other surface: an open menu or
-  // overlay handles its own Escape and this listener leaves it alone.
+  // only when no other surface took the key first: an open overlay or menu
+  // (Radix) handles Escape in the capture phase and prevents its default, so
+  // the key reaches this listener untouched only while nothing else is open.
+  // Where focus sits does not matter: Escape on a header button skips too.
   useEffect(() => {
     if (welcomeScreen === null) {
       return
@@ -151,16 +152,6 @@ export function FirstSyncWizard(props: FirstSyncWizardProps) {
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) {
-        return
-      }
-
-      const { target } = event
-      const elsewhere =
-        target instanceof Element &&
-        target !== document.body &&
-        target !== document.documentElement &&
-        sectionRef.current?.contains(target) !== true
-      if (elsewhere) {
         return
       }
 
@@ -184,7 +175,6 @@ export function FirstSyncWizard(props: FirstSyncWizardProps) {
       className="flex flex-1 flex-col items-center justify-center px-4 pb-20 sm:pb-24"
       data-motion={reduceMotion ? "reduced" : "full"}
       data-state={welcomeScreen === null ? state : "welcome"}
-      ref={sectionRef}
     >
       <p aria-label={m["app.firstSync.announcements"]()} className="sr-only" role="status">
         {headline}
