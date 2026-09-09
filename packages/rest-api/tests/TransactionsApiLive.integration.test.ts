@@ -33,6 +33,7 @@ import {
   type SourceSyncServiceShape,
   type TransferReconciliationServiceShape,
 } from "@my/sync-engine/services"
+import * as BigDecimal from "effect/BigDecimal"
 import * as Chunk from "effect/Chunk"
 import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
@@ -575,6 +576,80 @@ await Effect.runPromise(context.recreateTestDatabase())
 
 describe("TransactionsApiLive", () => {
   beforeEach(() => Effect.runPromise(Effect.asVoid(context.recreateTestDatabase())))
+
+  it.effect(
+    "returns active income separately from gains and withholds blocked or pending income",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* seedTransactions
+        const db = yield* drizzle
+        for (const legId of [fixtureIds.buyLegId, fixtureIds.partialLegId]) {
+          yield* db
+            .update(schema.transactionLegs)
+            .set({ kind: "income" })
+            .where(eq(schema.transactionLegs.id, legId))
+        }
+        yield* db.insert(schema.calculationRunIncomeResults).values([
+          {
+            runId: fixtureIds.calculationRunId,
+            sequence: 0,
+            sourceId: fixture.sourceId,
+            eventId: fixtureIds.buyLegId,
+            assetId: TEST_BTC_ASSET_ID,
+            occurredAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-01T12:00:00Z")),
+            quantity: "0.1",
+            value: "12.34",
+            treatmentCodes: [],
+          },
+          {
+            runId: fixtureIds.calculationRunId,
+            sequence: 1,
+            sourceId: fixture.sourceId,
+            eventId: fixtureIds.partialLegId,
+            assetId: TEST_BTC_ASSET_ID,
+            occurredAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-05T12:00:00Z")),
+            quantity: "0.1",
+            value: "99",
+            treatmentCodes: [],
+          },
+          {
+            runId: fixtureIds.competingCalculationRunId,
+            sequence: 0,
+            sourceId: fixture.sourceId,
+            eventId: fixtureIds.buyLegId,
+            assetId: TEST_BTC_ASSET_ID,
+            occurredAt: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-01T12:00:00Z")),
+            quantity: "0.1",
+            value: "999",
+            treatmentCodes: [],
+          },
+        ])
+        const client = yield* makeAuthenticatedClient({ userId: fixture.userId })
+        const response = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        expect(
+          response.transactions.find((row) => row.transactionId === fixtureIds.buyTransactionId)
+        ).toMatchObject({
+          income: "12.34",
+          realizedGainLoss: null,
+          fiatCurrency: "EUR",
+          calculationState: "complete",
+        })
+        expect(
+          response.transactions.find((row) => row.transactionId === fixtureIds.partialTransactionId)
+        ).toMatchObject({ income: null, fiatCurrency: null, calculationState: "partial" })
+        expect(
+          response.transactions.find((row) => row.transactionId === fixtureIds.sellTransactionId)
+        ).toMatchObject({ income: null, realizedGainLoss: "2000" })
+        yield* db
+          .update(schema.activeCalculationRuns)
+          .set({ runId: null })
+          .where(eq(schema.activeCalculationRuns.principalId, fixture.principalId))
+        const pending = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        expect(
+          pending.transactions.find((row) => row.transactionId === fixtureIds.buyTransactionId)
+        ).toMatchObject({ income: null, fiatCurrency: null, calculationState: "partial" })
+      }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
 
   it.effect(
     "lists compact principal-owned transactions with an exact total and stable cursor",
@@ -1937,6 +2012,174 @@ const acceptTotal = ({
   readonly amount: string
   readonly operation?: "create" | "replace"
 }) => changePrice({ targetId, operation, input: { _tag: "total_value", amount, currency: EUR } })
+
+describe("writer-produced transaction income", () => {
+  beforeEach(() => Effect.runPromise(context.recreateTestDatabase()))
+
+  it.effect("keeps receipt income, a real disposal gain, and unavailable income separate", () =>
+    Effect.gen(function* () {
+      const fixture = yield* seedSyncEngineRepositoryFixture({
+        principalId: PRINCIPAL_ID,
+        userId: USER_ID,
+        sourceId: SOURCE_ID,
+      })
+      yield* seedSyncEngineAssets(fixture)
+      const db = yield* drizzle
+      const inputs = [
+        { externalId: "income-only", day: "01", quantity: "1", value: "2" },
+        { externalId: "income-and-disposal", day: "02", quantity: "2", value: null },
+        { externalId: "income-unavailable", day: "03", quantity: "1", value: null },
+      ] as const
+      const transactions = yield* Effect.forEach(inputs, (input) =>
+        Effect.gen(function* () {
+          const timestamp = DateTime.toDateUtc(
+            DateTime.makeUnsafe(`2026-02-${input.day}T12:00:00Z`)
+          )
+          const [transaction] = yield* db
+            .insert(schema.transactions)
+            .values({
+              principalId: PRINCIPAL_ID,
+              sourceId: SOURCE_ID,
+              externalId: input.externalId,
+              timestamp,
+              transactionType: "staking_reward",
+              providerTransactionType: "earn_payout",
+              providerFiatAmount: input.value,
+              providerFiatCurrency: input.value === null ? null : "EUR",
+            })
+            .returning({ id: schema.transactions.id })
+          if (transaction === undefined) return yield* Effect.die("Missing income transaction")
+          const common = {
+            principalId: PRINCIPAL_ID,
+            sourceId: SOURCE_ID,
+            transactionId: transaction.id,
+            timestamp,
+            assetId: TEST_BTC_ASSET_ID,
+            provenance: "deterministic" as const,
+            originKind: "none" as const,
+          }
+          const legs = yield* prepareMovementLegFixtures([
+            {
+              ...common,
+              movementIdentity: { sourceRecordKey: input.externalId, componentKey: "income" },
+              externalId: `${input.externalId}-income`,
+              amount: input.quantity,
+              kind: "income",
+            },
+            ...(input.externalId === "income-and-disposal"
+              ? [
+                  {
+                    ...common,
+                    movementIdentity: {
+                      sourceRecordKey: input.externalId,
+                      componentKey: "disposal",
+                    },
+                    externalId: `${input.externalId}-disposal`,
+                    amount: "0.25",
+                    kind: "disposal" as const,
+                  },
+                ]
+              : []),
+          ])
+          const movements = yield* db.insert(schema.transactionLegs).values(legs).returning({
+            id: schema.transactionLegs.id,
+            kind: schema.transactionLegs.kind,
+            targetId: schema.transactionLegs.movementCorrectionTargetId,
+          })
+          return { ...transaction, externalId: input.externalId, movements }
+        })
+      )
+      // The second receipt uses the day's quote. Its disposal consumes the first
+      // receipt's EUR2/unit basis: EUR0.25 proceeds minus EUR0.50 basis.
+      yield* db.insert(schema.assetPrices).values({
+        assetId: TEST_BTC_ASSET_ID,
+        timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-02T00:00:00Z")),
+        price: "1",
+        currency: "EUR",
+        source: "synthetic-income-proof",
+      })
+      const disposal = transactions
+        .flatMap(({ movements }) => movements)
+        .find(({ kind }) => kind === "disposal")
+      if (disposal === undefined) return yield* Effect.die("Missing synthetic disposal")
+      // A same-row staking disposition has unknown system cause. Record a real
+      // sale correction so the writer can produce a complete disposal result.
+      const corrected = yield* context.runWithLayer({
+        layer: PrincipalTransactionOverrideRepositoryLive,
+        effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repository) =>
+          Effect.gen(function* () {
+            const found = yield* repository.findContext({
+              principalId: PRINCIPAL_ID,
+              targetId: disposal.targetId,
+              reportingCurrency: EUR,
+            })
+            if (Option.isNone(found) || found.value.current === null)
+              return yield* Effect.die("Missing disposal context")
+            const accepted = yield* repository.create({
+              principalId: PRINCIPAL_ID,
+              actorUserId: USER_ID,
+              targetId: disposal.targetId,
+              reportingCurrency: EUR,
+              expectedSystemRevision: found.value.current.facts.systemRevision,
+              expectedLeafId: null,
+              reason: "Synthetic sale paired with staking income",
+              input: { _tag: "classification", input: { _tag: "outbound", cause: "sale" } },
+            })
+            if (Option.isNone(accepted))
+              return yield* Effect.die("Missing accepted sale correction")
+            return accepted.value
+          })
+        ),
+      })
+      yield* completeReplay(corrected.processingJobId)
+      yield* recompute(30)
+      const storedIncome = yield* db
+        .select({
+          eventId: schema.calculationRunIncomeResults.eventId,
+          value: schema.calculationRunIncomeResults.value,
+        })
+        .from(schema.calculationRunIncomeResults)
+        .where(eq(schema.calculationRunIncomeResults.runId, runId(30)))
+      const storedDisposals = yield* db
+        .select({
+          eventId: schema.calculationRunRealizedResults.dispositionEventId,
+          gainLoss: schema.calculationRunRealizedResults.gainLoss,
+        })
+        .from(schema.calculationRunRealizedResults)
+        .where(eq(schema.calculationRunRealizedResults.runId, runId(30)))
+      expect(storedIncome).toHaveLength(2)
+      expect(
+        storedIncome.map(({ value }) => BigDecimal.format(BigDecimal.fromStringUnsafe(value)))
+      ).toEqual(["2", "2"])
+      expect(storedDisposals).toHaveLength(1)
+      expect(
+        storedDisposals.map(({ gainLoss }) =>
+          BigDecimal.format(BigDecimal.fromStringUnsafe(gainLoss))
+        )
+      ).toEqual(["-0.25"])
+      const client = yield* makeAuthenticatedClient({ userId: USER_ID })
+      const response = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+      for (const transaction of transactions) {
+        const row = response.transactions.find(
+          ({ transactionId }) => transactionId === transaction.id
+        )
+        const incomeEvent = transaction.movements.find(({ kind }) => kind === "income")
+        if (transaction.externalId === "income-unavailable") {
+          expect(storedIncome.some(({ eventId }) => eventId === incomeEvent?.id)).toBe(false)
+          expect(row).toMatchObject({ income: null, realizedGainLoss: null })
+        } else {
+          expect(storedIncome.find(({ eventId }) => eventId === incomeEvent?.id)).toBeDefined()
+          expect(row).toMatchObject({
+            income: "2",
+            realizedGainLoss: transaction.externalId === "income-only" ? null : "-0.25",
+            fiatCurrency: "EUR",
+          })
+        }
+      }
+      expect(storedDisposals[0]?.eventId).toBe(disposal.id)
+    }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
+})
 
 describe("transaction detail HTTP and SDK", () => {
   beforeEach(() => Effect.runPromise(context.recreateTestDatabase()))

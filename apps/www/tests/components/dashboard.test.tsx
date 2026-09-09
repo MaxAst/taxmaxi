@@ -250,6 +250,7 @@ const transaction = (transactionId: string, description: string) => ({
   description,
   externalId: transactionId,
   movements: [{ amount: "0.1", assetSymbol: "BTC", kind: "disposal" as const }],
+  income: null,
   realizedGainLoss: "100",
   fiatCurrency: "EUR",
   calculationState: "complete" as const,

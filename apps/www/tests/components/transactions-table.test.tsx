@@ -41,6 +41,7 @@ const transaction: TransactionListItem = {
   description: "Sold Bitcoin",
   externalId: "coinbase-sale-1",
   movements: [{ amount: "0.4", assetSymbol: "BTC", kind: "disposal" }],
+  income: null,
   realizedGainLoss: "2000",
   fiatCurrency: "EUR",
   calculationState: "complete",

@@ -60,6 +60,8 @@ export class TransactionListItem extends Schema.Class<TransactionListItem>("Tran
   description: Schema.NullOr(Schema.String),
   externalId: Schema.NullOr(Schema.String),
   movements: Schema.Array(TransactionListMovement),
+  /** Income value in fiatCurrency from the active calculation. */
+  income: Schema.NullOr(Schema.String),
   realizedGainLoss: Schema.NullOr(Schema.String),
   fiatCurrency: Schema.NullOr(Schema.String),
   calculationState: Schema.Literals(["complete", "partial"]),

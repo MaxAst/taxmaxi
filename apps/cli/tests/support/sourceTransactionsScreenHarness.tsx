@@ -27,6 +27,7 @@ const row: TransactionListItem = {
   externalId: "canonical-external-id",
   movements: [{ amount: "2.50000000", assetSymbol: "SOL", kind: "disposal" }],
   calculationState: "complete",
+  income: null,
   realizedGainLoss: "12.34",
   fiatCurrency: "EUR",
   needsReview: false,

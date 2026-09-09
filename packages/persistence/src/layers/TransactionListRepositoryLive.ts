@@ -371,6 +371,60 @@ const make = Effect.gen(function* () {
       } satisfies RunBackedGainLoss
     })
 
+  const loadIncome = ({
+    executor,
+    scope,
+    transactionIds,
+  }: {
+    readonly executor: TransactionListExecutor
+    readonly scope: CalculationReadScope
+    readonly transactionIds: ReadonlyArray<string>
+  }) =>
+    Effect.gen(function* () {
+      const amounts = new Map<string, BigDecimal.BigDecimal>()
+      if (transactionIds.length === 0) return amounts
+
+      const rows = yield* executor
+        .select({
+          transactionId: schema.transactionLegs.transactionId,
+          value: schema.calculationRunIncomeResults.value,
+        })
+        .from(schema.activeCalculationRuns)
+        .innerJoin(
+          schema.calculationRunIncomeResults,
+          eq(schema.activeCalculationRuns.runId, schema.calculationRunIncomeResults.runId)
+        )
+        .innerJoin(
+          schema.transactionLegs,
+          and(
+            eq(schema.calculationRunIncomeResults.eventId, schema.transactionLegs.id),
+            eq(schema.calculationRunIncomeResults.sourceId, schema.transactionLegs.sourceId)
+          )
+        )
+        .innerJoin(schema.transactions, ownedLeg(scope.principalId))
+        .where(
+          and(
+            activeRunScope(scope),
+            matchingEventTaxYear,
+            inArray(schema.transactionLegs.transactionId, transactionIds)
+          )
+        )
+        .pipe(wrapSqlError("transactionListRepository.list.income"))
+
+      for (const row of rows) {
+        if (row.transactionId === null) continue
+        const amount = yield* decodeDecimal({
+          operation: "transactionListRepository.list.incomeAmount",
+          value: row.value,
+        })
+        amounts.set(
+          row.transactionId,
+          BigDecimal.sum(amounts.get(row.transactionId) ?? BigDecimal.fromBigInt(0n), amount)
+        )
+      }
+      return amounts
+    })
+
   const loadReviewStates = ({
     executor,
     principalId,
@@ -747,10 +801,11 @@ const make = Effect.gen(function* () {
               jurisdiction: params.jurisdiction,
               reportingCurrency: params.reportingCurrency,
             } satisfies CalculationReadScope
-            const [movements, gainLoss, reviewStates] = yield* Effect.all(
+            const [movements, gainLoss, income, reviewStates] = yield* Effect.all(
               [
                 loadMovements({ executor: tx, principalId: scope.principalId, transactionIds }),
                 loadGainLoss({ executor: tx, scope: calculationScope, transactionIds }),
+                loadIncome({ executor: tx, scope: calculationScope, transactionIds }),
                 loadReviewStates({ executor: tx, principalId: scope.principalId, transactionIds }),
               ],
               { concurrency: 1 }
@@ -764,6 +819,7 @@ const make = Effect.gen(function* () {
 
             const items = pageRows.map((row): TransactionListItem => {
               const totals = gainLoss.byTransactionId.get(row.transactionId)
+              const incomeAmount = income.get(row.transactionId)
               const isPartial =
                 partialTransactionIds.has(row.transactionId) || totals?.isPartial === true
               return {
@@ -778,8 +834,13 @@ const make = Effect.gen(function* () {
                 description: row.description,
                 externalId: row.externalId,
                 movements: movements.get(row.transactionId) ?? [],
+                income:
+                  isPartial || incomeAmount === undefined ? null : BigDecimal.format(incomeAmount),
                 realizedGainLoss: isPartial ? null : (totals?.realizedGainLoss ?? null),
-                fiatCurrency: isPartial ? null : (totals?.fiatCurrency ?? null),
+                fiatCurrency: isPartial
+                  ? null
+                  : (totals?.fiatCurrency ??
+                    (incomeAmount === undefined ? null : calculationScope.reportingCurrency)),
                 calculationState: isPartial ? "partial" : "complete",
                 needsReview: reviewStates.get(row.transactionId) ?? false,
               }
