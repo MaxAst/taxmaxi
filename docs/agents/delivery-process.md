@@ -229,7 +229,7 @@ Delivery checklist rules:
   affected sources have replayed and the new column is verified populated
   by the writer (AGENTS.md, Database).
 - A task that adds a counter or a last-time column names who serializes
-  its writers; "facts only" is not a complete task (#133 T04, ADR 0016).
+  its writers; "facts only" is not a complete task (#133 T04, ADR 0017).
 
 ## Execution
 
