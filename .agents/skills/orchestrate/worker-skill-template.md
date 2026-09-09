@@ -48,5 +48,6 @@ Apply "Grounding and proof" in `docs/agents/delivery-process.md`: complete this 
 
 1. Apply `docs/agents/delivery-process.md` ("Validation and test reliability"): choose local checks by the change, retain explicit task/hosted gates, and rerun invalidated checks. AGENTS.md's red-gate rule still applies; an isolated pass is diagnostic, not replacement proof.
 2. /code-review the work.
-3. Branch from latest `main`. Conventional commit with `Refs: #{{NNN}}` in the footer.
-4. Hand off head/base, changed files, check evidence, remaining work and blockers per the process doc. Open a PR referencing #{{NNN}} and the task ID, stating the result classification, with every relied-on decision pasted verbatim with its source.
+3. Run every check, test suite, and review helper in the foreground and wait for it. A worker that spawns a background child and ends its turn waiting for it stalls with its code unpushed (#133 T01, T04, T05 each needed a handoff worker). Push and open the PR in the same turn the checks finish.
+4. Branch from latest `main`. Conventional commit with `Refs: #{{NNN}}` in the footer.
+5. Hand off head/base, changed files, check evidence, remaining work and blockers per the process doc. Open a PR referencing #{{NNN}} and the task ID, stating the result classification, with every relied-on decision pasted verbatim with its source.
