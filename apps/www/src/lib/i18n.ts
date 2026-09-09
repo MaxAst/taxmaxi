@@ -162,6 +162,10 @@ export const translatedPathnames = [
       en: "/terms",
       de: "/bedingungen",
     },
+    "/verify-email": {
+      en: "/verify-email",
+      de: "/e-mail-bestaetigen",
+    },
     "/tax-law/$slug": {
       en: "/tax-law/$slug",
       de: "/steuerrecht/$slug",

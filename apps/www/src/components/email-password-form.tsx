@@ -152,8 +152,7 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
     }
 
     await client.auth.register({ email, password })
-    // `href` instead of `to` until the verify-email route exists (#133 T08).
-    await navigate({ href: "/verify-email" })
+    await navigate({ to: "/verify-email" })
   }
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -170,7 +169,7 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
       // A verified password with a pending email continues on the verify page;
       // the API has restored the verification cookie.
       if (isTaxMaxiEmailVerificationRequiredError(toTaxMaxiError(caught))) {
-        await navigate({ href: "/verify-email" })
+        await navigate({ to: "/verify-email" })
         return
       }
 
