@@ -17,7 +17,7 @@ import { useRef, useState, type ComponentProps, type ReactElement } from "react"
 import { setLocale } from "#/paraglide/runtime"
 import * as BigDecimal from "effect/BigDecimal"
 
-import { TransactionsTable } from "#/components/transactions-table"
+import { TransactionsTable, type TransactionPageSize } from "#/components/transactions-table"
 import { TransactionInspector } from "#/components/transaction-inspector"
 import { m } from "#/paraglide/messages"
 
@@ -113,11 +113,15 @@ const defaultProps = {
   onPreviousPage: vi.fn(),
   onRetry: vi.fn(),
   pageIndex: 0,
+  pageSize: 25 as const,
+  onPageSizeChange: vi.fn(),
   totalCount: 1,
   transactions: [transaction],
 }
 
-function TransactionsWithInspector(props: typeof defaultProps) {
+function TransactionsWithInspector(
+  props: Omit<typeof defaultProps, "pageSize"> & { pageSize: TransactionPageSize }
+) {
   const [selection, setSelection] =
     useState<ComponentProps<typeof TransactionInspector>["selection"]>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
@@ -159,6 +163,34 @@ const openName = (row: TransactionListItem = transaction) =>
   })
 
 describe("TransactionsTable", () => {
+  it.each([25, 50, 100, 500] as const)(
+    "uses selected size %s for ranges and the page control",
+    (pageSize) => {
+      render(
+        <TransactionsWithInspector
+          {...defaultProps}
+          pageIndex={1}
+          pageSize={pageSize}
+          totalCount={1204}
+        />
+      )
+      expect(screen.getByText(`${pageSize + 1}–${pageSize + 1} of 1204`)).toBeTruthy()
+      expect(
+        screen.getByRole("combobox", { name: "Rows per page" }).getAttribute("disabled")
+      ).toBeNull()
+      fireEvent.change(screen.getByRole("combobox", { name: "Rows per page" }), {
+        target: { value: "500" },
+      })
+      expect(defaultProps.onPageSizeChange).toHaveBeenCalledWith(500)
+    }
+  )
+
+  it("keeps loading bounded at page size 500", () => {
+    render(<TransactionsWithInspector {...defaultProps} pageSize={500} loading transactions={[]} />)
+    expect(screen.getAllByRole("status")).toHaveLength(1)
+    expect(document.querySelectorAll("article")).toHaveLength(0)
+  })
+
   afterEach(() => {
     cleanup()
     clients.splice(0).forEach((client) => client.clear())

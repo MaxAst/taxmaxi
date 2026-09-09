@@ -28,6 +28,22 @@ import { queryKeys, queries, refreshTransactionQueries } from "#/integrations/ta
 import type { Account, SourceSyncSeed } from "#/lib/dashboard-types"
 
 beforeEach(() => {
+  const storedValues = new Map<string, string>()
+  const storage: Storage = {
+    get length() {
+      return storedValues.size
+    },
+    clear: () => storedValues.clear(),
+    getItem: (key) => storedValues.get(key) ?? null,
+    key: (index) => [...storedValues.keys()][index] ?? null,
+    removeItem: (key) => {
+      storedValues.delete(key)
+    },
+    setItem: (key, value) => {
+      storedValues.set(key, value)
+    },
+  }
+  Object.defineProperty(window, "localStorage", { configurable: true, value: storage })
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: vi
@@ -258,6 +274,115 @@ const transaction = (transactionId: string, description: string) => ({
 })
 
 describe("Dashboard transaction pagination", () => {
+  it.each([25, 50, 100, 500] as const)(
+    "remembers size %s and resets the cursor when size changes",
+    async (size) => {
+      const requests: TransactionListInput[] = []
+      const list = vi.fn(async (input: TransactionListInput = {}) => {
+        requests.push(input)
+        return {
+          transactions: [transaction("00000000-0000-4000-8000-000000000101", "Size test row")],
+          totalCount: 1204,
+          page: { hasMore: true, nextCursor: "next-page" },
+        }
+      })
+      testTaxMaxi = {
+        portfolio: { listAssets: vi.fn(async () => ({ assets: [], summary: undefined })) },
+        transactions: { list, get: vi.fn(() => new Promise<never>(() => {})) },
+      } as unknown as TaxMaxi
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      queryClient.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
+      const view = render(
+        <QueryClientProvider client={queryClient}>
+          <Dashboard accounts={[]} sourceOverviews={syncedOverviews} />
+        </QueryClientProvider>
+      )
+      await screen.findByText("Size test row")
+      expect(requests[0]).toMatchObject({ cursor: null, limit: 25 })
+      fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+      await waitFor(() => expect(requests.at(-1)).toMatchObject({ cursor: "next-page", limit: 25 }))
+      // First choose another size so selecting the default is also a real change.
+      if (size === 25) {
+        fireEvent.change(screen.getByRole("combobox", { name: "Rows per page" }), {
+          target: { value: "50" },
+        })
+        await waitFor(() => expect(requests.at(-1)).toMatchObject({ cursor: null, limit: 50 }))
+      }
+      const pageSizeControl = screen.getByRole("combobox", { name: "Rows per page" })
+      if (size === 500) {
+        fireEvent.click(
+          await screen.findByRole("button", { name: /Open transaction · Size test row/ })
+        )
+        await screen.findByRole("dialog")
+      }
+      fireEvent.change(pageSizeControl, { target: { value: String(size) } })
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      await waitFor(() => expect(screen.getByText("1–1 of 1204")).toBeTruthy())
+      expect(window.localStorage.getItem("taxmaxi.transactions.page-size.v1")).toBe(String(size))
+      view.unmount()
+      const freshClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      freshClient.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
+      render(
+        <QueryClientProvider client={freshClient}>
+          <Dashboard accounts={[]} sourceOverviews={syncedOverviews} />
+        </QueryClientProvider>
+      )
+      await waitFor(() => expect(requests.at(-1)).toMatchObject({ cursor: null, limit: size }))
+      expect(screen.getByRole("combobox", { name: "Rows per page" })).toHaveProperty(
+        "value",
+        String(size)
+      )
+      queryClient.clear()
+      freshClient.clear()
+    }
+  )
+
+  it.each(["blocked", "invalid"])("falls back to 25 when saved page size is %s", async (mode) => {
+    const stored =
+      mode === "blocked"
+        ? vi.spyOn(window.localStorage, "getItem").mockImplementation(() => {
+            throw new DOMException("Blocked", "SecurityError")
+          })
+        : undefined
+    if (mode === "invalid") window.localStorage.setItem("taxmaxi.transactions.page-size.v1", "99")
+    const list = vi.fn(async () => ({
+      transactions: [transaction("00000000-0000-4000-8000-000000000101", "Fallback row")],
+      totalCount: 1,
+      page: { hasMore: false, nextCursor: null },
+    }))
+    testTaxMaxi = {
+      portfolio: { listAssets: vi.fn(async () => ({ assets: [], summary: undefined })) },
+      transactions: { list },
+    } as unknown as TaxMaxi
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
+    try {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <Dashboard accounts={[]} sourceOverviews={syncedOverviews} />
+        </QueryClientProvider>
+      )
+      await screen.findByText("Fallback row")
+      expect(list).toHaveBeenCalledWith(expect.objectContaining({ cursor: null, limit: 25 }))
+      const save = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+        throw new DOMException("Full", "QuotaExceededError")
+      })
+      try {
+        fireEvent.change(screen.getByRole("combobox", { name: "Rows per page" }), {
+          target: { value: "500" },
+        })
+        await waitFor(() =>
+          expect(list).toHaveBeenCalledWith(expect.objectContaining({ cursor: null, limit: 500 }))
+        )
+      } finally {
+        save.mockRestore()
+      }
+    } finally {
+      stored?.mockRestore()
+      queryClient.clear()
+    }
+  })
+
   afterEach(() => {
     cleanup()
     syncState.onCompleted = undefined
@@ -675,7 +800,7 @@ describe("Dashboard calculation refresh", () => {
     rows = [{ ...row, timestamp: "2024-12-31T23:30:00.000Z" }]
     await act(async () => {
       await queryClient.invalidateQueries({
-        queryKey: queryKeys.transactionList({ cursor: null, limit: 7 }),
+        queryKey: queryKeys.transactionList({ cursor: null, limit: 25 }),
         exact: true,
       })
     })
@@ -685,7 +810,7 @@ describe("Dashboard calculation refresh", () => {
     rows = []
     await act(async () => {
       await queryClient.invalidateQueries({
-        queryKey: queryKeys.transactionList({ cursor: null, limit: 7 }),
+        queryKey: queryKeys.transactionList({ cursor: null, limit: 25 }),
         exact: true,
       })
     })

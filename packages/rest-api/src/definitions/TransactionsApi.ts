@@ -28,7 +28,7 @@ export const TransactionListQuery = Schema.Struct({
     Schema.FiniteFromString.check(
       Schema.isInt(),
       Schema.isGreaterThanOrEqualTo(1),
-      Schema.isLessThanOrEqualTo(100)
+      Schema.isLessThanOrEqualTo(500)
     )
   ),
 })
