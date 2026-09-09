@@ -67,6 +67,8 @@ export const queryKeys = {
   portfolioAssets: (sourceId?: string) =>
     [...queryKeys.all, "portfolio", "assets", sourceId ?? "all"] as const,
   transactions: () => [...queryKeys.all, "transactions"] as const,
+  transactionCalculationStatus: (taxYear: number) =>
+    [...queryKeys.transactions(), "calculation-status", taxYear] as const,
   transactionDetail: (input: TransactionDetailInput) =>
     [...queryKeys.transactions(), "detail", input.transactionId, input.taxYear] as const,
   transactionLists: () => [...queryKeys.transactions(), "list"] as const,
@@ -81,14 +83,11 @@ export const refreshTransactionQueries = async (queryClient: QueryClient): Promi
 }
 
 const hasPendingTransactionWork = (detail: TransactionDetail): boolean =>
-  detail.calculation.run?.status === "pending" ||
-  detail.calculation.run?.status === "running" ||
   detail.movementOverrides.some((correction) =>
     [correction.price, correction.classification].some(
       (stream) => stream.replay.status === "updating" || stream.coverageStatus === "updating"
     )
-  ) ||
-  detail.assetOverrides.some((item) => item.projection?.recomputation.status === "updating")
+  ) || detail.assetOverrides.some((item) => item.projection?.recomputation.status === "updating")
 
 export const queries = {
   // Auth and billing fail fast: a 401 should redirect immediately, not retry.
@@ -184,6 +183,27 @@ export const queries = {
       retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 30_000),
       refetchOnWindowFocus: "always",
       refetchOnReconnect: "always",
+    }),
+  transactionCalculationStatus: (taxmaxi: TaxMaxi, taxYear: number) =>
+    queryOptions({
+      queryKey: queryKeys.transactionCalculationStatus(taxYear),
+      queryFn: async ({ signal }) => {
+        signal.throwIfAborted()
+        return taxmaxi.portfolio.getCalculationStatus({ taxYear })
+      },
+      staleTime: 0,
+      retry: false,
+      refetchOnWindowFocus: "always",
+      refetchOnReconnect: "always",
+      refetchInterval: (query) => {
+        if (
+          isTaxMaxiUnauthorizedError(query.state.error) ||
+          (query.state.error instanceof TaxMaxiError && query.state.error.status === 404) ||
+          !["queued", "running"].includes(query.state.data?.work.status ?? "")
+        )
+          return false
+        return query.state.status === "error" ? 30_000 : 2_000
+      },
     }),
   transactionDetail: (taxmaxi: TaxMaxi, input: TransactionDetailInput) =>
     queryOptions({

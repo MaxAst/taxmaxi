@@ -14,6 +14,7 @@ import {
   TaxMaxi,
   type BillingStatus,
   type PortfolioAssets,
+  type PortfolioCalculationStatus,
   type SourceOverview,
   type TransactionDetail,
   type TransactionListInput,
@@ -463,15 +464,15 @@ describe("Dashboard calculation refresh", () => {
           taxYear: 2024,
           jurisdiction: "DE",
           reportingCurrency: "EUR",
-          status: completed ? "complete" : "pending",
+          status: "complete",
           engineVersion: "fixture",
           ruleSetVersion: "fixture",
           inputLedgerRevision: completed ? "2" : "1",
           valuationRevision: completed ? "2" : "1",
           failureCode: null,
         },
-        state: completed ? "complete" : "partial",
-        monetaryStatus: completed ? "available" : "partial",
+        state: "complete",
+        monetaryStatus: "available",
         derivedLots: [],
         income: [],
         blockers: [],
@@ -495,11 +496,52 @@ describe("Dashboard calculation refresh", () => {
         ],
       },
     })
+    let work: PortfolioCalculationStatus["work"]["status"] = "not_requested"
+    const selectedStatus = (): PortfolioCalculationStatus => {
+      const status = completed ? "succeeded" : work
+      const request = {
+        requestId: "selected-year-request",
+        sourceId: row.source.sourceId,
+        sourceJobId: "00000000-0000-4000-8000-000000000706",
+        status: status === "not_requested" ? "queued" : status,
+        attempts:
+          status === "running" || status === "succeeded"
+            ? [
+                {
+                  attemptId: "selected-year-attempt",
+                  runId: runB,
+                  status,
+                  failureCode: null,
+                },
+              ]
+            : [],
+      } satisfies PortfolioCalculationStatus["work"]["requests"][number]
+      return {
+        scope: { taxYear: 2024, jurisdiction: "DE", reportingCurrency: "EUR" },
+        activeRun: { runId: completed ? runB : runA, status: "complete" },
+        work: { status, requests: status === "not_requested" ? [] : [request] },
+        jobs:
+          status === "not_requested"
+            ? []
+            : [
+                {
+                  sourceId: request.sourceId,
+                  sourceJobId: request.sourceJobId,
+                  sourceJobStatus: "completed",
+                  work: request,
+                  coveringRun: completed ? { runId: runB, status: "complete" } : null,
+                  activeCoverage: completed ? "covered" : "not_covered",
+                },
+              ],
+      }
+    }
     testTaxMaxi = TaxMaxi.fromBrowserSession({
       baseUrl: "https://dashboard.example.test",
       fetch: async (input) => {
         const url = new URL(input instanceof Request ? input.url : String(input))
         requests.push(url)
+        if (url.pathname.endsWith("/portfolio/calculation-status"))
+          return Response.json(selectedStatus())
         if (url.pathname.endsWith("/portfolio/assets")) return Response.json(currentPortfolio)
         if (url.pathname.endsWith("/transactions"))
           return Response.json({
@@ -518,6 +560,7 @@ describe("Dashboard calculation refresh", () => {
       <QueryClientProvider client={queryClient}>
         <Dashboard
           accounts={[]}
+          sourceOverviews={syncedOverviews}
           onSourceSyncCompleted={() => refreshTransactionQueries(queryClient)}
         />
       </QueryClientProvider>
@@ -528,10 +571,17 @@ describe("Dashboard calculation refresh", () => {
     fireEvent.click(screen.getByRole("button", { name: /Open transaction/ }))
     await tick()
     expect(screen.getByText(`Returned run: ${runA} · 2024 · DE · EUR`)).toBeTruthy()
+    expect(screen.getByText("Not requested")).toBeTruthy()
+    work = "queued"
     await act(async () => {
       await syncState.onCompleted?.(row.source.sourceId)
     })
     await tick()
+    expect(screen.getByText("Queued")).toBeTruthy()
+    expect(screen.getByText(`Returned run: ${runA} · 2024 · DE · EUR`)).toBeTruthy()
+    work = "running"
+    await tick(2_000)
+    expect(screen.getByText("Running")).toBeTruthy()
     completed = true
     await tick(2_000)
     expect(screen.getByText(`Returned run: ${runB} · 2024 · DE · EUR`)).toBeTruthy()
@@ -545,7 +595,7 @@ describe("Dashboard calculation refresh", () => {
         .every((url) => url.searchParams.get("taxYear") === "2024")
     ).toBe(true)
     const listRequests = requests.filter((url) => url.pathname.endsWith("/transactions"))
-    expect(listRequests.length).toBeGreaterThanOrEqual(3)
+    expect(listRequests).toHaveLength(3)
     expect(new Set(listRequests.map((url) => url.search)).size).toBe(1)
     const settledReads = requests.filter((url) => url.pathname.endsWith(row.transactionId)).length
     await tick(4_000)

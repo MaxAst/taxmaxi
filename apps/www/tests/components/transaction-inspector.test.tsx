@@ -10,7 +10,12 @@ import {
 } from "@tanstack/react-query"
 import { useRef, useState, type ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { TaxMaxi, TaxMaxiError, type TransactionDetail } from "taxmaxi"
+import {
+  TaxMaxi,
+  TaxMaxiError,
+  type TransactionDetail,
+  type PortfolioCalculationStatus,
+} from "taxmaxi"
 import { queries, refreshTransactionQueries } from "#/integrations/taxmaxi/queries"
 import { setLocale } from "#/paraglide/runtime"
 import { TransactionInspector } from "#/components/transaction-inspector"
@@ -397,7 +402,21 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function mount(taxmaxi: TaxMaxi, selection: Selection | null = SELECTION) {
+function mount(
+  taxmaxi: TaxMaxi,
+  {
+    selection = SELECTION,
+    readStatus = false,
+  }: {
+    selection?: Selection | null
+    readStatus?: boolean
+  } = {}
+) {
+  // Detail-only regressions model an unavailable independent work-status read.
+  if (!readStatus)
+    vi.spyOn(taxmaxi.portfolio, "getCalculationStatus").mockRejectedValue(
+      new Error("Independent work status unavailable")
+    )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   clients.push(client)
   const onUnauthorized = vi.fn()
@@ -430,6 +449,53 @@ function section(title: string): HTMLElement {
   const container = screen.getByRole("heading", { name: title }).closest("section")
   if (container === null) throw new Error(`Missing section: ${title}`)
   return container
+}
+
+function selectedWork({
+  status,
+  activeRunId = IDS.run,
+  taxYear = 2025,
+}: {
+  status: PortfolioCalculationStatus["work"]["status"]
+  activeRunId?: string | null
+  taxYear?: number
+}): PortfolioCalculationStatus {
+  const requests: PortfolioCalculationStatus["work"]["requests"] =
+    status === "not_requested"
+      ? []
+      : [
+          {
+            requestId: "request-after-import",
+            sourceId: IDS.source,
+            sourceJobId: IDS.job,
+            status,
+            attempts:
+              status === "queued"
+                ? []
+                : [
+                    {
+                      attemptId: "calculation-attempt",
+                      runId: status === "failed" ? null : IDS.other,
+                      status,
+                      failureCode: status === "failed" ? "preparation_failed" : null,
+                    },
+                  ],
+          },
+        ]
+  return {
+    scope: { jurisdiction: "DE", taxYear, reportingCurrency: "EUR" },
+    activeRun: activeRunId === null ? null : { runId: activeRunId, status: "complete" },
+    work: { status, requests },
+    jobs: requests.map((work) => ({
+      sourceId: IDS.source,
+      sourceJobId: IDS.job,
+      sourceJobStatus: "completed",
+      work,
+      coveringRun: status === "succeeded" ? { runId: IDS.other, status: "complete" } : null,
+      activeCoverage:
+        status === "succeeded" && activeRunId === IDS.other ? "covered" : "not_covered",
+    })),
+  }
 }
 
 function sdkClient(body: TransactionDetail) {
@@ -618,7 +684,7 @@ describe("TransactionInspector", () => {
         transactionId: IDS.other,
         externalId: "selected-second",
       })
-    const view = mount(taxmaxi, null)
+    const view = mount(taxmaxi, { selection: null })
     expect(get).not.toHaveBeenCalled()
     view.select(SELECTION)
     expect(get).toHaveBeenCalledTimes(1)
@@ -867,22 +933,6 @@ describe("selected transaction refresh", () => {
       unsubscribe()
     }
   })
-
-  it.each(["pending", "running"] as const)(
-    "defensively polls a schema-supported %s run (not an ordinary sync writer fixture)",
-    async (status) => {
-      const body = settledDetail()
-      if (!body.calculation.run) throw new Error("Fixture run missing")
-      const { taxmaxi, fetch } = sdkClient({
-        ...body,
-        calculation: { ...body.calculation, run: { ...body.calculation.run, status } },
-      })
-      mount(taxmaxi)
-      await advanceRefresh()
-      await advanceRefresh(2_000)
-      expect(fetch).toHaveBeenCalledTimes(2)
-    }
-  )
 
   it.each(["movement replay", "movement coverage", "asset replay"] as const)(
     "polls recorded %s independently of calculation completeness",
@@ -1191,5 +1241,309 @@ describe("selected transaction refresh", () => {
     act(() => onlineManager.setOnline(true))
     await advanceRefresh()
     expect(fetch).toHaveBeenCalledTimes(3)
+  })
+  it.each([true, false])(
+    "discovers imported work on a fresh inspector with prior result %s",
+    async (hasRun) => {
+      let status = selectedWork({ status: "queued", activeRunId: hasRun ? IDS.run : null })
+      let body = settledDetail()
+      if (!hasRun)
+        body = {
+          ...body,
+          calculation: {
+            ...body.calculation,
+            run: null,
+            state: "partial",
+            monetaryStatus: "unavailable",
+            allocations: [],
+            income: [],
+            derivedLots: [],
+          },
+        }
+      let statusReads = 0
+      let detailReads = 0
+      const taxmaxi = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://work.example.test",
+        fetch: async (input) => {
+          const url = new URL(input instanceof Request ? input.url : String(input))
+          if (url.pathname.endsWith("/calculation-status")) {
+            expect(url.searchParams.get("taxYear")).toBe("2025")
+            statusReads += 1
+            return Response.json(status)
+          }
+          detailReads += 1
+          return Response.json(body)
+        },
+      })
+      const view = mount(taxmaxi, { readStatus: true })
+      await advanceRefresh()
+      expect(screen.getByText("Queued")).toBeTruthy()
+      if (hasRun)
+        expect(screen.getByText(`Returned run: ${IDS.run} · 2025 · DE · EUR`)).toBeTruthy()
+      status = selectedWork({ status: "running", activeRunId: hasRun ? IDS.run : null })
+      await advanceRefresh(2_000)
+      expect(screen.getByText("Running")).toBeTruthy()
+      expect(detailReads).toBe(1)
+      body = settledDetail("30")
+      if (!body.calculation.run) throw new Error("Fixture run missing")
+      body = {
+        ...body,
+        calculation: {
+          ...body.calculation,
+          run: { ...body.calculation.run, id: IDS.other },
+          allocations: body.calculation.allocations.map((item) => ({
+            ...item,
+            costBasis: "30",
+            proceeds: "30",
+            gainLoss: "0",
+          })),
+        },
+      }
+      status = selectedWork({ status: "succeeded", activeRunId: IDS.other })
+      await advanceRefresh(2_000)
+      expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+      expect(
+        view.client.getQueryData(queries.transactionCalculationStatus(taxmaxi, 2025).queryKey)?.work
+          .requests[0]?.requestId
+      ).toBe("request-after-import")
+      const reads = [statusReads, detailReads]
+      await advanceRefresh(10_000)
+      expect([statusReads, detailReads]).toEqual(reads)
+    }
+  )
+
+  it.each(["not_requested", "failed"] as const)(
+    "does not poll %s selected-year work",
+    async (work) => {
+      let reads = 0
+      const taxmaxi = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://terminal.example.test",
+        fetch: async (input) => {
+          if (String(input).includes("calculation-status")) {
+            reads += 1
+            return Response.json(selectedWork({ status: work }))
+          }
+          return Response.json(settledDetail())
+        },
+      })
+      mount(taxmaxi, { readStatus: true })
+      await advanceRefresh()
+      const currentWork = screen.getByText("Current calculation work").parentElement
+      expect(currentWork?.textContent).toContain(work === "failed" ? "Failed" : "Not requested")
+      await advanceRefresh(10_000)
+      expect(reads).toBe(1)
+    }
+  )
+
+  it("rejects a delayed previous-year status response and stops status requests on close", async () => {
+    let release: ((value: Response) => void) | undefined
+    const requestedYears: string[] = []
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://selection.example.test",
+      fetch: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : String(input))
+        if (url.pathname.endsWith("/calculation-status")) {
+          const year = url.searchParams.get("taxYear") ?? ""
+          requestedYears.push(year)
+          if (year === "2025")
+            return new Promise((resolve) => {
+              release = resolve
+            })
+          return Response.json(selectedWork({ status: "not_requested", taxYear: 2024 }))
+        }
+        return Response.json(settledDetail())
+      },
+    })
+    const view = mount(taxmaxi, { readStatus: true })
+    await advanceRefresh()
+    view.select({ ...SELECTION, taxYear: 2024 })
+    await advanceRefresh()
+    await act(async () => {
+      release?.(Response.json(selectedWork({ status: "queued" })))
+    })
+    expect(screen.queryByText("Queued")).toBeNull()
+    view.select(null)
+    await advanceRefresh(10_000)
+    expect(requestedYears).toEqual(["2025", "2024"])
+  })
+
+  it("stops detail and status polling after status authentication failure", async () => {
+    let statusReads = 0
+    let detailReads = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://auth.example.test",
+      fetch: async (input) => {
+        if (String(input).includes("calculation-status")) {
+          statusReads += 1
+          return Response.json({ _tag: "Unauthorized" }, { status: 401 })
+        }
+        detailReads += 1
+        return Response.json(richDetail())
+      },
+    })
+    const view = mount(taxmaxi, { readStatus: true })
+    await advanceRefresh()
+    expect(view.onUnauthorized).toHaveBeenCalled()
+    await advanceRefresh(10_000)
+    expect([statusReads, detailReads]).toEqual([1, 1])
+  })
+  it.each(["close", "change", "auth", "missing"] as const)(
+    "stops recorded queued-work polling on %s",
+    async (action) => {
+      let statusReads = 0
+      const taxmaxi = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://stop.example.test",
+        fetch: async (input) => {
+          const url = new URL(input instanceof Request ? input.url : String(input))
+          if (url.pathname.endsWith("/calculation-status")) {
+            if (url.searchParams.get("taxYear") === "2024")
+              return Response.json(selectedWork({ status: "not_requested", taxYear: 2024 }))
+            statusReads += 1
+            return Response.json(selectedWork({ status: "queued" }))
+          }
+          return action === "missing"
+            ? Response.json({ _tag: "TransactionNotFoundError" }, { status: 404 })
+            : Response.json(settledDetail())
+        },
+      })
+      const view = mount(taxmaxi, { readStatus: true })
+      await advanceRefresh()
+      if (action === "close") view.select(null)
+      if (action === "change") view.select({ ...SELECTION, taxYear: 2024 })
+      if (action === "auth") view.disable()
+      await advanceRefresh(10_000)
+      expect(statusReads).toBe(1)
+    }
+  )
+
+  it("finishes a mismatched-run refresh through a same-transaction description update", async () => {
+    let body = settledDetail()
+    let reads = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://mismatch.example.test",
+      fetch: async (input) => {
+        if (String(input).includes("calculation-status"))
+          return Response.json(selectedWork({ status: "succeeded", activeRunId: IDS.other }))
+        reads += 1
+        return Response.json(body)
+      },
+    })
+    const view = mount(taxmaxi, { readStatus: true })
+    let release: (() => void) | undefined
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const cancel = view.client.cancelQueries.bind(view.client)
+    vi.spyOn(view.client, "cancelQueries").mockImplementation(async (filters, options) => {
+      await cancel(filters, options)
+      await barrier
+    })
+    try {
+      await advanceRefresh()
+      expect(screen.getByText(`Returned run: ${IDS.run} · 2025 · DE · EUR`)).toBeTruthy()
+      // Status coverage for the newer run is never attached to the old displayed result.
+      expect(screen.getByText("Current calculation work").parentElement?.textContent).not.toContain(
+        "Covered"
+      )
+      if (!body.calculation.run) throw new Error("Fixture run missing")
+      body = {
+        ...body,
+        calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+      }
+      view.select({ ...SELECTION, description: "Refreshed description" })
+      await act(async () => {
+        release?.()
+      })
+      await advanceRefresh()
+      expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+      expect(reads).toBe(2)
+    } finally {
+      release?.()
+    }
+  })
+
+  it("keeps keyboard focus on the inspector after work-status retry succeeds", async () => {
+    let fail = true
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://retry.example.test",
+      fetch: async (input) => {
+        if (String(input).includes("calculation-status"))
+          return fail
+            ? Response.json({ _tag: "InternalServerError" }, { status: 500 })
+            : Response.json(selectedWork({ status: "not_requested" }))
+        return Response.json(settledDetail())
+      },
+    })
+    mount(taxmaxi, { readStatus: true })
+    await advanceRefresh()
+    const retry = screen.getByRole("button", { name: "Refresh results" })
+    retry.focus()
+    fail = false
+    fireEvent.click(retry)
+    await advanceRefresh()
+    expect(document.activeElement?.tagName).toBe("SECTION")
+    expect(screen.queryByRole("button", { name: "Refresh results" })).toBeNull()
+  })
+  it("retains a newer displayed result when an older status snapshot arrives later", async () => {
+    let completeStatus: ((response: Response) => void) | undefined
+    const body = settledDetail()
+    if (!body.calculation.run) throw new Error("Fixture run missing")
+    const newer = {
+      ...body,
+      calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+    }
+    let detailReads = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://late-status.example.test",
+      fetch: async (input) => {
+        if (String(input).includes("calculation-status"))
+          return new Promise((resolve) => {
+            completeStatus = resolve
+          })
+        detailReads += 1
+        return Response.json(newer)
+      },
+    })
+    mount(taxmaxi, { readStatus: true })
+    await advanceRefresh()
+    await act(async () => {
+      completeStatus?.(Response.json(selectedWork({ status: "not_requested" })))
+    })
+    await advanceRefresh()
+    expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+    expect(detailReads).toBe(2)
+    expect(screen.getByText("Current calculation work").parentElement?.textContent).not.toContain(
+      "Covered"
+    )
+  })
+
+  it("backs off a failed status read with retained pending work and resumes discovery", async () => {
+    let statusReads = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://status-recovery.example.test",
+      fetch: async (input) => {
+        if (String(input).includes("calculation-status")) {
+          statusReads += 1
+          if (statusReads === 2)
+            return Response.json({ _tag: "InternalServerError" }, { status: 500 })
+          return Response.json(selectedWork({ status: statusReads === 1 ? "queued" : "failed" }))
+        }
+        return Response.json(settledDetail())
+      },
+    })
+    mount(taxmaxi, { readStatus: true })
+    await advanceRefresh()
+    await advanceRefresh(2_000)
+    expect(screen.getByText("Calculation work status could not be loaded.")).toBeTruthy()
+    expect(screen.getByText(`Returned run: ${IDS.run} · 2025 · DE · EUR`)).toBeTruthy()
+    await advanceRefresh(10_000)
+    expect(statusReads).toBe(2)
+    await advanceRefresh(20_000)
+    expect(statusReads).toBe(3)
+    expect(screen.getByText("Current calculation work").parentElement?.textContent).toContain(
+      "Failed"
+    )
+    await advanceRefresh(30_000)
+    expect(statusReads).toBe(3)
   })
 })
