@@ -1,10 +1,22 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import {
+  focusManager,
+  onlineManager,
+  QueryClient,
+  QueryClientProvider,
+  QueryObserver,
+} from "@tanstack/react-query"
 import { useRef, useState, type ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { TaxMaxi, TaxMaxiError, type TransactionDetail } from "taxmaxi"
+import {
+  TaxMaxi,
+  TaxMaxiError,
+  type TransactionDetail,
+  type PortfolioCalculationStatus,
+} from "taxmaxi"
+import { queries, refreshTransactionQueries } from "#/integrations/taxmaxi/queries"
 import { setLocale } from "#/paraglide/runtime"
 import { TransactionInspector } from "#/components/transaction-inspector"
 
@@ -40,7 +52,11 @@ const SELECTION: Selection = {
   description: "Imported purchase",
 }
 
-function richDetail(): TransactionDetail {
+function richDetail(currentTotal: "1" | "30" = "1"): TransactionDetail {
+  const unitPrice =
+    currentTotal === "1"
+      ? { amount: "0.333333333333333333", rounded: true }
+      : { amount: "10", rounded: false }
   const target: Correction["context"]["target"] = {
     principalId: IDS.principal,
     sourceId: IDS.source,
@@ -109,7 +125,7 @@ function richDetail(): TransactionDetail {
     ...oldPrice,
     id: IDS.price,
     operation: "replace",
-    input: { _tag: "price", input: { _tag: "total_value", amount: "1", currency: "EUR" } },
+    input: { _tag: "price", input: { _tag: "total_value", amount: currentTotal, currency: "EUR" } },
     reason: "Corrected receipt total",
     supersedesOverrideId: IDS.oldPrice,
     recordedAt: "2025-03-03T00:00:00.000Z",
@@ -203,16 +219,16 @@ function richDetail(): TransactionDetail {
       current,
       currentOutcome: "included",
       system: systemInputs,
-      effective: effectiveInputs("1", IDS.price),
+      effective: effectiveInputs(currentTotal, IDS.price),
       corrections: [
         {
           ...captured,
           history: price,
-          effective: effectiveInputs("1", IDS.price),
+          effective: effectiveInputs(currentTotal, IDS.price),
           resolvedPrice: {
-            totalValue: "1",
+            totalValue: currentTotal,
             currency: "EUR",
-            unitPrice: { amount: "0.333333333333333333", rounded: true },
+            unitPrice,
           },
         },
       ],
@@ -223,9 +239,9 @@ function richDetail(): TransactionDetail {
       active: price,
       application: "applied",
       resolvedPrice: {
-        totalValue: "1",
+        totalValue: currentTotal,
         currency: "EUR",
-        unitPrice: { amount: "0.333333333333333333", rounded: true },
+        unitPrice,
       },
     },
     classification: inactive,
@@ -386,18 +402,32 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function mount(taxmaxi: TaxMaxi, selection: Selection | null = SELECTION) {
+function mount(
+  taxmaxi: TaxMaxi,
+  {
+    selection = SELECTION,
+    readStatus = false,
+  }: {
+    selection?: Selection | null
+    readStatus?: boolean
+  } = {}
+) {
+  // Detail-only regressions model an unavailable independent work-status read.
+  if (!readStatus)
+    vi.spyOn(taxmaxi.portfolio, "getCalculationStatus").mockRejectedValue(
+      new Error("Independent work status unavailable")
+    )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   clients.push(client)
   const onUnauthorized = vi.fn()
   const onClose = vi.fn()
   const returnFocusRef = { current: null }
-  const element = (value: Selection | null) => (
+  const element = (value: Selection | null, disabled = false) => (
     <QueryClientProvider client={client}>
       <TransactionInspector
         selection={value}
         taxmaxi={taxmaxi}
-        disabled={false}
+        disabled={disabled}
         onUnauthorized={onUnauthorized}
         onClose={onClose}
         returnFocusRef={returnFocusRef}
@@ -407,9 +437,11 @@ function mount(taxmaxi: TaxMaxi, selection: Selection | null = SELECTION) {
   const view = render(element(selection))
   return {
     ...view,
+    client,
     onClose,
     onUnauthorized,
     select: (value: Selection | null) => view.rerender(element(value)),
+    disable: () => view.rerender(element(selection, true)),
   }
 }
 
@@ -417,6 +449,53 @@ function section(title: string): HTMLElement {
   const container = screen.getByRole("heading", { name: title }).closest("section")
   if (container === null) throw new Error(`Missing section: ${title}`)
   return container
+}
+
+function selectedWork({
+  status,
+  activeRunId = IDS.run,
+  taxYear = 2025,
+}: {
+  status: PortfolioCalculationStatus["work"]["status"]
+  activeRunId?: string | null
+  taxYear?: number
+}): PortfolioCalculationStatus {
+  const requests: PortfolioCalculationStatus["work"]["requests"] =
+    status === "not_requested"
+      ? []
+      : [
+          {
+            requestId: "request-after-import",
+            sourceId: IDS.source,
+            sourceJobId: IDS.job,
+            status,
+            attempts:
+              status === "queued"
+                ? []
+                : [
+                    {
+                      attemptId: "calculation-attempt",
+                      runId: status === "failed" ? null : IDS.other,
+                      status,
+                      failureCode: status === "failed" ? "preparation_failed" : null,
+                    },
+                  ],
+          },
+        ]
+  return {
+    scope: { jurisdiction: "DE", taxYear, reportingCurrency: "EUR" },
+    activeRun: activeRunId === null ? null : { runId: activeRunId, status: "complete" },
+    work: { status, requests },
+    jobs: requests.map((work) => ({
+      sourceId: IDS.source,
+      sourceJobId: IDS.job,
+      sourceJobStatus: "completed",
+      work,
+      coveringRun: status === "succeeded" ? { runId: IDS.other, status: "complete" } : null,
+      activeCoverage:
+        status === "succeeded" && activeRunId === IDS.other ? "covered" : "not_covered",
+    })),
+  }
 }
 
 function sdkClient(body: TransactionDetail) {
@@ -605,7 +684,7 @@ describe("TransactionInspector", () => {
         transactionId: IDS.other,
         externalId: "selected-second",
       })
-    const view = mount(taxmaxi, null)
+    const view = mount(taxmaxi, { selection: null })
     expect(get).not.toHaveBeenCalled()
     view.select(SELECTION)
     expect(get).toHaveBeenCalledTimes(1)
@@ -738,4 +817,799 @@ describe("TransactionInspector", () => {
       )
     }
   )
+})
+
+const advanceRefresh = async (milliseconds = 1) => {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(milliseconds)
+  })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1)
+  })
+}
+
+function settledDetail(currentTotal: "1" | "30" = "1"): TransactionDetail {
+  const detail = richDetail(currentTotal)
+  return {
+    ...detail,
+    movementOverrides: detail.movementOverrides.map((correction) => {
+      const covered = (stream: Correction["price"]): Correction["price"] => ({
+        ...stream,
+        replay: { ...stream.replay, status: "complete" },
+        coverageStatus: "covered",
+        coverage: stream.leaf
+          ? {
+              runId: IDS.run,
+              status: "partial",
+              failureCode: null,
+              overrideId: stream.leaf.id,
+              input: {
+                application: stream.application,
+                applicationProblem: stream.applicationProblem,
+                resolvedPrice: stream.resolvedPrice,
+                system: correction.inputs.system,
+                effective: correction.inputs.effective,
+              },
+            }
+          : null,
+      })
+      return {
+        ...correction,
+        price: covered(correction.price),
+        classification: covered(correction.classification),
+      }
+    }),
+  }
+}
+
+describe("selected transaction refresh", () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    focusManager.setFocused(true)
+    onlineManager.setOnline(true)
+  })
+  afterEach(() => {
+    cleanup()
+    focusManager.setFocused(undefined)
+    onlineManager.setOnline(true)
+    vi.useRealTimers()
+  })
+
+  it("polls recorded replay, refreshes the same list cursor on a new run and stops when settled", async () => {
+    let body = richDetail("30")
+    const urls: string[] = []
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://refresh.example.test",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input)
+        urls.push(url)
+        if (new URL(url).pathname.endsWith("/transactions"))
+          return Response.json({
+            transactions: [],
+            totalCount: 0,
+            page: { hasMore: false, nextCursor: null },
+          })
+        return Response.json(body)
+      },
+    })
+    const view = mount(taxmaxi)
+    const list = new QueryObserver(
+      view.client,
+      queries.transactionList(taxmaxi, { cursor: "kept-page", limit: 7 })
+    )
+    const unsubscribe = list.subscribe(() => undefined)
+    try {
+      await advanceRefresh()
+      expect(urls.filter((url) => url.includes("taxYear="))).toHaveLength(1)
+      body = settledDetail("30")
+      if (body.calculation.run)
+        body = {
+          ...body,
+          calculation: {
+            ...body.calculation,
+            run: { ...body.calculation.run, id: IDS.other },
+            correctionInputs: body.movementOverrides.flatMap((item) => item.inputs.corrections),
+            allocations: body.calculation.allocations.map((item) => ({
+              ...item,
+              costBasis: "30",
+              proceeds: "30",
+              gainLoss: "0",
+            })),
+          },
+        }
+      await advanceRefresh(2_000)
+      expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+      expect(
+        within(screen.getByRole("region", { name: "Disposal allocation 1" })).getByText("0 EUR")
+      ).toBeTruthy()
+      expect(urls.filter((url) => new URL(url).pathname.endsWith("/transactions"))).toEqual([
+        "https://refresh.example.test/v1/transactions?cursor=kept-page&limit=7",
+        "https://refresh.example.test/v1/transactions?cursor=kept-page&limit=7",
+        "https://refresh.example.test/v1/transactions?cursor=kept-page&limit=7",
+      ])
+      const count = urls.length
+      await advanceRefresh(10_000)
+      expect(urls).toHaveLength(count)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it.each(["movement replay", "movement coverage", "asset replay"] as const)(
+    "polls recorded %s independently of calculation completeness",
+    async (work) => {
+      const settled = settledDetail()
+      const body: TransactionDetail =
+        work === "asset replay"
+          ? {
+              ...settled,
+              assetOverrides: settled.assetOverrides.map((item) => ({
+                ...item,
+                projection: item.projection
+                  ? {
+                      ...item.projection,
+                      recomputation: {
+                        status: "updating",
+                        overrideIds: [IDS.assetOverride],
+                        sourceJobs: [
+                          {
+                            overrideId: IDS.assetOverride,
+                            sourceId: IDS.source,
+                            requestedJobId: IDS.job,
+                            jobId: IDS.job,
+                            status: "pending",
+                            failureCode: null,
+                          },
+                        ],
+                        calculationRun: null,
+                      },
+                    }
+                  : null,
+              })),
+            }
+          : {
+              ...settled,
+              movementOverrides: settled.movementOverrides.map((item) => ({
+                ...item,
+                price: {
+                  ...item.price,
+                  ...(work === "movement replay"
+                    ? { replay: { ...item.price.replay, status: "updating" } }
+                    : { coverageStatus: "updating", coverage: null }),
+                },
+              })),
+            }
+      const { taxmaxi, fetch } = sdkClient(body)
+      mount(taxmaxi)
+      await advanceRefresh()
+      await advanceRefresh(2_000)
+      expect(fetch).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it("invalidates again when the observed run returns from B to A", async () => {
+    let body = settledDetail()
+    const { taxmaxi, fetch } = sdkClient(body)
+    fetch.mockImplementation(async () => Response.json(body))
+    const view = mount(taxmaxi)
+    const options = queries.transactionList(taxmaxi, { limit: 7 })
+    const list = vi.spyOn(taxmaxi.transactions, "list").mockResolvedValue({
+      transactions: [],
+      totalCount: 0,
+      page: { hasMore: false, nextCursor: null },
+    })
+    const observer = new QueryObserver(view.client, options)
+    const unsubscribe = observer.subscribe(() => undefined)
+    try {
+      await advanceRefresh()
+      if (!body.calculation.run) throw new Error("Fixture run missing")
+      body = {
+        ...body,
+        calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+      }
+      act(() => focusManager.setFocused(false))
+      act(() => focusManager.setFocused(true))
+      await advanceRefresh()
+      body = settledDetail()
+      act(() => focusManager.setFocused(false))
+      act(() => focusManager.setFocused(true))
+      await advanceRefresh()
+      expect(list).toHaveBeenCalledTimes(4)
+      expect(screen.getByText(`Returned run: ${IDS.run} · 2025 · DE · EUR`)).toBeTruthy()
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it.each(["partial", "no run"] as const)(
+    "does not poll %s without recorded pending work",
+    async (scenario) => {
+      const body = settledDetail()
+      const { taxmaxi, fetch } = sdkClient(
+        scenario === "no run"
+          ? {
+              ...body,
+              calculation: { ...body.calculation, run: null, monetaryStatus: "unavailable" },
+            }
+          : body
+      )
+      mount(taxmaxi)
+      await advanceRefresh()
+      await advanceRefresh(20_000)
+      expect(fetch).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it("stops the previous selection's pending polling on change and closure", async () => {
+    const urls: string[] = []
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://refresh.example.test",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input)
+        urls.push(url)
+        return Response.json(
+          new URL(url).pathname.endsWith(IDS.other)
+            ? { ...settledDetail(), transactionId: IDS.other }
+            : richDetail()
+        )
+      },
+    })
+    const view = mount(taxmaxi)
+    await advanceRefresh()
+    view.select({ ...SELECTION, transactionId: IDS.other })
+    await advanceRefresh()
+    await advanceRefresh(6_000)
+    expect(urls).toHaveLength(2)
+    view.select(SELECTION)
+    await advanceRefresh()
+    const count = urls.length
+    view.select(null)
+    await advanceRefresh(10_000)
+    expect(urls).toHaveLength(count)
+  })
+
+  it.each([401, 404])(
+    "stops polling after HTTP %s and preserves the selected ID",
+    async (status) => {
+      let missing = false
+      const calls: string[] = []
+      const taxmaxi = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://refresh.example.test",
+        fetch: async (input) => {
+          calls.push(input instanceof Request ? input.url : String(input))
+          return missing
+            ? Response.json(
+                {
+                  _tag: status === 404 ? "TransactionNotFoundError" : "Unauthorized",
+                  message: "Fixture failure",
+                },
+                { status }
+              )
+            : Response.json(richDetail())
+        },
+      })
+      const view = mount(taxmaxi)
+      await advanceRefresh()
+      missing = true
+      await advanceRefresh(2_000)
+      await advanceRefresh(20_000)
+      expect(calls).toHaveLength(2)
+      expect(calls.every((url) => url.includes(IDS.transaction))).toBe(true)
+      if (status === 404)
+        expect(
+          screen.getByText("This transaction is no longer available. Your selection has been kept.")
+        ).toBeTruthy()
+      else expect(view.onUnauthorized).toHaveBeenCalled()
+    }
+  )
+
+  it("restarts an initial selected request after a writer signal and rejects its late response", async () => {
+    let completeOld: ((response: Response) => void) | undefined
+    let count = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://refresh.example.test",
+      fetch: async () => {
+        count += 1
+        if (count === 1)
+          return new Promise((resolve) => {
+            completeOld = resolve
+          })
+        return Response.json({ ...settledDetail(), externalId: "new-source-facts" })
+      },
+    })
+    const view = mount(taxmaxi)
+    await advanceRefresh()
+    await act(async () => {
+      await refreshTransactionQueries(view.client)
+    })
+    await advanceRefresh()
+    expect(screen.getByText("new-source-facts")).toBeTruthy()
+    await act(async () => {
+      completeOld?.(Response.json({ ...settledDetail(), externalId: "old-source-facts" }))
+    })
+    await advanceRefresh()
+    expect(screen.queryByText("old-source-facts")).toBeNull()
+    expect(count).toBe(2)
+  })
+
+  it.each(["close", "change", "auth"] as const)(
+    "finishes an observed run refresh after %s unless authentication is lost",
+    async (action) => {
+      let body = settledDetail()
+      const { taxmaxi, fetch } = sdkClient(body)
+      fetch.mockImplementation(async () => Response.json(body))
+      const view = mount(taxmaxi)
+      const list = vi.spyOn(taxmaxi.transactions, "list").mockResolvedValue({
+        transactions: [],
+        totalCount: 0,
+        page: { hasMore: false, nextCursor: null },
+      })
+      const observer = new QueryObserver(view.client, queries.transactionList(taxmaxi))
+      const unsubscribe = observer.subscribe(() => undefined)
+      let release: (() => void) | undefined
+      const originalCancel = view.client.cancelQueries.bind(view.client)
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      try {
+        await advanceRefresh()
+        vi.spyOn(view.client, "cancelQueries").mockImplementation(async (filters, options) => {
+          await originalCancel(filters, options)
+          await barrier
+        })
+        if (!body.calculation.run) throw new Error("Fixture run missing")
+        body = {
+          ...body,
+          calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+        }
+        act(() => focusManager.setFocused(false))
+        act(() => focusManager.setFocused(true))
+        await advanceRefresh()
+        if (action === "close") view.select(null)
+        else if (action === "change") view.select({ ...SELECTION, transactionId: IDS.other })
+        else view.disable()
+        await act(async () => {
+          release?.()
+        })
+        await advanceRefresh()
+        expect(list).toHaveBeenCalledTimes(action === "auth" ? 2 : action === "change" ? 4 : 3)
+      } finally {
+        release?.()
+        unsubscribe()
+      }
+    }
+  )
+
+  it("cancels pending delivery and polling when authentication disables the inspector", async () => {
+    let complete: ((response: Response) => void) | undefined
+    let calls = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://refresh.example.test",
+      fetch: async () => {
+        calls += 1
+        return new Promise((resolve) => {
+          complete = resolve
+        })
+      },
+    })
+    const view = mount(taxmaxi)
+    await advanceRefresh()
+    view.disable()
+    await act(async () => {
+      complete?.(Response.json(richDetail()))
+    })
+    await advanceRefresh(10_000)
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(calls).toBe(1)
+    expect(
+      view.client.getQueryData(
+        queries.transactionDetail(taxmaxi, { transactionId: IDS.transaction, taxYear: 2025 })
+          .queryKey
+      )
+    ).toBeUndefined()
+  })
+
+  it("refetches external corrections on focus while cached facts are fresh", async () => {
+    let body = settledDetail()
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockImplementation(async () => Response.json(body))
+    const taxmaxi = TaxMaxi.fromBrowserSession({ baseUrl: "https://refresh.example.test", fetch })
+    mount(taxmaxi)
+    await advanceRefresh()
+    body = {
+      ...body,
+      movementOverrides: body.movementOverrides.map((item) => ({
+        ...item,
+        price: {
+          ...item.price,
+          stale: true,
+          application: "needs_attention",
+          applicationProblem: "quantity_changed",
+        },
+      })),
+    }
+    act(() => focusManager.setFocused(false))
+    act(() => focusManager.setFocused(true))
+    await advanceRefresh()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(screen.getByText("Quantity changed")).toBeTruthy()
+    expect(
+      within(section("Inputs captured by the displayed run")).getAllByText("20 EUR").length
+    ).toBeGreaterThan(0)
+    expect(within(section("Current decisions")).getAllByText("1 EUR").length).toBeGreaterThan(0)
+    act(() => onlineManager.setOnline(false))
+    act(() => onlineManager.setOnline(true))
+    await advanceRefresh()
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+  it.each([true, false])(
+    "discovers imported work on a fresh inspector with prior result %s",
+    async (hasRun) => {
+      let status = selectedWork({ status: "queued", activeRunId: hasRun ? IDS.run : null })
+      let body = settledDetail()
+      if (!hasRun)
+        body = {
+          ...body,
+          calculation: {
+            ...body.calculation,
+            run: null,
+            state: "partial",
+            monetaryStatus: "unavailable",
+            allocations: [],
+            income: [],
+            derivedLots: [],
+          },
+        }
+      let statusReads = 0
+      let detailReads = 0
+      const taxmaxi = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://work.example.test",
+        fetch: async (input) => {
+          const url = new URL(input instanceof Request ? input.url : String(input))
+          if (url.pathname.endsWith("/calculation-status")) {
+            expect(url.searchParams.get("taxYear")).toBe("2025")
+            statusReads += 1
+            return Response.json(status)
+          }
+          detailReads += 1
+          return Response.json(body)
+        },
+      })
+      const view = mount(taxmaxi, { readStatus: true })
+      await advanceRefresh()
+      expect(screen.getByText("Queued")).toBeTruthy()
+      if (hasRun)
+        expect(screen.getByText(`Returned run: ${IDS.run} · 2025 · DE · EUR`)).toBeTruthy()
+      status = selectedWork({ status: "running", activeRunId: hasRun ? IDS.run : null })
+      await advanceRefresh(2_000)
+      expect(screen.getByText("Running")).toBeTruthy()
+      expect(detailReads).toBe(1)
+      body = settledDetail("30")
+      if (!body.calculation.run) throw new Error("Fixture run missing")
+      body = {
+        ...body,
+        calculation: {
+          ...body.calculation,
+          run: { ...body.calculation.run, id: IDS.other },
+          allocations: body.calculation.allocations.map((item) => ({
+            ...item,
+            costBasis: "30",
+            proceeds: "30",
+            gainLoss: "0",
+          })),
+        },
+      }
+      status = selectedWork({ status: "succeeded", activeRunId: IDS.other })
+      await advanceRefresh(2_000)
+      expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+      expect(
+        view.client.getQueryData(queries.transactionCalculationStatus(taxmaxi, 2025).queryKey)?.work
+          .requests[0]?.requestId
+      ).toBe("request-after-import")
+      const reads = [statusReads, detailReads]
+      await advanceRefresh(10_000)
+      expect([statusReads, detailReads]).toEqual(reads)
+    }
+  )
+
+  it.each(["not_requested", "failed"] as const)(
+    "does not poll %s selected-year work",
+    async (work) => {
+      let reads = 0
+      const taxmaxi = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://terminal.example.test",
+        fetch: async (input) => {
+          if (String(input).includes("calculation-status")) {
+            reads += 1
+            return Response.json(selectedWork({ status: work }))
+          }
+          return Response.json(settledDetail())
+        },
+      })
+      mount(taxmaxi, { readStatus: true })
+      await advanceRefresh()
+      const currentWork = screen.getByText("Current calculation work").parentElement
+      expect(currentWork?.textContent).toContain(work === "failed" ? "Failed" : "Not requested")
+      await advanceRefresh(10_000)
+      expect(reads).toBe(1)
+    }
+  )
+
+  it("rejects a delayed previous-year status response and stops status requests on close", async () => {
+    let release: ((value: Response) => void) | undefined
+    const requestedYears: string[] = []
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://selection.example.test",
+      fetch: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : String(input))
+        if (url.pathname.endsWith("/calculation-status")) {
+          const year = url.searchParams.get("taxYear") ?? ""
+          requestedYears.push(year)
+          if (year === "2025")
+            return new Promise((resolve) => {
+              release = resolve
+            })
+          return Response.json(selectedWork({ status: "not_requested", taxYear: 2024 }))
+        }
+        return Response.json(settledDetail())
+      },
+    })
+    const view = mount(taxmaxi, { readStatus: true })
+    await advanceRefresh()
+    view.select({ ...SELECTION, taxYear: 2024 })
+    await advanceRefresh()
+    await act(async () => {
+      release?.(Response.json(selectedWork({ status: "queued" })))
+    })
+    expect(screen.queryByText("Queued")).toBeNull()
+    view.select(null)
+    await advanceRefresh(10_000)
+    expect(requestedYears).toEqual(["2025", "2024"])
+  })
+
+  it("stops detail and status polling after status authentication failure", async () => {
+    let statusReads = 0
+    let detailReads = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://auth.example.test",
+      fetch: async (input) => {
+        if (String(input).includes("calculation-status")) {
+          statusReads += 1
+          return Response.json({ _tag: "Unauthorized" }, { status: 401 })
+        }
+        detailReads += 1
+        return Response.json(richDetail())
+      },
+    })
+    const view = mount(taxmaxi, { readStatus: true })
+    await advanceRefresh()
+    expect(view.onUnauthorized).toHaveBeenCalled()
+    await advanceRefresh(10_000)
+    expect([statusReads, detailReads]).toEqual([1, 1])
+  })
+  it.each(["close", "change", "auth", "missing"] as const)(
+    "stops recorded queued-work polling on %s",
+    async (action) => {
+      let statusReads = 0
+      const taxmaxi = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://stop.example.test",
+        fetch: async (input) => {
+          const url = new URL(input instanceof Request ? input.url : String(input))
+          if (url.pathname.endsWith("/calculation-status")) {
+            if (url.searchParams.get("taxYear") === "2024")
+              return Response.json(selectedWork({ status: "not_requested", taxYear: 2024 }))
+            statusReads += 1
+            return Response.json(selectedWork({ status: "queued" }))
+          }
+          return action === "missing"
+            ? Response.json({ _tag: "TransactionNotFoundError" }, { status: 404 })
+            : Response.json(settledDetail())
+        },
+      })
+      const view = mount(taxmaxi, { readStatus: true })
+      await advanceRefresh()
+      if (action === "close") view.select(null)
+      if (action === "change") view.select({ ...SELECTION, taxYear: 2024 })
+      if (action === "auth") view.disable()
+      await advanceRefresh(10_000)
+      expect(statusReads).toBe(1)
+    }
+  )
+
+  it("finishes a mismatched-run refresh through a same-transaction description update", async () => {
+    let body = settledDetail()
+    let reads = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://mismatch.example.test",
+      fetch: async (input) => {
+        if (String(input).includes("calculation-status"))
+          return Response.json(selectedWork({ status: "succeeded", activeRunId: IDS.other }))
+        reads += 1
+        return Response.json(body)
+      },
+    })
+    const view = mount(taxmaxi, { readStatus: true })
+    let release: (() => void) | undefined
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const cancel = view.client.cancelQueries.bind(view.client)
+    vi.spyOn(view.client, "cancelQueries").mockImplementation(async (filters, options) => {
+      await cancel(filters, options)
+      await barrier
+    })
+    try {
+      await advanceRefresh()
+      expect(screen.getByText(`Returned run: ${IDS.run} · 2025 · DE · EUR`)).toBeTruthy()
+      // Status coverage for the newer run is never attached to the old displayed result.
+      expect(screen.getByText("Current calculation work").parentElement?.textContent).not.toContain(
+        "Covered"
+      )
+      if (!body.calculation.run) throw new Error("Fixture run missing")
+      body = {
+        ...body,
+        calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+      }
+      view.select({ ...SELECTION, description: "Refreshed description" })
+      await act(async () => {
+        release?.()
+      })
+      await advanceRefresh()
+      expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+      expect(reads).toBe(2)
+    } finally {
+      release?.()
+    }
+  })
+
+  it("keeps keyboard focus on the inspector after work-status retry succeeds", async () => {
+    let fail = true
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://retry.example.test",
+      fetch: async (input) => {
+        if (String(input).includes("calculation-status"))
+          return fail
+            ? Response.json({ _tag: "InternalServerError" }, { status: 500 })
+            : Response.json(selectedWork({ status: "not_requested" }))
+        return Response.json(settledDetail())
+      },
+    })
+    mount(taxmaxi, { readStatus: true })
+    await advanceRefresh()
+    const retry = screen.getByRole("button", { name: "Refresh results" })
+    retry.focus()
+    fail = false
+    fireEvent.click(retry)
+    await advanceRefresh()
+    expect(document.activeElement?.tagName).toBe("SECTION")
+    expect(screen.queryByRole("button", { name: "Refresh results" })).toBeNull()
+  })
+  it.each([true, false])(
+    "rechecks an older status snapshot, converging when possible (%s)",
+    async (converges) => {
+      let completeStatus: ((response: Response) => void) | undefined
+      const body = settledDetail()
+      if (!body.calculation.run) throw new Error("Fixture run missing")
+      const newer = {
+        ...body,
+        calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+      }
+      let statusReads = 0
+      let detailReads = 0
+      const taxmaxi = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://late-status.example.test",
+        fetch: async (input) => {
+          if (String(input).includes("calculation-status")) {
+            statusReads += 1
+            return statusReads === 1
+              ? new Promise((resolve) => {
+                  completeStatus = resolve
+                })
+              : Response.json(
+                  selectedWork({
+                    status: converges ? "succeeded" : "failed",
+                    activeRunId: converges ? IDS.other : IDS.run,
+                  })
+                )
+          }
+          detailReads += 1
+          return Response.json(newer)
+        },
+      })
+      mount(taxmaxi, { readStatus: true })
+      await advanceRefresh()
+      await act(async () => {
+        completeStatus?.(Response.json(selectedWork({ status: "not_requested" })))
+      })
+      await advanceRefresh()
+      expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+      expect(detailReads).toBe(2)
+      expect(statusReads).toBe(2)
+      await advanceRefresh(10_000)
+      expect([detailReads, statusReads]).toEqual([2, 2])
+      expect(screen.getByText("Current calculation work").parentElement?.textContent).toContain(
+        converges ? "Complete" : "Failed"
+      )
+      expect(screen.getByText("Current calculation work").parentElement?.textContent).not.toContain(
+        "Covered"
+      )
+    }
+  )
+
+  it("backs off a failed status read with retained pending work and resumes discovery", async () => {
+    let statusReads = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://status-recovery.example.test",
+      fetch: async (input) => {
+        if (String(input).includes("calculation-status")) {
+          statusReads += 1
+          if (statusReads === 2)
+            return Response.json({ _tag: "InternalServerError" }, { status: 500 })
+          return Response.json(selectedWork({ status: statusReads === 1 ? "queued" : "failed" }))
+        }
+        return Response.json(settledDetail())
+      },
+    })
+    mount(taxmaxi, { readStatus: true })
+    await advanceRefresh()
+    await advanceRefresh(2_000)
+    expect(screen.getByText("Calculation work status could not be loaded.")).toBeTruthy()
+    expect(screen.getByText(`Returned run: ${IDS.run} · 2025 · DE · EUR`)).toBeTruthy()
+    await advanceRefresh(10_000)
+    expect(statusReads).toBe(2)
+    await advanceRefresh(20_000)
+    expect(statusReads).toBe(3)
+    expect(screen.getByText("Current calculation work").parentElement?.textContent).toContain(
+      "Failed"
+    )
+    await advanceRefresh(30_000)
+    expect(statusReads).toBe(3)
+  })
+  it("refreshes a cached list when the first selected detail already has the completed run", async () => {
+    const body = settledDetail()
+    if (!body.calculation.run) throw new Error("Fixture run missing")
+    const newer = {
+      ...body,
+      calculation: { ...body.calculation, run: { ...body.calculation.run, id: IDS.other } },
+    }
+    let listReads = 0
+    const taxmaxi = TaxMaxi.fromBrowserSession({
+      baseUrl: "https://reopen.example.test",
+      fetch: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : String(input))
+        if (url.pathname.endsWith("calculation-status"))
+          return Response.json(selectedWork({ status: "succeeded", activeRunId: IDS.other }))
+        if (url.pathname.endsWith("transactions")) {
+          listReads += 1
+          return Response.json({
+            transactions: [],
+            totalCount: 2,
+            page: { hasMore: false, nextCursor: null },
+          })
+        }
+        return Response.json(newer)
+      },
+    })
+    const view = mount(taxmaxi, { selection: null, readStatus: true })
+    const options = queries.transactionList(taxmaxi, { cursor: "retained-page", limit: 7 })
+    view.client.setQueryData(options.queryKey, {
+      transactions: [],
+      totalCount: 1,
+      page: { hasMore: false, nextCursor: null },
+    })
+    const list = new QueryObserver(view.client, options)
+    const unsubscribe = list.subscribe(() => undefined)
+    try {
+      await advanceRefresh()
+      expect(listReads).toBe(0)
+      view.select(SELECTION)
+      await advanceRefresh()
+      expect(screen.getByText(`Returned run: ${IDS.other} · 2025 · DE · EUR`)).toBeTruthy()
+      expect(listReads).toBe(1)
+      expect(view.client.getQueryData(options.queryKey)?.totalCount).toBe(2)
+    } finally {
+      unsubscribe()
+    }
+  })
 })

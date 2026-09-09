@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   TaxMaxiError,
   isTaxMaxiUnauthorizedError,
@@ -7,7 +7,7 @@ import {
   type TransactionDetail,
 } from "taxmaxi"
 import { X } from "lucide-react"
-import { queries } from "#/integrations/taxmaxi/queries"
+import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "#/components/ui/dialog"
 import { Drawer, DrawerContent, DrawerTitle, DrawerDescription } from "#/components/ui/drawer"
 import { Button } from "#/components/ui/button"
@@ -39,6 +39,13 @@ export function TransactionInspector({
   fallbackFocusRef?: RefObject<HTMLElement | null>
 }) {
   const [mobile, setMobile] = useState(false)
+  const refreshAllowed = useRef(!disabled)
+  useEffect(() => {
+    refreshAllowed.current = !disabled
+    return () => {
+      refreshAllowed.current = false
+    }
+  }, [disabled])
   useEffect(() => {
     const media = window.matchMedia("(max-width: 767px)")
     const update = () => setMobile(media.matches)
@@ -77,6 +84,7 @@ export function TransactionInspector({
       <InspectorRequest
         key={`${selection.transactionId}:${selection.taxYear}`}
         selection={selection}
+        refreshAllowed={refreshAllowed}
         taxmaxi={taxmaxi}
         onUnauthorized={onUnauthorized}
       />
@@ -135,23 +143,111 @@ export function TransactionInspector({
 
 function InspectorRequest({
   selection,
+  refreshAllowed,
   taxmaxi,
   onUnauthorized,
 }: {
   selection: Selection
+  refreshAllowed: RefObject<boolean>
   taxmaxi: TaxMaxi
   onUnauthorized: () => void | Promise<void>
 }) {
-  const detail = useQuery(
-    queries.transactionDetail(taxmaxi, {
+  const { transactionId, taxYear } = selection
+  const [authenticationLost, setAuthenticationLost] = useState(false)
+  const detail = useQuery({
+    ...queries.transactionDetail(taxmaxi, {
       transactionId: selection.transactionId,
       taxYear: selection.taxYear,
-    })
-  )
+    }),
+    enabled: !authenticationLost,
+  })
+  const detailUnavailable =
+    isTaxMaxiUnauthorizedError(detail.error) ||
+    (detail.error instanceof TaxMaxiError && detail.error.status === 404)
+  const calculationStatus = useQuery({
+    ...queries.transactionCalculationStatus(taxmaxi, selection.taxYear),
+    enabled: !authenticationLost && !detailUnavailable,
+  })
+  const queryClient = useQueryClient()
+  const listRefreshRunId = useRef<string | null | undefined>(undefined)
+  const runId = detail.data?.calculation.run?.id ?? null
+  useEffect(() => {
+    if (!detail.isSuccess) return
+    if (listRefreshRunId.current === runId) return
+    listRefreshRunId.current = runId
+    const refreshList = async () => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.transactionLists() })
+      if (refreshAllowed.current)
+        await queryClient.invalidateQueries({ queryKey: queryKeys.transactionLists() })
+    }
+    void refreshList()
+  }, [detail.isSuccess, queryClient, refreshAllowed, runId])
+  const refreshedStatusRun = useRef<{ runId: string | null } | undefined>(undefined)
+  const statusRunId = calculationStatus.data?.activeRun?.runId ?? null
+  useEffect(() => {
+    if (!calculationStatus.isSuccess || !detail.isSuccess) return
+    if (statusRunId === runId) {
+      refreshedStatusRun.current = undefined
+      return
+    }
+    if (refreshedStatusRun.current?.runId === statusRunId) return
+    refreshedStatusRun.current = { runId: statusRunId }
+    const refreshList = listRefreshRunId.current !== statusRunId
+    if (refreshList) listRefreshRunId.current = statusRunId
+    let selected = true
+    const refreshResult = async () => {
+      const queryKey = queryKeys.transactionDetail({ transactionId, taxYear })
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey, exact: true }),
+        refreshList
+          ? queryClient.cancelQueries({ queryKey: queryKeys.transactionLists() })
+          : Promise.resolve(),
+      ])
+      if (!refreshAllowed.current) return
+      await Promise.all([
+        refreshList
+          ? queryClient.invalidateQueries({ queryKey: queryKeys.transactionLists() })
+          : Promise.resolve(),
+        selected ? queryClient.invalidateQueries({ queryKey, exact: true }) : Promise.resolve(),
+      ])
+      if (!selected || !refreshAllowed.current) return
+      const refreshedDetail = queryClient.getQueryData(
+        queries.transactionDetail(taxmaxi, { transactionId, taxYear }).queryKey
+      )
+      if ((refreshedDetail?.calculation.run?.id ?? null) !== statusRunId) {
+        // The status snapshot may predate the result. Re-read that side once too.
+        const statusKey = queryKeys.transactionCalculationStatus(taxYear)
+        await queryClient.cancelQueries({ queryKey: statusKey, exact: true })
+        if (selected && refreshAllowed.current)
+          await queryClient.invalidateQueries({ queryKey: statusKey, exact: true })
+      }
+    }
+    void refreshResult()
+    return () => {
+      selected = false
+    }
+  }, [
+    calculationStatus.isSuccess,
+    detail.isSuccess,
+    queryClient,
+    refreshAllowed,
+    runId,
+    transactionId,
+    taxYear,
+    statusRunId,
+    taxmaxi,
+  ])
   const regionRef = useRef<HTMLElement>(null)
   useEffect(() => {
-    if (isTaxMaxiUnauthorizedError(detail.error)) void onUnauthorized()
-  }, [detail.error, onUnauthorized])
+    if (
+      isTaxMaxiUnauthorizedError(detail.error) ||
+      isTaxMaxiUnauthorizedError(calculationStatus.error)
+    ) {
+      refreshAllowed.current = false
+      setAuthenticationLost(true)
+      void onUnauthorized()
+    }
+  }, [calculationStatus.error, detail.error, onUnauthorized, refreshAllowed])
   const missing = detail.error instanceof TaxMaxiError && detail.error.status === 404
   return (
     <section
@@ -166,6 +262,31 @@ function InspectorRequest({
       <p className="text-sm text-muted-foreground">
         {m["app.treatment.requestedYear"]({ year: selection.taxYear })}
       </p>
+      {!detailUnavailable && (
+        <div className="flex flex-col gap-2" role="status">
+          <span className="text-sm font-medium">{m["app.inspector.currentWork"]()}</span>
+          <span className="text-sm text-muted-foreground">
+            {calculationStatus.isError
+              ? m["app.inspector.workUnavailable"]()
+              : calculationStatus.data
+                ? calculationWorkLabel(calculationStatus.data.work.status)
+                : m["app.calculation.checking"]()}
+          </span>
+          {calculationStatus.isError && (
+            <Button
+              variant="outline"
+              className="min-h-11 self-start"
+              disabled={calculationStatus.isFetching}
+              onClick={() => {
+                regionRef.current?.focus()
+                void calculationStatus.refetch()
+              }}
+            >
+              {m["app.calculation.refresh"]()}
+            </Button>
+          )}
+        </div>
+      )}
       {detail.isPending ? (
         <p role="status">{m["app.treatment.loading"]()}</p>
       ) : detail.isError ? (
@@ -188,6 +309,21 @@ function InspectorRequest({
       )}
     </section>
   )
+}
+
+const calculationWorkLabel = (value: string) => {
+  switch (value) {
+    case "queued":
+      return m["app.inspector.workQueued"]()
+    case "running":
+      return m["app.inspector.state.running"]()
+    case "succeeded":
+      return m["app.inspector.state.complete"]()
+    case "failed":
+      return m["app.inspector.state.failed"]()
+    default:
+      return m["app.inspector.state.not_requested"]()
+  }
 }
 
 const date = (value: string | number) =>

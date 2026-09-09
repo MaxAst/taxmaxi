@@ -19,7 +19,7 @@ import type { Account, SourceSyncSeed } from "#/lib/dashboard-types"
 import { m } from "#/paraglide/messages"
 import { getLocale } from "#/paraglide/runtime"
 import { clearAuthSessionCookie, getAuthStatus } from "#/server-functions/auth"
-import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
+import { queries, queryKeys, refreshTransactionQueries } from "#/integrations/taxmaxi/queries"
 
 /**
  * Waits for every read to settle, then rethrows the first 401 among them.
@@ -211,11 +211,13 @@ function RouteComponent() {
 
   const onSourceSyncCompleted = useCallback(
     async (sourceId: string) => {
-      await queryClient.invalidateQueries({
-        exact: true,
-        queryKey: queryKeys.sourceOverview(sourceId),
-      })
-      await queryClient.invalidateQueries({ queryKey: queryKeys.transactions() })
+      await Promise.all([
+        queryClient.invalidateQueries({
+          exact: true,
+          queryKey: queryKeys.sourceOverview(sourceId),
+        }),
+        refreshTransactionQueries(queryClient),
+      ])
     },
     [queryClient]
   )

@@ -1305,5 +1305,8 @@
   "app.inspector.state.coinbase_transaction": "Coinbase transaction",
   "app.inspector.state.coinbase_account": "Coinbase account",
   "app.inspector.state.solana_transaction_full": "Full Solana transaction",
-  "app.inspector.state.uncategorized": "Uncategorized"
+  "app.inspector.state.uncategorized": "Uncategorized",
+  "app.inspector.currentWork": "Current calculation work",
+  "app.inspector.workQueued": "Queued",
+  "app.inspector.workUnavailable": "Calculation work status could not be loaded."
 }
