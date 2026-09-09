@@ -157,6 +157,9 @@ representative flow through the read, acceptance, writer, and calculation seams
 that exist. Name the actual inspected facts and where their links are recorded;
 raw source fields may differ from the effective asset or valuation a user sees.
 Expose a missing writer fact before designing a reader around it (ADR 0012).
+When a decision keys on a stored column (a timestamp, a status), trace every
+write of that column, not only the write that records the fact you want; a
+progress or reset write can turn the value into a false negative (#108, D10).
 For reader and UI lifecycle acceptance, verify that the tested states are
 actually produced by writers and reach the read being used. Schema-valid
 fixtures alone do not prove this, even for result-preserving consumers.
