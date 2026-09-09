@@ -8,7 +8,10 @@ const baseLocale = "en" satisfies Locale
 
 const excludedPaths = ["admin", "docs", "api", "dashboard", "app"] as const
 
-type PublicRoutePath = Exclude<RoutePath, `${string}${(typeof excludedPaths)[number]}${string}`>
+type PublicRoutePath = Exclude<
+  RoutePath,
+  "/atelier" | `${string}${(typeof excludedPaths)[number]}${string}`
+>
 
 type UrlPatterns = NonNullable<CompilerOptions["urlPatterns"]>
 type RouteStrategies = NonNullable<CompilerOptions["routeStrategies"]>

@@ -1382,5 +1382,17 @@
   "app.inspector.state.uncategorized": "Nicht kategorisiert",
   "app.inspector.currentWork": "Aktuelle Berechnungsarbeit",
   "app.inspector.workQueued": "In Warteschlange",
-  "app.inspector.workUnavailable": "Der Status der Berechnungsarbeit konnte nicht geladen werden."
+  "app.inspector.workUnavailable": "Der Status der Berechnungsarbeit konnte nicht geladen werden.",
+  "atelier.title": "Atelier",
+  "atelier.introduction": "Entdecke die gemeinsamen Komponenten von TaxMaxi mit erfundenen Beispielen.",
+  "atelier.navigation": "Beispielsammlung",
+  "atelier.approved": "Freigegeben",
+  "atelier.experiments": "Experimente",
+  "atelier.experiments_empty": "Hier erscheinen Experimente. Sie brauchen eine Freigabe, bevor sie zu gemeinsamen Mustern werden.",
+  "atelier.example_title": "Ein einfacher Überblick",
+  "atelier.example_description": "Aktuelle gemeinsame Buttons, Typografie und Oberflächen.",
+  "atelier.example_body": "Beginne mit den wichtigsten Informationen. Zeige weitere Details, wenn sie helfen.",
+  "atelier.example_details": "Dieses erfundene Beispiel verwendet keine Konto-, Wallet- oder Steuerdaten.",
+  "atelier.show_details": "Details anzeigen",
+  "atelier.hide_details": "Details ausblenden"
 }

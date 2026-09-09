@@ -1382,5 +1382,17 @@
   "app.inspector.state.uncategorized": "Uncategorized",
   "app.inspector.currentWork": "Current calculation work",
   "app.inspector.workQueued": "Queued",
-  "app.inspector.workUnavailable": "Calculation work status could not be loaded."
+  "app.inspector.workUnavailable": "Calculation work status could not be loaded.",
+  "atelier.title": "Atelier",
+  "atelier.introduction": "Explore TaxMaxi’s shared components with fictional examples.",
+  "atelier.navigation": "Example collection",
+  "atelier.approved": "Approved",
+  "atelier.experiments": "Experiments",
+  "atelier.experiments_empty": "Experiments will appear here. They need approval before becoming shared patterns.",
+  "atelier.example_title": "A simple overview",
+  "atelier.example_description": "Current shared buttons, typography, and surfaces.",
+  "atelier.example_body": "Start with the essential information. Reveal more detail when it helps.",
+  "atelier.example_details": "This fictional example uses no account, wallet, or tax data.",
+  "atelier.show_details": "Show details",
+  "atelier.hide_details": "Hide details"
 }
