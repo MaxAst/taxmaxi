@@ -5,7 +5,6 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import { Ellipsis, RotateCcw } from "lucide-react"
 import {
   isTaxMaxiUnauthorizedError,
-  type Account as TaxMaxiAccount,
   type SourceOverview,
   type SourceSyncJob,
   type SourceSyncJobInput,
@@ -41,7 +40,7 @@ import {
   type SourceSyncSeed,
   type TaxYear,
 } from "#/lib/dashboard-types"
-import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
+import { queries, queryKeys, setSessionQueryData } from "#/integrations/taxmaxi/queries"
 import { TRANSACTION_PAGE_SIZE, TransactionsTable } from "./transactions-table"
 import { TransactionInspector } from "./transaction-inspector"
 import { SourceSyncIsland, type SourceSyncIslandItem } from "./source-sync-island"
@@ -354,15 +353,16 @@ export function Dashboard({
       // An account read that started before the mark would answer with the
       // older `welcomeSeenAt: null`; cancel it so it cannot replace the mark.
       await queryClient.cancelQueries({ queryKey: queryKeys.account() })
-      // Write only into the session the mark belongs to. Logout unmounts the
-      // dashboard and removes the account entry, and a later login in the
-      // same tab caches another user's account, which must stay untouched.
-      const cached = queryClient.getQueryData<TaxMaxiAccount>(queryKeys.account())
-      if (!dependentReadsAllowed.current || cached?.account.id !== marked.account.id) {
-        return
-      }
+      // Unmount drops the write; `setSessionQueryData` drops it when logout
+      // removed the account entry or another user logged in in the same tab.
+      if (!dependentReadsAllowed.current) return
 
-      queryClient.setQueryData(queryKeys.account(), marked)
+      setSessionQueryData({
+        data: marked,
+        queryClient,
+        queryKey: queryKeys.account(),
+        userId: marked.account.id,
+      })
     }
 
     writeMarkedAccount().catch((error: unknown) => {

@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryObserver } from "@tanstack/react-query"
-import { TaxMaxi } from "taxmaxi"
+import { TaxMaxi, type Account } from "taxmaxi"
 import { describe, expect, it, vi } from "vitest"
 
-import { queries, refreshTransactionQueries } from "#/integrations/taxmaxi/queries"
+import {
+  queries,
+  queryKeys,
+  refreshTransactionQueries,
+  setSessionQueryData,
+} from "#/integrations/taxmaxi/queries"
 
 const getRequestUrl = (input: RequestInfo | URL): string => {
   if (typeof input === "string") {
@@ -256,5 +261,84 @@ describe("transaction writer-signal refresh", () => {
       unsubscribe()
       client.clear()
     }
+  })
+})
+
+// Logout removes every `taxmaxi` query. A response that resolves after that
+// must not write the previous session's data back into the cache (#108 T07).
+describe("session-scoped query writes", () => {
+  const account = (id: string): Account => ({
+    account: {
+      id,
+      email: `${id}@example.test`,
+      displayName: "User",
+      role: "member",
+      emailVerified: true,
+      welcomeSeenAt: null,
+      createdAt: "2025-01-01T00:00:00.000Z",
+      updatedAt: "2025-01-01T00:00:00.000Z",
+    },
+    loginMethods: [],
+  })
+  const userId = "00000000-0000-4000-8000-000000000001"
+  const otherUserId = "00000000-0000-4000-8000-000000000002"
+  const refreshed = {
+    credits: 5,
+    subscriptionStatus: null,
+    currentPeriodEnd: null,
+    cancelAtPeriodEnd: false,
+  }
+
+  it("writes while the cache holds the account of the same session", () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(queryKeys.account(), account(userId))
+
+    setSessionQueryData({
+      data: refreshed,
+      queryClient,
+      queryKey: queryKeys.billingStatus(),
+      userId,
+    })
+
+    expect(queryClient.getQueryData(queryKeys.billingStatus())).toEqual(refreshed)
+  })
+
+  it("writes without a user id as long as an account entry exists", () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(queryKeys.account(), account(userId))
+
+    setSessionQueryData({ data: refreshed, queryClient, queryKey: queryKeys.billingStatus() })
+
+    expect(queryClient.getQueryData(queryKeys.billingStatus())).toEqual(refreshed)
+  })
+
+  it("skips the write once logout removed the account entry", () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(queryKeys.account(), account(userId))
+    queryClient.removeQueries({ queryKey: queryKeys.all })
+
+    setSessionQueryData({ data: refreshed, queryClient, queryKey: queryKeys.billingStatus() })
+    setSessionQueryData({
+      data: refreshed,
+      queryClient,
+      queryKey: queryKeys.billingStatus(),
+      userId,
+    })
+
+    expect(queryClient.getQueryData(queryKeys.billingStatus())).toBeUndefined()
+  })
+
+  it("skips the write when another user is cached", () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(queryKeys.account(), account(otherUserId))
+
+    setSessionQueryData({
+      data: refreshed,
+      queryClient,
+      queryKey: queryKeys.billingStatus(),
+      userId,
+    })
+
+    expect(queryClient.getQueryData(queryKeys.billingStatus())).toBeUndefined()
   })
 })
