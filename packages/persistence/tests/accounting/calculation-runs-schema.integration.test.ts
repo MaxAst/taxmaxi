@@ -579,6 +579,7 @@ describe("calculation-runs schema", () => {
       )
 
       const result: CalculationRunResult = {
+        eventValuations: [],
         status: "partial",
         jurisdiction: JurisdictionCode.make("DE"),
         taxYear: TaxYear.make(2025),

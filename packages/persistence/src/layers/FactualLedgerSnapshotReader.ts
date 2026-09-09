@@ -13,9 +13,9 @@ import {
   MarketQuoteFact,
   ObservedConsiderationFact,
   type AcquisitionCause,
-  type AccountingEvent,
+  AccountingEvent,
   type DispositionCause,
-  type ValuationFact,
+  ValuationFact,
 } from "@my/core/accounting"
 import { decidePrincipalAssetOverride, type PrincipalAssetEffectiveDecision } from "@my/core/assets"
 import { CURRENCIES_BY_CODE, type CurrencyCode } from "@my/core/currency"
@@ -1684,12 +1684,48 @@ export const makeFactualLedgerSnapshotReader = Effect.gen(function* () {
       })
       for (const blocker of movementCorrections.inputBlockers)
         inputBlockerByKey.set(blockerKey(blocker), blocker)
+      const effectiveEvents = events.map(
+        (event) => movementCorrections.effectiveEvents.get(event.id) ?? event
+      )
+      const effectiveValuationFacts = movementCorrections.valuationFacts.sort(compareValuationFacts)
+      const encodedEvents = new Map(
+        effectiveEvents.map((event) => [event.id, Schema.encodeSync(AccountingEvent)(event)])
+      )
+      const encodedValuations = new Map<string, Schema.Codec.Encoded<typeof ValuationFact>[]>()
+      for (const fact of effectiveValuationFacts) {
+        const existing = encodedValuations.get(fact.eventId) ?? []
+        existing.push(Schema.encodeSync(ValuationFact)(fact))
+        encodedValuations.set(fact.eventId, existing)
+      }
+      // Follow the event links recorded above and retain the completed combined inputs.
+      // Correction history remains a separate account of each correction's application.
+      const movements = new Map(
+        [...movementCorrections.movements].map(([targetId, movement]) => {
+          const eventId = eventsByTarget.get(targetId)?.id
+          const classification = movement.corrections.find(
+            (correction) =>
+              correction.application === "applied" &&
+              correction.effective.classificationEvidence !== undefined
+          )?.effective.classificationEvidence
+          return [
+            targetId,
+            {
+              ...movement,
+              effective: {
+                event: eventId === undefined ? null : (encodedEvents.get(eventId) ?? null),
+                valuationFacts: eventId === undefined ? [] : (encodedValuations.get(eventId) ?? []),
+                ...(classification === undefined ? {} : { classificationEvidence: classification }),
+              },
+            },
+          ] as const
+        })
+      )
       return {
-        movements: movementCorrections.movements,
+        movements,
         ledger: {
           correctionInputs: movementCorrections.correctionInputs,
-          events: events.map((event) => movementCorrections.effectiveEvents.get(event.id) ?? event),
-          valuationFacts: movementCorrections.valuationFacts.sort(compareValuationFacts),
+          events: effectiveEvents,
+          valuationFacts: effectiveValuationFacts,
           custodyUnitMembership,
           inputBlockers: [...inputBlockerByKey.values()].sort((left, right) =>
             blockerKey(left).localeCompare(blockerKey(right))

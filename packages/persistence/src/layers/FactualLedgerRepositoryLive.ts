@@ -13,7 +13,8 @@ export const FactualLedgerRepositoryLive = Layer.effect(
   FactualLedgerRepository,
   Effect.map(makeFactualLedgerSnapshotReader, (reader) =>
     FactualLedgerRepository.of({
-      load: (params) => Effect.map(reader.load(params), ({ ledger }) => ledger),
+      load: (params) =>
+        Effect.map(reader.load(params), ({ ledger, movements }) => ({ ...ledger, movements })),
     })
   )
 )
