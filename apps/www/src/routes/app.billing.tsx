@@ -17,7 +17,7 @@ import { Text } from "#/components/ui/typography"
 import { cn } from "#/lib/utils"
 import { m } from "#/paraglide/messages"
 import { getLocale, type Locale } from "#/paraglide/runtime"
-import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
+import { queries, queryKeys, setSessionQueryData } from "#/integrations/taxmaxi/queries"
 import { clearAuthSessionCookie } from "#/server-functions/auth"
 
 const billingSearchSchema = z.object({
@@ -206,7 +206,9 @@ export function BillingPageContent({
   const applyRefreshedStatus = useCallback(
     (refreshed: BillingStatus) => {
       setLiveStatus(refreshed)
-      queryClient.setQueryData(queryKeys.billingStatus(), refreshed)
+      // The post-Checkout poll can run for tens of seconds and outlive a
+      // logout; the write is dropped once the session's account entry is gone.
+      setSessionQueryData({ data: refreshed, queryClient, queryKey: queryKeys.billingStatus() })
     },
     [queryClient]
   )

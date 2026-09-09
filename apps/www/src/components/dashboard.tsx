@@ -15,7 +15,7 @@ import {
 import { appSurfaceClassName } from "#/components/app-workspace"
 import { CalculationStatus } from "#/components/calculation-status"
 import { AssetsTable } from "#/components/assets-table"
-import { FirstSyncWizard } from "#/components/first-sync-wizard"
+import { FIRST_SYNC_WELCOME_VIDEO_ID, FirstSyncWizard } from "#/components/first-sync-wizard"
 import { SourceCards } from "#/components/source-cards"
 import { Button } from "#/components/ui/button"
 import {
@@ -40,7 +40,7 @@ import {
   type SourceSyncSeed,
   type TaxYear,
 } from "#/lib/dashboard-types"
-import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
+import { queries, queryKeys, setSessionQueryData } from "#/integrations/taxmaxi/queries"
 import { TRANSACTION_PAGE_SIZE, TransactionsTable } from "./transactions-table"
 import { TransactionInspector } from "./transaction-inspector"
 import { SourceSyncIsland, type SourceSyncIslandItem } from "./source-sync-island"
@@ -202,6 +202,7 @@ export function Dashboard({
   const [pendingCompletions, setPendingCompletions] = useState<ReadonlyArray<PendingCompletion>>([])
   const observedRunIds = useRef(new Set<string | null>())
   const dependentReadsAllowed = useRef(false)
+  const assetsTabRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     dependentReadsAllowed.current = true
@@ -331,15 +332,62 @@ export function Dashboard({
     enabled: !authenticationLost && !anySourceSynced,
   })
 
+  // The welcome is gated by one server fact, `welcomeSeenAt` (#108 D01). The
+  // `/app` loader seeds the account into the cache; Continue and Skip on the
+  // welcome mark it seen and write the returned account back. The step leaves
+  // as soon as the user clicks, even when the mark fails: the server fact is
+  // the gate, and the next visit shows the welcome again for a retry.
+  const accountQuery = useQuery({
+    ...queries.account(taxmaxi),
+    enabled: !authenticationLost,
+  })
+  const [welcomeDismissed, setWelcomeDismissed] = useState(false)
+  const welcomePending = accountQuery.data?.account.welcomeSeenAt === null && !welcomeDismissed
+  const focusTabsAfterWelcome = useRef(false)
+  const finishWelcome = useCallback(() => {
+    focusTabsAfterWelcome.current = true
+    setWelcomeDismissed(true)
+
+    const writeMarkedAccount = async () => {
+      const marked = await taxmaxi.auth.markWelcomeSeen()
+      // An account read that started before the mark would answer with the
+      // older `welcomeSeenAt: null`; cancel it so it cannot replace the mark.
+      await queryClient.cancelQueries({ queryKey: queryKeys.account() })
+      // Unmount drops the write; `setSessionQueryData` drops it when logout
+      // removed the account entry or another user logged in in the same tab.
+      if (!dependentReadsAllowed.current) return
+
+      setSessionQueryData({
+        data: marked,
+        queryClient,
+        queryKey: queryKeys.account(),
+        userId: marked.account.id,
+      })
+    }
+
+    writeMarkedAccount().catch((error: unknown) => {
+      if (isTaxMaxiUnauthorizedError(error)) {
+        void handleUnauthorized()
+      }
+    })
+  }, [handleUnauthorized, queryClient, taxmaxi])
+
   useEffect(() => {
     if (
       isTaxMaxiUnauthorizedError(portfolioQuery.error) ||
       isTaxMaxiUnauthorizedError(transactionQuery.error) ||
-      isTaxMaxiUnauthorizedError(billingQuery.error)
+      isTaxMaxiUnauthorizedError(billingQuery.error) ||
+      isTaxMaxiUnauthorizedError(accountQuery.error)
     ) {
       void handleUnauthorized()
     }
-  }, [billingQuery.error, handleUnauthorized, portfolioQuery.error, transactionQuery.error])
+  }, [
+    accountQuery.error,
+    billingQuery.error,
+    handleUnauthorized,
+    portfolioQuery.error,
+    transactionQuery.error,
+  ])
 
   const goToNextTransactionPage = () => {
     const nextCursor = transactionQuery.data?.page.nextCursor
@@ -580,20 +628,41 @@ export function Dashboard({
 
   // The island stays mounted above whichever body shows, so a first sync's
   // progress is visible over the wizard and over the tabs alike (#108 D06).
-  const body =
-    firstSync.state === "done" ? null : (
-      <FirstSyncWizard
-        billing={billing}
-        billingRefreshing={billingQuery.isFetching}
-        createWalletSource={createWalletSource === undefined ? undefined : connectWalletSource}
-        islandItemShown={islandShowsTarget}
-        onRetryBilling={() => void billingQuery.refetch()}
-        onStart={startFirstSync}
-        resolveName={resolveName}
-        sourceName={firstSyncTarget?.name ?? null}
-        state={firstSync.state}
-      />
-    )
+  // An unseen welcome shows even in `done`, so a user whose sources synced
+  // before the welcome existed sees it once and then the tabs (#108 D01, D09).
+  const wizardShown = firstSync.state !== "done" || welcomePending
+
+  // The wizard moves focus to its next heading on every screen change, but
+  // when finishing the welcome removes the wizard itself (the dashboard was
+  // already synced) that heading is gone and focus would drop to the body.
+  // The first tab takes it instead, once, right after the finish.
+  useEffect(() => {
+    if (welcomePending || !focusTabsAfterWelcome.current) {
+      return
+    }
+
+    focusTabsAfterWelcome.current = false
+    if (!wizardShown) {
+      assetsTabRef.current?.focus({ preventScroll: true })
+    }
+  }, [welcomePending, wizardShown])
+
+  const body = !wizardShown ? null : (
+    <FirstSyncWizard
+      billing={billing}
+      billingRefreshing={billingQuery.isFetching}
+      createWalletSource={createWalletSource === undefined ? undefined : connectWalletSource}
+      islandItemShown={islandShowsTarget}
+      onRetryBilling={() => void billingQuery.refetch()}
+      onStart={startFirstSync}
+      onWelcomeFinish={finishWelcome}
+      resolveName={resolveName}
+      sourceName={firstSyncTarget?.name ?? null}
+      state={firstSync.state}
+      welcomePending={welcomePending}
+      welcomeVideoId={FIRST_SYNC_WELCOME_VIDEO_ID}
+    />
+  )
 
   return (
     <div className="text-marketing-foreground flex min-h-screen flex-col pt-28 pb-8 sm:pt-32">
@@ -642,7 +711,9 @@ export function Dashboard({
 
               <Tabs defaultValue="assets" className="gap-y-8">
                 <TabsList>
-                  <TabsTrigger value="assets">{m["app.dashboard.tabs.assets"]()}</TabsTrigger>
+                  <TabsTrigger ref={assetsTabRef} value="assets">
+                    {m["app.dashboard.tabs.assets"]()}
+                  </TabsTrigger>
                   <TabsTrigger value="transactions">
                     {m["app.dashboard.tabs.transactions"]()}
                   </TabsTrigger>

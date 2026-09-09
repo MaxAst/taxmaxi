@@ -3,10 +3,12 @@ import {
   keepPreviousData,
   queryOptions,
   type QueryClient,
+  type QueryKey,
 } from "@tanstack/react-query"
 import {
   TaxMaxiError,
   isTaxMaxiUnauthorizedError,
+  type Account,
   type AssetCatalogListInput,
   type AssetExceptionListInput,
   type PendingAssetListInput,
@@ -74,6 +76,32 @@ export const queryKeys = {
   transactionLists: () => [...queryKeys.transactions(), "list"] as const,
   transactionList: (input: TransactionListInput = {}) =>
     [...queryKeys.transactionLists(), input] as const,
+}
+
+/**
+ * Writes `data` to a session-scoped query only while the cache still holds the
+ * account of the session that started the request: logout removes every
+ * `taxmaxi` query, so an absent account entry means that session has ended.
+ * A response that resolves after logout must not repopulate the cache, where
+ * the next login in the same tab could reuse it; pass `userId` when the caller
+ * knows which user the response belongs to, so a different cached user is
+ * left alone too.
+ */
+export const setSessionQueryData = <TData>({
+  data,
+  queryClient,
+  queryKey,
+  userId,
+}: {
+  readonly data: TData
+  readonly queryClient: QueryClient
+  readonly queryKey: QueryKey
+  readonly userId?: string
+}): void => {
+  const cached = queryClient.getQueryData<Account>(queryKeys.account())
+  if (cached === undefined || (userId !== undefined && cached.account.id !== userId)) return
+
+  queryClient.setQueryData(queryKey, data)
 }
 
 /** Refresh list and selected detail after a writer signal, dropping older in-flight delivery. */

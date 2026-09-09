@@ -11,6 +11,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   TaxMaxiError,
+  type Account,
   type BillingCatalog,
   type BillingPromiseResource,
   type BillingStatus,
@@ -44,6 +45,20 @@ const status = (subscriptionStatus: BillingStatus["subscriptionStatus"] = null):
   currentPeriodEnd: null,
   cancelAtPeriodEnd: false,
 })
+
+const sessionAccount: Account = {
+  account: {
+    id: "00000000-0000-4000-8000-000000000001",
+    email: "user@example.test",
+    displayName: "User",
+    role: "member",
+    emailVerified: true,
+    welcomeSeenAt: "2025-01-01T00:00:00.000Z",
+    createdAt: "2025-01-01T00:00:00.000Z",
+    updatedAt: "2025-01-01T00:00:00.000Z",
+  },
+  loginMethods: [],
+}
 
 const deferred = <A,>() => {
   let resolve: (value: A) => void = () => undefined
@@ -114,9 +129,10 @@ const renderBillingPage = async ({
     createTopUpCheckout: topUpCheckout,
     createPortalSession: portal,
   }
-  // The route loader leaves the loaded status in the cache the dashboard's
-  // first-sync wizard reads (#108 D07).
+  // The `/app` loader leaves the session's account and the loaded status in
+  // the cache the dashboard's first-sync wizard reads (#108 D07, D08).
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  queryClient.setQueryData(queryKeys.account(), sessionAccount)
   queryClient.setQueryData(queryKeys.billingStatus(), loadedStatus)
   const rootRoute = createRootRoute({
     component: () => (
@@ -340,6 +356,39 @@ describe("BillingPageContent", () => {
       expect(loadStatus).toHaveBeenCalledTimes(1)
       expect(queryClient.getQueryData(queryKeys.billingStatus())).toEqual(refreshedStatus)
       expect(screen.getByText("5")).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // A logout while the post-Checkout poll is still running removes every
+  // `taxmaxi` query; the poll's late result must not repopulate the cache for
+  // the next login in the same tab.
+  it("leaves billingStatus unset when the poll resolves after logout", async () => {
+    vi.useFakeTimers()
+    const initialStatus = { ...status("active"), credits: 0 }
+    const pending = deferred<BillingStatus>()
+    const loadStatus = vi.fn(() => pending.promise)
+    try {
+      const { queryClient } = await renderBillingPage({
+        checkoutReturnKind: "topUp",
+        initialStatus,
+        loadStatus,
+      })
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      expect(loadStatus).toHaveBeenCalledTimes(1)
+
+      queryClient.removeQueries({ queryKey: queryKeys.all })
+      pending.resolve({ ...status("active"), credits: 5 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      expect(queryClient.getQueryData(queryKeys.billingStatus())).toBeUndefined()
+      expect(queryClient.getQueryData(queryKeys.account())).toBeUndefined()
     } finally {
       vi.useRealTimers()
     }

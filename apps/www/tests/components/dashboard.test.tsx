@@ -9,9 +9,10 @@ import {
   useQuery,
 } from "@tanstack/react-query"
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
-import type { ReactNode } from "react"
+import type { ReactNode, Ref } from "react"
 import {
   TaxMaxi,
+  type Account as TaxMaxiAccount,
   type BillingStatus,
   type PortfolioAssets,
   type PortfolioCalculationStatus,
@@ -118,6 +119,26 @@ const billingStatus = (
   cancelAtPeriodEnd: false,
 })
 
+const WELCOME_SEEN_AT = "2025-03-01T09:00:00.000Z"
+
+/**
+ * The account the `/app` loader puts into the cache before the dashboard
+ * renders. The welcome shows only while `welcomeSeenAt` is null (#108 D01).
+ */
+const sdkAccount = (welcomeSeenAt: string | null): TaxMaxiAccount => ({
+  account: {
+    id: "00000000-0000-4000-8000-000000000001",
+    email: "user@example.test",
+    displayName: "User",
+    role: "member",
+    emailVerified: true,
+    welcomeSeenAt,
+    createdAt: "2025-01-01T00:00:00.000Z",
+    updatedAt: "2025-01-01T00:00:00.000Z",
+  },
+  loginMethods: [],
+})
+
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>()
   return {
@@ -184,7 +205,13 @@ vi.mock("#/components/source-sync-island", () => ({
 vi.mock("#/components/ui/tabs", () => ({
   Tabs: ({ children }: { readonly children: ReactNode }) => <div>{children}</div>,
   TabsList: ({ children }: { readonly children: ReactNode }) => <div>{children}</div>,
-  TabsTrigger: ({ children }: { readonly children: ReactNode }) => <button>{children}</button>,
+  TabsTrigger: ({
+    children,
+    ref,
+  }: {
+    readonly children: ReactNode
+    readonly ref?: Ref<HTMLButtonElement>
+  }) => <button ref={ref}>{children}</button>,
   TabsContent: ({ children }: { readonly children: ReactNode }) => <div>{children}</div>,
 }))
 
@@ -266,6 +293,7 @@ describe("Dashboard transaction pagination", () => {
       transactions: { list: listTransactions },
     } as unknown as TaxMaxi
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
 
     render(
       <QueryClientProvider client={queryClient}>
@@ -322,6 +350,7 @@ describe("Dashboard sync reconnect", () => {
       },
     } as unknown as TaxMaxi
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
     const seeds: ReadonlyArray<SourceSyncSeed> = [
       {
         sourceId: "00000000-0000-4000-8000-000000000201",
@@ -386,6 +415,7 @@ describe("Dashboard calculation refresh", () => {
     onlineManager.setOnline(true)
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" })
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
     currentPortfolio = portfolio()
     portfolioCalls = 0
     transactionCalls = 0
@@ -1234,17 +1264,36 @@ describe("Dashboard calculation refresh", () => {
   })
 })
 
-describe("Dashboard first-sync body (#108 T05, T06)", () => {
+describe("Dashboard first-sync body (#108 T05, T06, T07)", () => {
   let queryClient: QueryClient
   let billingReads: number
   let respondBilling: () => Promise<BillingStatus>
+  let welcomeMarks: number
+  let respondWelcomeMark: () => Promise<TaxMaxiAccount>
+  let accountReads: number
+  let respondAccountRead: () => Promise<TaxMaxiAccount>
 
   beforeEach(() => {
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
     billingReads = 0
     respondBilling = async () => billingStatus(1)
+    welcomeMarks = 0
+    respondWelcomeMark = async () => sdkAccount(WELCOME_SEEN_AT)
+    accountReads = 0
+    respondAccountRead = async () => sdkAccount(null)
     syncState.activeSyncs = []
     testTaxMaxi = {
+      auth: {
+        account: vi.fn(async () => {
+          accountReads += 1
+          return respondAccountRead()
+        }),
+        markWelcomeSeen: vi.fn(async () => {
+          welcomeMarks += 1
+          return respondWelcomeMark()
+        }),
+      },
       billing: {
         status: vi.fn(async () => {
           billingReads += 1
@@ -1284,6 +1333,181 @@ describe("Dashboard first-sync body (#108 T05, T06)", () => {
     )
 
   const assetsTab = () => screen.queryByRole("button", { name: "Assets" })
+
+  describe("welcome step (#108 T07)", () => {
+    const welcomeHeading = () => screen.queryByRole("heading", { name: "Hi, I'm Max." })
+    const cachedWelcomeSeenAt = () =>
+      queryClient.getQueryData<TaxMaxiAccount>(queryKeys.account())?.account.welcomeSeenAt
+    const seedWelcomeUnseen = () => queryClient.setQueryData(queryKeys.account(), sdkAccount(null))
+    // This describe runs on real timers; let a resolved promise chain and React Query's
+    // notifications run to completion.
+    const settle = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+
+    it("shows the welcome ahead of the state step while welcomeSeenAt is null; Continue marks it seen once and writes the account back", async () => {
+      seedWelcomeUnseen()
+      mount([sourceOverview()])
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+      expect(screen.queryByRole("heading", { name: "Ready when you are" })).toBeNull()
+      expect(welcomeMarks).toBe(0)
+
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }))
+
+      expect(welcomeMarks).toBe(1)
+      const ready = await screen.findByRole("heading", { name: "Ready when you are" })
+      expect(document.activeElement).toBe(ready)
+      expect(welcomeHeading()).toBeNull()
+      await waitFor(() => expect(cachedWelcomeSeenAt()).toBe(WELCOME_SEEN_AT))
+      expect(welcomeMarks).toBe(1)
+    })
+
+    it("shows the welcome once over a synced dashboard, then the tabs after Skip", async () => {
+      seedWelcomeUnseen()
+      mount(syncedOverviews)
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+      expect(assetsTab()).toBeNull()
+
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }))
+
+      expect(welcomeMarks).toBe(1)
+      expect(await screen.findByText("No transactions yet.")).toBeTruthy()
+      expect(assetsTab()).toBeTruthy()
+      expect(welcomeHeading()).toBeNull()
+      expect(screen.queryByRole("status", { name: "First sync updates" })).toBeNull()
+      expect(billingReads).toBe(0)
+      await waitFor(() => expect(cachedWelcomeSeenAt()).toBe(WELCOME_SEEN_AT))
+    })
+
+    it("never shows the welcome once welcomeSeenAt is set, and calls nothing on mount", async () => {
+      mount([sourceOverview()])
+
+      expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+      expect(welcomeHeading()).toBeNull()
+      expect(welcomeMarks).toBe(0)
+    })
+
+    it("still advances when the mark fails, leaving the cached fact null for a retry on the next visit", async () => {
+      seedWelcomeUnseen()
+      respondWelcomeMark = async () => {
+        throw new Error("offline")
+      }
+      mount([sourceOverview()])
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }))
+
+      expect(welcomeMarks).toBe(1)
+      expect(await screen.findByRole("heading", { name: "Ready when you are" })).toBeTruthy()
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(cachedWelcomeSeenAt()).toBeNull()
+      expect(welcomeHeading()).toBeNull()
+    })
+
+    it("moves focus to the first tab when finishing the welcome shows the tabs", async () => {
+      seedWelcomeUnseen()
+      mount(syncedOverviews)
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }))
+
+      await waitFor(() => expect(assetsTab()).toBeTruthy())
+      expect(document.activeElement).toBe(assetsTab())
+      expect(welcomeHeading()).toBeNull()
+    })
+
+    it("drops a mark that resolves after logout removed the client state", async () => {
+      let resolveWelcomeMark: (account: TaxMaxiAccount) => void = () => {}
+      respondWelcomeMark = () =>
+        new Promise((resolve) => {
+          resolveWelcomeMark = resolve
+        })
+      seedWelcomeUnseen()
+      const { unmount } = mount(syncedOverviews)
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }))
+      expect(welcomeMarks).toBe(1)
+
+      // Logout: the dashboard unmounts and the taxmaxi queries are removed.
+      unmount()
+      queryClient.removeQueries({ queryKey: queryKeys.all })
+
+      resolveWelcomeMark(sdkAccount(WELCOME_SEEN_AT))
+      await settle()
+
+      expect(queryClient.getQueryData(queryKeys.account())).toBeUndefined()
+    })
+
+    it("never writes a late mark over another user's cached account", async () => {
+      let resolveWelcomeMark: (account: TaxMaxiAccount) => void = () => {}
+      respondWelcomeMark = () =>
+        new Promise((resolve) => {
+          resolveWelcomeMark = resolve
+        })
+      seedWelcomeUnseen()
+      mount(syncedOverviews)
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }))
+      expect(welcomeMarks).toBe(1)
+
+      // Another user logs in in the same tab before the first user's mark resolves.
+      const unseen = sdkAccount(null)
+      const otherUser: TaxMaxiAccount = {
+        ...unseen,
+        account: {
+          ...unseen.account,
+          email: "other@example.test",
+          id: "00000000-0000-4000-8000-000000000002",
+        },
+      }
+      queryClient.removeQueries({ queryKey: queryKeys.all })
+      queryClient.setQueryData(queryKeys.account(), otherUser)
+
+      resolveWelcomeMark(sdkAccount(WELCOME_SEEN_AT))
+      await settle()
+
+      expect(queryClient.getQueryData(queryKeys.account())).toEqual(otherUser)
+    })
+
+    it("keeps the mark when an account read that started earlier resolves later with the old fact", async () => {
+      let resolveAccountRead: (account: TaxMaxiAccount) => void = () => {}
+      respondAccountRead = () =>
+        new Promise((resolve) => {
+          resolveAccountRead = resolve
+        })
+      // A stale cached account starts a background read when the query mounts.
+      queryClient.setQueryData(queryKeys.account(), sdkAccount(null), {
+        updatedAt: Date.now() - 6 * 60 * 1000,
+      })
+      mount([sourceOverview()])
+
+      expect(await screen.findByRole("heading", { name: "Hi, I'm Max." })).toBeTruthy()
+      await waitFor(() => expect(accountReads).toBe(1))
+
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }))
+      expect(welcomeMarks).toBe(1)
+      await waitFor(() => expect(cachedWelcomeSeenAt()).toBe(WELCOME_SEEN_AT))
+
+      resolveAccountRead(sdkAccount(null))
+      await settle()
+
+      expect(cachedWelcomeSeenAt()).toBe(WELCOME_SEEN_AT)
+      expect(accountReads).toBe(1)
+    })
+  })
 
   it("shows the wizard instead of the tabs while no source has synced", async () => {
     mount([sourceOverview()])
