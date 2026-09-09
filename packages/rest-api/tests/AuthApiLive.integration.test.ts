@@ -95,6 +95,51 @@ const readStoredVerificationRequest = ({ requestId }: { readonly requestId: stri
     Effect.scoped
   )
 
+const countStoredVerificationRequests = ({ email }: { readonly email: string }) =>
+  Effect.gen(function* () {
+    const db = yield* drizzle
+    const rows = yield* db
+      .select({ email: schema.emailVerificationRequests.email })
+      .from(schema.emailVerificationRequests)
+    return rows.filter((row) => row.email === email).length
+  }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+
+/**
+ * Push a request's last send into the past, so the resend rule (60 s
+ * cooldown) lets the next send through without waiting for real time.
+ */
+const backdateLastSentAt = ({
+  requestId,
+  seconds,
+}: {
+  readonly requestId: string
+  readonly seconds: number
+}) =>
+  runTestSql({
+    statement: `
+      UPDATE email_verification_requests
+      SET last_sent_at = last_sent_at - interval '${seconds} seconds'
+      WHERE id = '${EmailVerificationRequestId.make(requestId)}'
+    `,
+  })
+
+/**
+ * Whole seconds from `fromMillis` until the request expires, rounded up the
+ * way the service rounds `retryAfterSeconds`.
+ */
+const secondsUntil = ({
+  expiresAtMillis,
+  fromMillis,
+}: {
+  readonly expiresAtMillis: number
+  readonly fromMillis: number
+}): number => Math.ceil((expiresAtMillis - fromMillis) / 1000)
+
+const RateLimitedBody = Schema.Struct({ retryAfterSeconds: Schema.Number })
+
+const readRetryAfterSeconds = (body: unknown): number =>
+  Schema.decodeUnknownSync(RateLimitedBody)(body).retryAfterSeconds
+
 const readStoredDisplayNames = () =>
   Effect.gen(function* () {
     const db = yield* drizzle
@@ -720,6 +765,9 @@ describe("AuthApiLive integration", () => {
         expect(registeredRequest?.lastSentAt.epochMillis).toBeGreaterThanOrEqual(testStartMillis)
         expect(registeredRequest?.lastSentAt.epochMillis).toBeLessThanOrEqual(afterRegisterMillis)
 
+        // The register send starts the 60 s cooldown; push it out of the way.
+        yield* backdateLastSentAt({ requestId: firstVerificationRequestId, seconds: 61 })
+
         const resendResponse = yield* postJson({
           handler,
           path: "/auth/resend-verification",
@@ -1098,6 +1146,313 @@ describe("AuthApiLive integration", () => {
         expect(reusedRequest?.lastSentAt.epochMillis).toBeLessThanOrEqual(afterLoginMillis)
       }).pipe(Effect.scoped)
   )
+
+  it.effect("refuses a resend inside the cooldown with the seconds left and sends nothing", () =>
+    Effect.gen(function* () {
+      const { handler, sentVerificationCodes } = yield* makeAuthHandlerScoped
+
+      const registerResponse = yield* postJson({
+        handler,
+        path: "/auth/register",
+        payload: {
+          email: `cooldown-${nextTestUuid()}@taxmaxi.test`,
+          password: "password123",
+        },
+      })
+
+      expect(registerResponse.status).toBe(201)
+
+      const verificationRequestId = yield* Effect.sync(() =>
+        getCookieValue({
+          setCookies: getSetCookies(registerResponse),
+          name: "taxmaxi_verification",
+        })
+      )
+      const registeredRequest = yield* readStoredVerificationRequest({
+        requestId: verificationRequestId,
+      })
+
+      const resendResponse = yield* postJson({
+        handler,
+        path: "/auth/resend-verification",
+        payload: {},
+        cookie: makeCookieHeader({
+          taxmaxi_verification: verificationRequestId,
+        }),
+      })
+
+      expect(resendResponse.status).toBe(429)
+      const body = yield* jsonBody(resendResponse)
+      expect(body).toEqual({
+        _tag: "VerificationResendRateLimitedError",
+        retryAfterSeconds: expect.any(Number),
+      })
+      const retryAfterSeconds = readRetryAfterSeconds(body)
+      expect(retryAfterSeconds).toBeGreaterThanOrEqual(1)
+      expect(retryAfterSeconds).toBeLessThanOrEqual(60)
+      // No cookie rotation, no second email, no new row, no moved send time.
+      expect(getSetCookies(resendResponse)).toHaveLength(0)
+      expect(sentVerificationCodes).toHaveLength(1)
+
+      const untouchedRequest = yield* readStoredVerificationRequest({
+        requestId: verificationRequestId,
+      })
+      expect(untouchedRequest?.sendCount).toBe(1)
+      expect(untouchedRequest?.lastSentAt.epochMillis).toBe(
+        registeredRequest?.lastSentAt.epochMillis
+      )
+    }).pipe(Effect.scoped)
+  )
+
+  it.effect("refuses the sixth send of one request until it expires", () =>
+    Effect.gen(function* () {
+      const { handler, sentVerificationCodes } = yield* makeAuthHandlerScoped
+
+      const registerResponse = yield* postJson({
+        handler,
+        path: "/auth/register",
+        payload: {
+          email: `capped-${nextTestUuid()}@taxmaxi.test`,
+          password: "password123",
+        },
+      })
+
+      expect(registerResponse.status).toBe(201)
+
+      let verificationRequestId = yield* Effect.sync(() =>
+        getCookieValue({
+          setCookies: getSetCookies(registerResponse),
+          name: "taxmaxi_verification",
+        })
+      )
+
+      // Register was send 1; four resends past the cooldown make sends 2 to 5.
+      for (let send = 2; send <= 5; send += 1) {
+        yield* backdateLastSentAt({ requestId: verificationRequestId, seconds: 61 })
+
+        const resendResponse = yield* postJson({
+          handler,
+          path: "/auth/resend-verification",
+          payload: {},
+          cookie: makeCookieHeader({
+            taxmaxi_verification: verificationRequestId,
+          }),
+        })
+
+        expect(resendResponse.status).toBe(200)
+        verificationRequestId = yield* Effect.sync(() =>
+          getCookieValue({
+            setCookies: getSetCookies(resendResponse),
+            name: "taxmaxi_verification",
+          })
+        )
+        expect(sentVerificationCodes).toHaveLength(send)
+      }
+
+      const fifthRequest = yield* readStoredVerificationRequest({
+        requestId: verificationRequestId,
+      })
+      expect(fifthRequest?.sendCount).toBe(5)
+      const expiresAtMillis = fifthRequest?.expiresAt.epochMillis ?? Number.NaN
+
+      // A resend is refused by the cap whether or not the last send is still
+      // inside the cooldown, and the wait is always the time until the
+      // request expires, rounded up to whole seconds, as the resend table on
+      // #133 says.
+      const expectCappedResend = ({
+        description,
+        lastSentAtMillis,
+      }: {
+        readonly description: string
+        readonly lastSentAtMillis: number | undefined
+      }) =>
+        Effect.gen(function* () {
+          const beforeMillis = Timestamp.now().epochMillis
+          const response = yield* postJson({
+            handler,
+            path: "/auth/resend-verification",
+            payload: {},
+            cookie: makeCookieHeader({
+              taxmaxi_verification: verificationRequestId,
+            }),
+          })
+          const afterMillis = Timestamp.now().epochMillis
+
+          expect(response.status, description).toBe(429)
+          const body = yield* jsonBody(response)
+          expect(body, description).toEqual({
+            _tag: "VerificationResendRateLimitedError",
+            retryAfterSeconds: expect.any(Number),
+          })
+          const retryAfterSeconds = readRetryAfterSeconds(body)
+          // Never the cooldown remainder: that would be 60 or less.
+          expect(retryAfterSeconds, description).toBeGreaterThan(60)
+          expect(retryAfterSeconds, description).toBeGreaterThanOrEqual(
+            secondsUntil({ expiresAtMillis, fromMillis: afterMillis })
+          )
+          expect(retryAfterSeconds, description).toBeLessThanOrEqual(
+            secondsUntil({ expiresAtMillis, fromMillis: beforeMillis })
+          )
+          expect(getSetCookies(response), description).toHaveLength(0)
+          expect(sentVerificationCodes, description).toHaveLength(5)
+
+          const cappedRequest = yield* readStoredVerificationRequest({
+            requestId: verificationRequestId,
+          })
+          expect(cappedRequest?.sendCount, description).toBe(5)
+          expect(cappedRequest?.code, description).toBe(fifthRequest?.code)
+          expect(cappedRequest?.lastSentAt.epochMillis, description).toBe(lastSentAtMillis)
+        })
+
+      // Sixth resend at once, inside the cooldown of the fifth send.
+      yield* expectCappedResend({
+        description: "sixth resend inside the cooldown",
+        lastSentAtMillis: fifthRequest?.lastSentAt.epochMillis,
+      })
+
+      // Seventh resend after the cooldown has passed.
+      yield* backdateLastSentAt({ requestId: verificationRequestId, seconds: 61 })
+      const backdatedFifthRequest = yield* readStoredVerificationRequest({
+        requestId: verificationRequestId,
+      })
+      yield* expectCappedResend({
+        description: "seventh resend after the cooldown",
+        lastSentAtMillis: backdatedFifthRequest?.lastSentAt.epochMillis,
+      })
+    }).pipe(Effect.scoped)
+  )
+
+  it.effect("treats a resend on an expired request as a missing flow and writes nothing", () =>
+    Effect.gen(function* () {
+      const { handler, sentVerificationCodes } = yield* makeAuthHandlerScoped
+
+      const email = `expired-${nextTestUuid()}@taxmaxi.test`
+      const registerResponse = yield* postJson({
+        handler,
+        path: "/auth/register",
+        payload: {
+          email,
+          password: "password123",
+        },
+      })
+
+      expect(registerResponse.status).toBe(201)
+
+      const verificationRequestId = yield* Effect.sync(() =>
+        getCookieValue({
+          setCookies: getSetCookies(registerResponse),
+          name: "taxmaxi_verification",
+        })
+      )
+
+      // Expire the request and push its send past the cooldown, so only the
+      // expiry can refuse the resend.
+      yield* runTestSql({
+        statement: `
+          UPDATE email_verification_requests
+          SET expires_at = now() - interval '1 second',
+              last_sent_at = last_sent_at - interval '61 seconds'
+          WHERE id = '${EmailVerificationRequestId.make(verificationRequestId)}'
+        `,
+      })
+      const expiredRequest = yield* readStoredVerificationRequest({
+        requestId: verificationRequestId,
+      })
+
+      const resendResponse = yield* postJson({
+        handler,
+        path: "/auth/resend-verification",
+        payload: {},
+        cookie: makeCookieHeader({
+          taxmaxi_verification: verificationRequestId,
+        }),
+      })
+
+      expect(resendResponse.status).toBe(400)
+      expect(yield* jsonBody(resendResponse)).toMatchObject({
+        _tag: "EmailVerificationFlowMissingError",
+      })
+      // No cookie rotation, no second email, no new row, no moved send facts.
+      expect(getSetCookies(resendResponse)).toHaveLength(0)
+      expect(sentVerificationCodes).toHaveLength(1)
+      expect(yield* countStoredVerificationRequests({ email })).toBe(1)
+
+      const untouchedRequest = yield* readStoredVerificationRequest({
+        requestId: verificationRequestId,
+      })
+      expect(untouchedRequest).toEqual(expiredRequest)
+      expect(untouchedRequest?.sendCount).toBe(1)
+    }).pipe(Effect.scoped)
+  )
+
+  it.effect("keeps the cookie and sends nothing on an unverified login inside the cooldown", () =>
+    Effect.gen(function* () {
+      const { handler, sentVerificationCodes } = yield* makeAuthHandlerScoped
+
+      const email = `quiet-${nextTestUuid()}@taxmaxi.test`
+      const password = "password123"
+
+      const registerResponse = yield* postJson({
+        handler,
+        path: "/auth/register",
+        payload: {
+          email,
+          password,
+        },
+      })
+
+      expect(registerResponse.status).toBe(201)
+
+      const registerVerificationRequestId = yield* Effect.sync(() =>
+        getCookieValue({
+          setCookies: getSetCookies(registerResponse),
+          name: "taxmaxi_verification",
+        })
+      )
+      const registeredRequest = yield* readStoredVerificationRequest({
+        requestId: registerVerificationRequestId,
+      })
+
+      const loginResponse = yield* postJson({
+        handler,
+        path: "/auth/login",
+        payload: {
+          provider: "local",
+          credentials: {
+            email,
+            password,
+          },
+        },
+      })
+
+      expect(loginResponse.status).toBe(403)
+      expect(yield* jsonBody(loginResponse)).toMatchObject({
+        _tag: "EmailVerificationRequiredError",
+        email,
+      })
+
+      const loginVerificationRequestId = yield* Effect.sync(() =>
+        getCookieValue({
+          setCookies: getSetCookies(loginResponse),
+          name: "taxmaxi_verification",
+        })
+      )
+
+      // The cookie is restored, but the register send is still inside the
+      // cooldown, so nothing is sent and the send facts do not move.
+      expect(loginVerificationRequestId).toBe(registerVerificationRequestId)
+      expect(sentVerificationCodes).toHaveLength(1)
+
+      const untouchedRequest = yield* readStoredVerificationRequest({
+        requestId: registerVerificationRequestId,
+      })
+      expect(untouchedRequest?.sendCount).toBe(1)
+      expect(untouchedRequest?.lastSentAt.epochMillis).toBe(
+        registeredRequest?.lastSentAt.epochMillis
+      )
+    }).pipe(Effect.scoped)
+  )
+
   it.effect("lists enabled providers with capability flags and no display text", () =>
     Effect.gen(function* () {
       const { handler } = yield* makeAuthHandlerScoped

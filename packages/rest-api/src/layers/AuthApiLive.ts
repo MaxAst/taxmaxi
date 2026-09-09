@@ -61,6 +61,7 @@ import {
   EmailVerificationCodeInvalidError,
   EmailVerificationCodeExpiredError,
   EmailVerificationRequiredError,
+  VerificationResendRateLimitedError,
   UserExistsError,
   SessionInvalidError,
   IdentityLinkedError,
@@ -93,6 +94,7 @@ import {
   isEmailVerificationCodeMismatchError,
   isEmailVerificationRequestExpiredError,
   isEmailVerificationRequestNotFoundError,
+  isEmailVerificationResendLimitedError,
   isPasswordTooWeakError,
   isUserAlreadyExistsError,
   isProviderNotEnabledError,
@@ -849,7 +851,8 @@ export const AuthApiLive = HttpApiBuilder.group(TaxMaxiApi, "auth", (handlers) =
 
           const verificationRequest = yield* authService.resendEmailVerification(requestId).pipe(
             Effect.tapError((error) =>
-              isEmailVerificationRequestNotFoundError(error)
+              isEmailVerificationRequestNotFoundError(error) ||
+              isEmailVerificationResendLimitedError(error)
                 ? Effect.void
                 : logAuthHandlerError({
                     message: "Failed to resend the verification code",
@@ -860,6 +863,11 @@ export const AuthApiLive = HttpApiBuilder.group(TaxMaxiApi, "auth", (handlers) =
             Effect.mapError((error) => {
               if (isEmailVerificationRequestNotFoundError(error)) {
                 return new EmailVerificationFlowMissingError({})
+              }
+              if (isEmailVerificationResendLimitedError(error)) {
+                return new VerificationResendRateLimitedError({
+                  retryAfterSeconds: error.retryAfterSeconds,
+                })
               }
 
               return internalAuthError("Failed to resend the verification code")

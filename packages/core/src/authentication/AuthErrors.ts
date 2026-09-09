@@ -9,6 +9,7 @@
  * - 401 Unauthorized: InvalidCredentialsError, SessionExpiredError, SessionNotFoundError, ProviderAuthFailedError
  * - 404 Not Found: UserNotFoundError, ProviderNotEnabledError
  * - 409 Conflict: UserAlreadyExistsError, IdentityAlreadyLinkedError
+ * - 429 Too Many Requests: EmailVerificationResendLimitedError
  *
  * @module AuthErrors
  */
@@ -426,6 +427,43 @@ export const isEmailVerificationRequestExpiredError = Schema.is(
   EmailVerificationRequestExpiredError
 )
 
+// =============================================================================
+// 429 Too Many Requests Errors - Rate limits
+// =============================================================================
+
+/**
+ * EmailVerificationResendLimitedError - Resend refused by the resend rule
+ *
+ * Returned when a resend arrives inside the cooldown after the last send, or
+ * when the request lineage has used all its sends. `retryAfterSeconds` is the
+ * wait until a resend can succeed: the rest of the cooldown, or the time until
+ * the request expires when the lineage is capped. Nothing is written and no
+ * email is sent.
+ *
+ * HTTP Status: 429 Too Many Requests
+ */
+export class EmailVerificationResendLimitedError extends Schema.TaggedError<EmailVerificationResendLimitedError>()(
+  "EmailVerificationResendLimitedError",
+  {
+    retryAfterSeconds: Schema.Finite.pipe(
+      Schema.check(Schema.isInt()),
+      Schema.check(Schema.isGreaterThan(0))
+    ).annotate({
+      description: "Seconds to wait before a resend can succeed",
+    }),
+  },
+  { httpApiStatus: 429 }
+) {
+  override get message(): string {
+    return `Verification code resend is limited; retry after ${this.retryAfterSeconds} seconds`
+  }
+}
+
+/**
+ * Type guard for EmailVerificationResendLimitedError
+ */
+export const isEmailVerificationResendLimitedError = Schema.is(EmailVerificationResendLimitedError)
+
 /**
  * OAuthStateError - OAuth state mismatch (CSRF protection)
  *
@@ -545,6 +583,7 @@ export type AuthError =
   | EmailVerificationRequestNotFoundError
   | EmailVerificationCodeMismatchError
   | EmailVerificationRequestExpiredError
+  | EmailVerificationResendLimitedError
   | OAuthStateError
   | SessionCleanupError
   | AuthProcessingError
@@ -585,6 +624,8 @@ export const AUTH_ERROR_STATUS_CODES = {
   EmailVerificationCodeMismatchError: 400,
   EmailVerificationRequestExpiredError: 400,
   OAuthStateError: 400,
+  // 429 Too Many Requests
+  EmailVerificationResendLimitedError: 429,
   // 500 Internal Server Error
   SessionCleanupError: 500,
   AuthProcessingError: 500,

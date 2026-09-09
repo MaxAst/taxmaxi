@@ -160,6 +160,27 @@ export class EmailVerificationCodeExpiredError extends Schema.TaggedError<EmailV
 ) {}
 
 /**
+ * VerificationResendRateLimitedError - Resend refused by the resend rule (429)
+ *
+ * `retryAfterSeconds` is the wait until a resend can succeed: the rest of the
+ * cooldown after the last send, or the time until the pending request expires
+ * when it has used all its sends. A number only, never display text; the
+ * client renders its own countdown.
+ */
+export class VerificationResendRateLimitedError extends Schema.TaggedError<VerificationResendRateLimitedError>()(
+  "VerificationResendRateLimitedError",
+  {
+    retryAfterSeconds: Schema.Finite.pipe(
+      Schema.check(Schema.isInt()),
+      Schema.check(Schema.isGreaterThan(0))
+    ).annotate({
+      description: "Seconds to wait before a resend can succeed",
+    }),
+  },
+  { httpApiStatus: 429 }
+) {}
+
+/**
  * ProviderAuthError - External provider authentication failed (401)
  */
 export class ProviderAuthError extends Schema.TaggedError<ProviderAuthError>()(
@@ -691,12 +712,16 @@ const verifyEmail = HttpApiEndpoint.post("verifyEmail", "/verify-email", {
  */
 const resendVerification = HttpApiEndpoint.post("resendVerification", "/resend-verification", {
   success: VerificationFlowResponse,
-  error: [EmailVerificationFlowMissingError, InternalServerError],
+  error: [
+    EmailVerificationFlowMissingError,
+    VerificationResendRateLimitedError,
+    InternalServerError,
+  ],
 }).annotateMerge(
   OpenApi.annotations({
     summary: "Resend verification code",
     description:
-      "Replace the pending local email verification code and continue the verification flow.",
+      "Replace the pending local email verification code and continue the verification flow. Refused with 429 inside the 60 second cooldown after the last send, or once the pending request has been sent five times; `retryAfterSeconds` says how long to wait.",
   })
 )
 
