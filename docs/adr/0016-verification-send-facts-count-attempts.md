@@ -10,7 +10,7 @@ A local sign-up sends an eight-character code by email. The person can ask for a
 
 ## Consequences
 
-The limits stay tight when the email provider is flaky: after a provider error the person waits one minute and has one send fewer. That is the accepted cost; the limits guard against spam and brute force, and a provider error is rare.
+The limits stay tight when the email provider is flaky: after a provider error the person always waits one minute, and the failed delivery uses one of the five sends when it was a first send or an explicit resend, because a login-triggered reuse of an active request does not advance `send_count`. That is the accepted cost; the limits guard against spam and brute force, and a provider error is rare.
 
 Two concurrent resends for one user cannot both count as one send. An unverified login that loses a race against a resend reuses the resend's row instead of replacing it, so the count never resets inside a lineage.
 
