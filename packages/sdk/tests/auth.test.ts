@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest"
+import { AuthApi } from "@my/rest-api/contracts"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
+import { resolveAt } from "effect/SchemaAST"
 import {
   TaxMaxi,
   TaxMaxiError,
@@ -73,6 +75,61 @@ const RESEND_LIMITED_BODY = {
   _tag: "VerificationResendRateLimitedError",
   retryAfterSeconds: 42,
 } as const
+
+const USER_EXISTS_BODY = {
+  _tag: "UserExistsError",
+  email: "max@example.com",
+  message: "A user with this email already exists",
+} as const
+
+const CODE_EXPIRED_BODY = {
+  _tag: "EmailVerificationCodeExpiredError",
+  message: "Verification code has expired",
+} as const
+
+// One sample response per error the local-auth endpoints declare, as the API
+// sends it. The declared-status test below walks the endpoint contracts, so
+// an error added to one of them fails that test until a response is added.
+const DECLARED_ERROR_RESPONSES: ReadonlyArray<{
+  readonly status: number
+  readonly body: { readonly _tag: string; readonly [field: string]: unknown }
+}> = [
+  { status: 400, body: { _tag: "AuthValidationError", message: "Invalid email", field: "email" } },
+  { status: 400, body: PASSWORD_WEAK_BODY },
+  { status: 409, body: USER_EXISTS_BODY },
+  { status: 500, body: { _tag: "InternalServerError", message: "boom", requestId: null } },
+  { status: 400, body: { _tag: "EmailVerificationFlowMissingError", message: "No flow" } },
+  { status: 400, body: { _tag: "EmailVerificationCodeInvalidError", message: "Invalid code" } },
+  { status: 400, body: CODE_EXPIRED_BODY },
+  { status: 429, body: RESEND_LIMITED_BODY },
+  { status: 401, body: { _tag: "AuthUnauthorizedError", message: "Invalid credentials" } },
+  { status: 403, body: VERIFICATION_REQUIRED_BODY },
+  { status: 401, body: { _tag: "ProviderAuthError", provider: "coinbase", reason: "refused" } },
+  { status: 404, body: { _tag: "ProviderNotFoundError", provider: "coinbase", message: "Off" } },
+  { status: 400, body: { _tag: "OAuthStateInvalidError", provider: "coinbase", message: "Bad" } },
+]
+
+const LOCAL_AUTH_INPUT = { email: "max@example.com", password: "kNmGP3sW_ygVLdcNVbxU" }
+
+const LOCAL_AUTH_ENDPOINTS = [
+  "getProviders",
+  "register",
+  "verifyEmail",
+  "resendVerification",
+  "login",
+] as const
+
+// The SDK method behind each local-auth endpoint, called through the Promise API.
+const CALL_LOCAL_AUTH_ENDPOINT: Record<
+  (typeof LOCAL_AUTH_ENDPOINTS)[number],
+  (client: TaxMaxi) => Promise<unknown>
+> = {
+  getProviders: (client) => client.auth.providers(),
+  register: (client) => client.auth.register(LOCAL_AUTH_INPUT),
+  verifyEmail: (client) => client.auth.verifyEmail({ code: "ABCD1234" }),
+  resendVerification: (client) => client.auth.resendVerification(),
+  login: (client) => client.auth.login(LOCAL_AUTH_INPUT),
+}
 
 type CapturedRequest = {
   readonly method: string
@@ -341,6 +398,82 @@ describe("auth SDK error helpers", () => {
         code: "VerificationResendRateLimitedError",
       })
       expect(getTaxMaxiRetryAfterSeconds(promiseError)).toBe(42)
+    })
+  )
+
+  it.effect("rejects a 409 UserExistsError register refusal with its declared status", () =>
+    Effect.gen(function* () {
+      const client = makeBrowserClient({ body: USER_EXISTS_BODY, status: 409, requests: [] })
+      const input = { email: "max@example.com", password: "kNmGP3sW_ygVLdcNVbxU" }
+
+      const effectError = yield* client.effect.auth.register(input).pipe(Effect.flip)
+      expect(effectError).toMatchObject({ _tag: "UserExistsError", email: "max@example.com" })
+
+      const promiseError = yield* rejectionOf(client.auth.register(input))
+      expect(Schema.is(TaxMaxiError)(promiseError)).toBe(true)
+      expect(promiseError).toMatchObject({ status: 409, code: "UserExistsError" })
+    })
+  )
+
+  it.effect(
+    "rejects a 400 EmailVerificationCodeExpiredError verify refusal with its declared status",
+    () =>
+      Effect.gen(function* () {
+        const client = makeBrowserClient({ body: CODE_EXPIRED_BODY, status: 400, requests: [] })
+
+        const effectError = yield* client.effect.auth
+          .verifyEmail({ code: "ABCD1234" })
+          .pipe(Effect.flip)
+        expect(effectError).toMatchObject({ _tag: "EmailVerificationCodeExpiredError" })
+
+        const promiseError = yield* rejectionOf(client.auth.verifyEmail({ code: "ABCD1234" }))
+        expect(Schema.is(TaxMaxiError)(promiseError)).toBe(true)
+        expect(promiseError).toMatchObject({
+          status: 400,
+          code: "EmailVerificationCodeExpiredError",
+        })
+      })
+  )
+
+  it.effect("maps every error declared on the local-auth endpoints to its declared status", () =>
+    Effect.gen(function* () {
+      for (const name of LOCAL_AUTH_ENDPOINTS) {
+        const call = CALL_LOCAL_AUTH_ENDPOINT[name]
+
+        for (const errorSchema of AuthApi.endpoints[name].error) {
+          const errorName = resolveAt<string>("identifier")(errorSchema.ast) ?? "unnamed error"
+          const declaredStatus = resolveAt<number>("httpApiStatus")(errorSchema.ast)
+          const matches: Array<{ readonly status: number; readonly code: string }> = []
+
+          for (const response of DECLARED_ERROR_RESPONSES) {
+            const client = makeBrowserClient({ ...response, requests: [] })
+            const promiseError = yield* rejectionOf(call(client))
+
+            // The generated client decodes the body into the declared class;
+            // the Promise API keeps that instance as `cause`.
+            if (
+              Schema.is(TaxMaxiError)(promiseError) &&
+              Schema.is(errorSchema)(promiseError.cause)
+            ) {
+              matches.push({ status: promiseError.status, code: promiseError.code ?? "" })
+              expect(promiseError.status, `${name}: ${errorName}`).toBe(response.status)
+              // A plain body, as a caller may hand it in, maps the same way.
+              expect(toTaxMaxiError(response.body), `${name}: ${errorName}`).toMatchObject({
+                status: response.status,
+                code: response.body._tag,
+              })
+            }
+          }
+
+          // A declared error no sample response reaches is one these tests
+          // do not know yet; the name says which response (and helper) to add.
+          expect(matches, `${name}: no sample response for ${errorName}`).toHaveLength(1)
+          expect(matches[0], `${name}: ${errorName}`).toEqual({
+            status: declaredStatus,
+            code: errorName,
+          })
+        }
+      }
     })
   )
 

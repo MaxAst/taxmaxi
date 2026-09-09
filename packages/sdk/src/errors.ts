@@ -9,6 +9,7 @@ import {
   AssetLookupNotFoundError,
   AssetLookupValidationError,
   AssetStaleRevisionError,
+  AuthApi,
   AuthValidationError,
   EmailVerificationRequiredError,
   PasswordWeakError,
@@ -27,6 +28,7 @@ import * as Schema from "effect/Schema"
 import type * as SchemaAST from "effect/SchemaAST"
 import { resolveAt } from "effect/SchemaAST"
 import { HttpClientError } from "effect/unstable/http"
+import type { HttpApiEndpoint } from "effect/unstable/httpapi"
 import type { TaxMaxiTransactionOverrideError } from "./transaction-overrides/index.ts"
 import type { TaxMaxiAssetOverrideError } from "./asset-overrides/index.ts"
 
@@ -60,8 +62,9 @@ type SchemaConstructor = {
   readonly ast: SchemaAST.AST
 }
 
+// Schema classes are functions, so `error.constructor` is a function here.
 const hasSchemaAst = (value: unknown): value is SchemaConstructor =>
-  typeof value === "object" && value !== null && "ast" in value
+  (typeof value === "object" || typeof value === "function") && value !== null && "ast" in value
 
 const getErrorCode = (error: unknown): string | undefined => {
   const record = getErrorRecord(error)
@@ -99,12 +102,15 @@ const getFieldErrors = (error: unknown): ReadonlyArray<TaxMaxiFieldError> => {
   return [{ field, message: error.message }]
 }
 
+// Errors the generated client yields are instances of their declared schema
+// class, and each class carries its `httpApiStatus` annotation. A class with
+// no status falls through to the code-based lookup.
 const getAnnotatedErrorStatus = (error: unknown): number | undefined => {
   if (!(error instanceof Error) || !hasSchemaAst(error.constructor)) {
     return undefined
   }
 
-  return resolveAt<number>("httpApiStatus")(error.constructor.ast) ?? 500
+  return resolveAt<number>("httpApiStatus")(error.constructor.ast)
 }
 
 const getErrorStatusFromCode = (code: string | undefined): number | undefined => {
@@ -281,11 +287,41 @@ const getTransactionOverrideErrorStatus = (error: unknown): number | undefined =
   return details === null ? undefined : getDeclaredStatus(TransactionOverrideError.members, details)
 }
 
-const LocalAuthError = Schema.Union([
-  PasswordWeakError,
-  EmailVerificationRequiredError,
-  VerificationResendRateLimitedError,
-])
+// The endpoints behind the SDK's local-auth methods (`auth.providers`,
+// `register`, `verifyEmail`, `resendVerification`, `login`).
+const LOCAL_AUTH_ENDPOINTS = [
+  "getProviders",
+  "register",
+  "verifyEmail",
+  "resendVerification",
+  "login",
+] as const satisfies ReadonlyArray<keyof typeof AuthApi.endpoints>
+
+// One error schema an endpoint declares. The runtime `error` set is typed as
+// `Schema.Top`; the contract types the whole set as one codec (`~Error`), so
+// each member decodes to one of its values with the same decoding services.
+type DeclaredError<Endpoint extends HttpApiEndpoint.Constraint> = Schema.Codec<
+  Endpoint["~Error"]["Type"],
+  unknown,
+  Endpoint["~Error"]["DecodingServices"],
+  unknown
+>
+
+const getDeclaredErrors = <
+  Endpoint extends HttpApiEndpoint.Constraint & { readonly error: ReadonlySet<Schema.Top> },
+>(
+  endpoint: Endpoint
+): ReadonlyArray<DeclaredError<Endpoint>> =>
+  Array.from(endpoint.error) as ReadonlyArray<DeclaredError<Endpoint>>
+
+// Every error those endpoints declare, read from the contract itself so an
+// error added to an endpoint later maps to its declared status without an
+// SDK change. Plain bodies (not class instances) need this decode step.
+const LocalAuthError = Schema.Union(
+  Array.from(
+    new Set(LOCAL_AUTH_ENDPOINTS.flatMap((name) => getDeclaredErrors(AuthApi.endpoints[name])))
+  )
+)
 
 const decodeLocalAuthError = Schema.decodeUnknownExit(LocalAuthError)
 
