@@ -78,10 +78,7 @@ const toResendError = (error: unknown): FormError =>
     ? { kind: "flow_missing" }
     : { kind: "unknown" }
 
-const fieldClassName =
-  "h-11 rounded-xl border-[#d9d2bc] bg-white px-3.5 text-center font-mono text-lg uppercase tracking-[0.3em] text-[#1e4d40] placeholder:text-[#2a6857]/50 dark:border-[#2a3a35] dark:bg-[#202724] dark:text-[#f7f0e3] dark:placeholder:text-[#a3c4b5]/50"
-
-const labelClassName = "text-sm font-medium text-[#1e4d40] dark:text-[#f7f0e3]"
+const labelClassName = "text-sm leading-none font-medium text-[#1e4d40] dark:text-[#8ab4a3]"
 
 const errorClassName = "text-sm text-destructive"
 
@@ -222,8 +219,8 @@ export function VerifyEmailForm({ taxmaxi }: VerifyEmailFormProps) {
   const codeDescribedBy = !codeInvalid ? undefined : hasFormLevelError ? formErrorId : codeErrorId
 
   return (
-    <form aria-busy={verifying || resending} className="grid gap-3" onSubmit={handleSubmit}>
-      <div className="grid gap-1.5">
+    <form aria-busy={verifying || resending} className="grid gap-4" onSubmit={handleSubmit}>
+      <div className="grid gap-2">
         <label className={labelClassName} htmlFor={codeId}>
           {m["auth.verifyEmail.code"]()}
         </label>
@@ -233,17 +230,20 @@ export function VerifyEmailForm({ taxmaxi }: VerifyEmailFormProps) {
           autoCapitalize="characters"
           autoComplete="one-time-code"
           autoCorrect="off"
-          className={fieldClassName}
+          className="uppercase tracking-widest"
           disabled={verifying}
           id={codeId}
           inputMode="text"
           name="code"
           onChange={(event) => setCode(event.target.value)}
+          placeholder={m["auth.verifyEmail.codePlaceholder"]()}
           ref={codeRef}
           required
+          size="touch"
           spellCheck={false}
           type="text"
           value={code}
+          variant="auth"
         />
         {/* A reserved line keeps the button still when a message appears. */}
         <div className="min-h-5">
@@ -279,28 +279,28 @@ export function VerifyEmailForm({ taxmaxi }: VerifyEmailFormProps) {
       </div>
 
       <Button
-        className="h-12 gap-2 rounded-xl bg-[#1e4d40] text-[#f7f0e3] hover:bg-[#2a6857] dark:bg-[#8ab4a3] dark:text-[#1a1f1d] dark:hover:bg-[#a3c4b5]"
+        className="mt-2"
         disabled={verifying || resending}
+        size="touch"
         type="submit"
+        variant="cta"
       >
         {verifying ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
         {m["auth.verifyEmail.submit"]()}
       </Button>
 
-      <div className="mt-2 grid justify-items-center gap-1.5 text-center">
-        <p className={noticeClassName}>
-          {m["auth.verifyEmail.resendPrompt"]()}{" "}
-          <Button
-            className="h-auto p-0 text-sm text-[#1e4d40] dark:text-[#8ab4a3]"
-            disabled={resendBlocked}
-            onClick={handleResend}
-            type="button"
-            variant="link"
-          >
-            {resending ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
-            {m["auth.verifyEmail.resend"]()}
-          </Button>
-        </p>
+      <Button
+        disabled={resendBlocked}
+        onClick={handleResend}
+        size="touch"
+        type="button"
+        variant="surface"
+      >
+        {resending ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
+        {m["auth.verifyEmail.resend"]()}
+      </Button>
+
+      <div className="grid gap-1.5 text-center">
         {/* The visible notice is not a live region: its countdown changes
             every second. */}
         <p className={cn(noticeClassName, "min-h-5 tabular-nums")}>

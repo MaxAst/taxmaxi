@@ -95,8 +95,8 @@
       "title": "E-Mail bestätigen",
       "description": "Gib den Code ein, den wir an deine E-Mail-Adresse geschickt haben.",
       "code": "Bestätigungscode",
+      "codePlaceholder": "ABCDEFGH",
       "submit": "Bestätigen",
-      "resendPrompt": "Keinen Code erhalten?",
       "resend": "Neuen Code senden",
       "resent": "Ein neuer Code ist unterwegs.",
       "resendWait": "In {seconds} s kannst du einen neuen Code anfordern.",
@@ -111,6 +111,8 @@
     "form": {
       "email": "E-Mail",
       "password": "Passwort",
+      "emailPlaceholder": "satoshi.nakamoto@example.com",
+      "passwordPlaceholder": "****************",
       "submitLogin": "Anmelden",
       "submitSignUp": "Account erstellen",
       "emailTaken": "Diese E-Mail ist bereits registriert.",
