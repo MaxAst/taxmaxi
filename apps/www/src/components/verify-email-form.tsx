@@ -35,10 +35,21 @@ const ERROR_PLACEMENT: Record<FormError["kind"], ErrorPlacement> = {
 }
 
 /**
- * What the last "send a new code" click produced. A wait counts down once a
- * second until the resend button opens again.
+ * What the last "send a new code" click produced.
+ *
+ * A wait ends at `deadline`, a wall-clock time from the 429's
+ * `retryAfterSeconds`, so a tab that was in the background or asleep opens
+ * the resend button as soon as the API's wait is over. `announcedSeconds` is
+ * what the live region said when the wait started; it does not tick.
+ * `ready` means a wait has just ended and the live region says so.
  */
-type ResendNotice = { readonly kind: "sent" } | { readonly kind: "wait"; readonly seconds: number }
+type ResendNotice =
+  | { readonly kind: "sent" }
+  | { readonly kind: "wait"; readonly deadline: number; readonly announcedSeconds: number }
+  | { readonly kind: "ready" }
+
+const secondsUntil = (deadline: number): number =>
+  Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
 
 // The API expects exactly eight uppercase letters or digits. A pasted or
 // typed code often carries spaces or lowercase, so the page fixes those before
@@ -100,6 +111,9 @@ export function VerifyEmailForm({ taxmaxi }: VerifyEmailFormProps) {
   const [resending, setResending] = useState(false)
   const [error, setError] = useState<FormError | undefined>()
   const [resendNotice, setResendNotice] = useState<ResendNotice | undefined>()
+  // The visible countdown. Only this changes once a second; the live region
+  // does not, so a screen reader hears the wait once, not every tick.
+  const [secondsLeft, setSecondsLeft] = useState(0)
 
   const codeId = `${id}-code`
   const codeErrorId = `${id}-code-error`
@@ -116,23 +130,36 @@ export function VerifyEmailForm({ taxmaxi }: VerifyEmailFormProps) {
 
   const waiting = resendNotice?.kind === "wait"
 
-  // The wait from a 429 counts down once a second; at zero the notice goes
-  // away and the resend button opens again.
+  // The countdown reads the clock on every tick instead of counting ticks:
+  // browsers pause or slow intervals in a background tab, so counting would
+  // keep the button disabled after the API's wait has passed. Coming back to
+  // the tab refreshes it right away. Once the deadline passes the wait ends
+  // and the resend button opens again.
   useEffect(() => {
-    if (!waiting) return
+    if (resendNotice?.kind !== "wait") return
 
-    const timer = setInterval(() => {
-      setResendNotice((current) =>
-        current?.kind !== "wait"
-          ? current
-          : current.seconds > 1
-            ? { kind: "wait", seconds: current.seconds - 1 }
-            : undefined
-      )
-    }, 1000)
+    const { deadline } = resendNotice
+    const tick = () => {
+      const left = secondsUntil(deadline)
 
-    return () => clearInterval(timer)
-  }, [waiting])
+      if (left > 0) {
+        setSecondsLeft(left)
+        return
+      }
+
+      setResendNotice({ kind: "ready" })
+    }
+    const timer = setInterval(tick, 1000)
+
+    document.addEventListener("visibilitychange", tick)
+    window.addEventListener("focus", tick)
+
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener("visibilitychange", tick)
+      window.removeEventListener("focus", tick)
+    }
+  }, [resendNotice])
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -170,7 +197,12 @@ export function VerifyEmailForm({ taxmaxi }: VerifyEmailFormProps) {
       const retryAfterSeconds = getTaxMaxiRetryAfterSeconds(caught)
 
       if (retryAfterSeconds !== null) {
-        setResendNotice({ kind: "wait", seconds: retryAfterSeconds })
+        setSecondsLeft(retryAfterSeconds)
+        setResendNotice({
+          kind: "wait",
+          deadline: Date.now() + retryAfterSeconds * 1000,
+          announcedSeconds: retryAfterSeconds,
+        })
         return
       }
 
@@ -269,11 +301,20 @@ export function VerifyEmailForm({ taxmaxi }: VerifyEmailFormProps) {
             {m["auth.verifyEmail.resend"]()}
           </Button>
         </p>
-        <p aria-atomic="true" className={cn(noticeClassName, "min-h-5")} role="status">
+        {/* The visible notice is not a live region: its countdown changes
+            every second. */}
+        <p className={cn(noticeClassName, "min-h-5 tabular-nums")}>
+          {resendNotice?.kind === "sent" ? m["auth.verifyEmail.resent"]() : null}
+          {waiting ? m["auth.verifyEmail.resendWait"]({ seconds: secondsLeft }) : null}
+        </p>
+        {/* The live region speaks at most once per event: the code is on its
+            way, the wait has started, the wait is over. */}
+        <p aria-atomic="true" className="sr-only" role="status">
           {resendNotice?.kind === "sent" ? m["auth.verifyEmail.resent"]() : null}
           {resendNotice?.kind === "wait"
-            ? m["auth.verifyEmail.resendWait"]({ seconds: resendNotice.seconds })
+            ? m["auth.verifyEmail.resendWait"]({ seconds: resendNotice.announcedSeconds })
             : null}
+          {resendNotice?.kind === "ready" ? m["auth.verifyEmail.resendReady"]() : null}
         </p>
       </div>
     </form>

@@ -100,6 +100,7 @@
       "resend": "Neuen Code senden",
       "resent": "Ein neuer Code ist unterwegs.",
       "resendWait": "In {seconds} s kannst du einen neuen Code anfordern.",
+      "resendReady": "Du kannst jetzt einen neuen Code anfordern.",
       "codeInvalid": "Dieser Code stimmt nicht. Prüfe die E-Mail und versuche es erneut.",
       "codeExpired": "Dieser Code ist abgelaufen. Fordere einen neuen an.",
       "flowMissing": "Deine Bestätigungssitzung ist abgelaufen.",

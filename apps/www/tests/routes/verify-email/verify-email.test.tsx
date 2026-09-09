@@ -149,6 +149,12 @@ const submitCode = (code: string) => {
 
 const resendButton = () => screen.getByRole("button", { name: "Send a new code" })
 
+// The visible countdown, as opposed to the live region that announces the wait.
+const countdown = (seconds: number) =>
+  screen.getByText(`You can ask for a new code in ${seconds} s.`, {
+    selector: "p:not([role='status'])",
+  })
+
 describe("VerifyEmailPage verify", () => {
   it("sends the trimmed uppercase code, disables submit while pending, then enters the app", async () => {
     const response = deferred<Response>()
@@ -299,22 +305,46 @@ describe("VerifyEmailPage resend", () => {
 
     fireEvent.click(resendButton())
 
-    await waitFor(() =>
-      expect(screen.getByRole("status").textContent).toBe("You can ask for a new code in 42 s.")
-    )
+    await waitFor(() => expect(countdown(42)).toBeDefined())
     expect(resendButton().hasAttribute("disabled")).toBe(true)
     expect(screen.queryByText(RESEND_LIMITED_BODY.message)).toBeNull()
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000)
     })
-    expect(screen.getByRole("status").textContent).toBe("You can ask for a new code in 41 s.")
+    expect(countdown(41)).toBeDefined()
     expect(resendButton().hasAttribute("disabled")).toBe(true)
 
+    // A tab that was asleep gets no ticks; the wait still ends on time.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(41_000)
+      await vi.advanceTimersByTimeAsync(60_000)
     })
-    expect(screen.getByRole("status").textContent).toBe("")
+    expect(screen.queryByText(/ask for a new code in/)).toBeNull()
+    expect(resendButton().hasAttribute("disabled")).toBe(false)
+  })
+
+  it("announces the wait once when it starts and once when it ends, not every second", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    await renderVerifyEmailPage({
+      respond: async () => Response.json(RESEND_LIMITED_BODY, { status: 429 }),
+    })
+
+    fireEvent.click(resendButton())
+
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe("You can ask for a new code in 42 s.")
+    )
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000)
+    })
+    expect(countdown(40)).toBeDefined()
+    expect(screen.getByRole("status").textContent).toBe("You can ask for a new code in 42 s.")
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(40_000)
+    })
+    expect(screen.getByRole("status").textContent).toBe("You can ask for a new code now.")
     expect(resendButton().hasAttribute("disabled")).toBe(false)
   })
 

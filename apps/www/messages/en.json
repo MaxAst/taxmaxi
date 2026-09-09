@@ -100,6 +100,7 @@
       "resend": "Send a new code",
       "resent": "A new code is on its way.",
       "resendWait": "You can ask for a new code in {seconds} s.",
+      "resendReady": "You can ask for a new code now.",
       "codeInvalid": "This code is not right. Check the email and try again.",
       "codeExpired": "This code has expired. Ask for a new one.",
       "flowMissing": "Your verification session has ended.",
