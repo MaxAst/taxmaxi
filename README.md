@@ -124,6 +124,8 @@ Run the worker locally:
 pnpm run worker:dev
 ```
 
+Two parts of the local stack need a note. Sign-up verification emails are not sent locally: with `AUTH_VERIFICATION_DELIVERY_MODE="log"` in `apps/server/.env` the API writes the code to its log, and you copy it from there; `"resend"` sends real email through Resend and is what production uses. Stripe reaches the local database only through webhooks, so a checkout completed against the Stripe sandbox never shows a plan or credits until you forward the events: run `stripe listen --forward-to localhost:4000/v1/billing/webhooks/stripe` and set `STRIPE_WEBHOOK_SECRET` to the `whsec_…` value the CLI prints.
+
 ## License
 
 TaxMaxi is open source under the Apache-2.0 license.
