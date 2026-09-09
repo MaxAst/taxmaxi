@@ -12,6 +12,26 @@ _Avoid_: Fiat asset, canonical asset
 A fiat currency description received from a provider's dedicated fiat catalog. An exact supported currency code resolves without provider asset review; unknown or conflicting evidence fails closed.
 _Avoid_: Provider asset
 
+**Provider consideration**:
+The fiat amount a provider records for an accounting event, including an exchange amount paid or received and a provider-reported reward value. The factual loader supplies eligible evidence as an `observed_consideration` valuation fact linked to the accounting event by `eventId`. Valuation facts are supplied to the engine separately from the factual ledger; they are not fields on its events. The linked event need not be an exchange. A reward value does not prove that fiat was paid or received, so use those labels only when the provider evidence establishes an executed exchange. Fees are separate when the provider records them separately.
+_Avoid_: Price paid (for a provider-reported reward value), cost basis
+
+**Market valuation**:
+An estimate of an asset movement’s fiat value at a stated time, derived from market price evidence. It is not proof of the amount actually paid or received.
+_Avoid_: Purchase price (unless actual provider consideration is meant)
+
+**Cost basis** (also called **tax basis**):
+The amount assigned to an acquisition or lot under the accounting rules and used to calculate gain or loss on disposal. It may differ from provider consideration or market valuation. Cost basis is the preferred term, matching the existing engine and API field `costBasis`; tax basis is an alias for the same value, not a separate fact or a new `taxBasis` field.
+_Avoid_: Price paid, tax basis as a separate value
+
+**Proceeds**:
+The disposal amount used by the accounting calculation before subtracting cost basis to determine gain or loss. Its valuation and fee treatment follow the applicable accounting rules; it is not itself the gain.
+_Avoid_: Profit, gain
+
+**Income**:
+The fiat value in an `IncomeResult` produced by the accounting calculation from a qualifying acquisition, such as a reward receipt. The input remains an `AcquisitionEvent`, not a separate income-event kind; a reward receipt carries its reward cause on that acquisition. The engine emits a separate income result with the selected valuation and treatment codes. The income value is distinct from realized disposal gain; its treatment codes describe the jurisdiction’s treatment.
+_Avoid_: Realized gain, proceeds
+
 ## Tax accounting language
 
 **Accounting event**:
