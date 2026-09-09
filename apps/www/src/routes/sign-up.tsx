@@ -11,9 +11,16 @@ export const Route = createFileRoute("/sign-up")({
       },
     ],
   }),
+  loader: async ({ context }) => {
+    const { providers } = await context.taxmaxi().auth.providers()
+    return { providers }
+  },
   component: RouteComponent,
 })
 
 function RouteComponent() {
-  return <AuthPage mode="sign-up" />
+  const { providers } = Route.useLoaderData()
+  const { taxmaxi } = Route.useRouteContext()
+
+  return <AuthPage mode="sign-up" providers={providers} taxmaxi={taxmaxi} />
 }
