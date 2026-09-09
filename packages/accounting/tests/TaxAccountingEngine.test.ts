@@ -105,6 +105,53 @@ const purchaseAndSale = (quantity = "10") => [
 ]
 
 describe("calculate", () => {
+  it.effect("retains original selected values after inventory is fully consumed", () =>
+    Effect.gen(function* () {
+      const result = yield* runCalculation({
+        ledger: purchaseAndSale(),
+        valuationFacts: [
+          userValuation({ eventId: ACQUISITION_ONE, amount: "20" }),
+          userValuation({ eventId: DISPOSITION, amount: "30" }),
+        ],
+      })
+      expect(result.derivedLots).toEqual([])
+      expect(
+        result.eventValuations.map(({ eventId, quantity, resolution }) => ({
+          eventId,
+          quantity: encodeQuantity(quantity),
+          value: resolution._tag === "selected" ? BigDecimal.format(resolution.total.amount) : null,
+        }))
+      ).toEqual([
+        { eventId: ACQUISITION_ONE, quantity: "10", value: "20" },
+        { eventId: DISPOSITION, quantity: "10", value: "30" },
+      ])
+      const realized = result.realizedResults[0]
+      if (realized === undefined) return yield* Effect.die("Missing synthetic disposal result")
+      expect(BigDecimal.format(realized.gainLoss.amount)).toBe("10")
+    })
+  )
+
+  it.effect("retains explicit zero separately from missing and ambiguous valuations", () =>
+    Effect.gen(function* () {
+      for (const facts of [
+        [userValuation({ eventId: ACQUISITION_ONE, amount: "0" })],
+        [],
+        [
+          userValuation({ eventId: ACQUISITION_ONE, amount: "1" }),
+          userValuation({ eventId: ACQUISITION_ONE, amount: "2" }),
+        ],
+      ]) {
+        const result = yield* runCalculation({ ledger: purchaseAndSale(), valuationFacts: facts })
+        const resolution = result.eventValuations[0]?.resolution
+        expect(resolution?._tag).toBe(
+          facts.length === 0 ? "missing" : facts.length === 2 ? "ambiguous" : "selected"
+        )
+        if (resolution?._tag === "selected")
+          expect(BigDecimal.format(resolution.total.amount)).toBe("0")
+      }
+    })
+  )
+
   it.effect("sorts the ledger and matches same-unit lots FIFO", () =>
     Effect.gen(function* () {
       const olderAtSameTime = decodeEvent({

@@ -953,6 +953,7 @@ const seedClaimCalculationResultRows = ({
 const CLAIM_REPORTING_CURRENCY = CurrencyCode.make("EUR")
 
 const makeClaimRaceResult = (taxYear: number): TaxAccountingResult => ({
+  eventValuations: [],
   status: "complete",
   jurisdiction: JurisdictionCode.make("DE"),
   taxYear: TaxYear.make(taxYear),

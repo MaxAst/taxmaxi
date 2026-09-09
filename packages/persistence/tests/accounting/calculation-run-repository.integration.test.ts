@@ -196,6 +196,7 @@ const completeResult = ({
   readonly jurisdiction?: string
   readonly taxYear?: number
 } = {}): TaxAccountingResult => ({
+  eventValuations: [],
   status: "complete",
   jurisdiction: JurisdictionCode.make(jurisdiction),
   taxYear: TaxYear.make(taxYear),
