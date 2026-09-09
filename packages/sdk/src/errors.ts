@@ -9,13 +9,17 @@ import {
   AssetLookupNotFoundError,
   AssetLookupValidationError,
   AssetStaleRevisionError,
+  AuthApi,
   AuthValidationError,
+  EmailVerificationRequiredError,
+  PasswordWeakError,
   PortfolioCalculationJobNotFoundResponse,
   SourceCreditRequiredError,
   TransactionOverrideConflictError,
   TransactionOverrideNotFoundError,
   TransactionOverrideReadonlyError,
   TransactionOverrideValidationError,
+  VerificationResendRateLimitedError,
 } from "@my/rest-api/contracts"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
@@ -24,6 +28,7 @@ import * as Schema from "effect/Schema"
 import type * as SchemaAST from "effect/SchemaAST"
 import { resolveAt } from "effect/SchemaAST"
 import { HttpClientError } from "effect/unstable/http"
+import type { HttpApiEndpoint } from "effect/unstable/httpapi"
 import type { TaxMaxiTransactionOverrideError } from "./transaction-overrides/index.ts"
 import type { TaxMaxiAssetOverrideError } from "./asset-overrides/index.ts"
 
@@ -57,8 +62,9 @@ type SchemaConstructor = {
   readonly ast: SchemaAST.AST
 }
 
+// Schema classes are functions, so `error.constructor` is a function here.
 const hasSchemaAst = (value: unknown): value is SchemaConstructor =>
-  typeof value === "object" && value !== null && "ast" in value
+  (typeof value === "object" || typeof value === "function") && value !== null && "ast" in value
 
 const getErrorCode = (error: unknown): string | undefined => {
   const record = getErrorRecord(error)
@@ -96,12 +102,15 @@ const getFieldErrors = (error: unknown): ReadonlyArray<TaxMaxiFieldError> => {
   return [{ field, message: error.message }]
 }
 
+// Errors the generated client yields are instances of their declared schema
+// class, and each class carries its `httpApiStatus` annotation. A class with
+// no status falls through to the code-based lookup.
 const getAnnotatedErrorStatus = (error: unknown): number | undefined => {
   if (!(error instanceof Error) || !hasSchemaAst(error.constructor)) {
     return undefined
   }
 
-  return resolveAt<number>("httpApiStatus")(error.constructor.ast) ?? 500
+  return resolveAt<number>("httpApiStatus")(error.constructor.ast)
 }
 
 const getErrorStatusFromCode = (code: string | undefined): number | undefined => {
@@ -153,6 +162,59 @@ export const getTaxMaxiCreditRequired = (error: unknown): TaxMaxiCreditRequired 
   return Exit.match(decodeCreditRequired(candidate), {
     onFailure: () => null,
     onSuccess: ({ availableCredits, reasonCode }) => ({ availableCredits, reasonCode }),
+  })
+}
+
+export type TaxMaxiPasswordRequirement = PasswordWeakError["requirements"][number]
+
+export type TaxMaxiPasswordRequirements = {
+  readonly requirements: ReadonlyArray<TaxMaxiPasswordRequirement>
+  readonly minPasswordLength: number
+}
+
+const decodePasswordWeak = Schema.decodeUnknownExit(PasswordWeakError)
+
+/**
+ * Extract the unmet password rule codes and the minimum length from a weak
+ * password (400) refusal, or null for any other error. The codes carry no
+ * display text; clients map each code to their own copy.
+ */
+export const getTaxMaxiPasswordRequirements = (
+  error: unknown
+): TaxMaxiPasswordRequirements | null => {
+  const candidate = isTaxMaxiError(error) ? error.cause : error
+
+  return Exit.match(decodePasswordWeak(candidate), {
+    onFailure: () => null,
+    onSuccess: ({ minPasswordLength, requirements }) => ({ minPasswordLength, requirements }),
+  })
+}
+
+const decodeEmailVerificationRequired = Schema.decodeUnknownExit(EmailVerificationRequiredError)
+
+/**
+ * True when a login was refused (403) because the local email is still
+ * unverified. The API has restored the verification cookie, so the client
+ * can continue on its verify page.
+ */
+export const isTaxMaxiEmailVerificationRequiredError = (error: unknown): boolean => {
+  const candidate = isTaxMaxiError(error) ? error.cause : error
+
+  return Exit.isSuccess(decodeEmailVerificationRequired(candidate))
+}
+
+const decodeResendRateLimited = Schema.decodeUnknownExit(VerificationResendRateLimitedError)
+
+/**
+ * Extract the wait in seconds from a resend refusal (429), or null for any
+ * other error. A number only; clients render their own countdown.
+ */
+export const getTaxMaxiRetryAfterSeconds = (error: unknown): number | null => {
+  const candidate = isTaxMaxiError(error) ? error.cause : error
+
+  return Exit.match(decodeResendRateLimited(candidate), {
+    onFailure: () => null,
+    onSuccess: ({ retryAfterSeconds }) => retryAfterSeconds,
   })
 }
 
@@ -210,13 +272,66 @@ const decodeTransactionOverrideError = Schema.decodeUnknownExit(TransactionOverr
 
 // Generated client errors may be plain decoded values without an Error constructor.
 // Read status from the matching declared schema, preserving its exact API contract.
-const getTransactionOverrideErrorStatus = (error: unknown): number | undefined => {
-  const details = getTaxMaxiTransactionOverrideError(error)
-  if (details === null) return undefined
-  for (const errorSchema of TransactionOverrideError.members) {
+const getDeclaredStatus = (
+  members: ReadonlyArray<Schema.Top>,
+  details: unknown
+): number | undefined => {
+  for (const errorSchema of members) {
     if (Schema.is(errorSchema)(details)) return resolveAt<number>("httpApiStatus")(errorSchema.ast)
   }
   return undefined
+}
+
+const getTransactionOverrideErrorStatus = (error: unknown): number | undefined => {
+  const details = getTaxMaxiTransactionOverrideError(error)
+  return details === null ? undefined : getDeclaredStatus(TransactionOverrideError.members, details)
+}
+
+// The endpoints behind the SDK's local-auth methods (`auth.providers`,
+// `register`, `verifyEmail`, `resendVerification`, `login`).
+const LOCAL_AUTH_ENDPOINTS = [
+  "getProviders",
+  "register",
+  "verifyEmail",
+  "resendVerification",
+  "login",
+] as const satisfies ReadonlyArray<keyof typeof AuthApi.endpoints>
+
+// One error schema an endpoint declares. The runtime `error` set is typed as
+// `Schema.Top`; the contract types the whole set as one codec (`~Error`), so
+// each member decodes to one of its values with the same decoding services.
+type DeclaredError<Endpoint extends HttpApiEndpoint.Constraint> = Schema.Codec<
+  Endpoint["~Error"]["Type"],
+  unknown,
+  Endpoint["~Error"]["DecodingServices"],
+  unknown
+>
+
+const getDeclaredErrors = <
+  Endpoint extends HttpApiEndpoint.Constraint & { readonly error: ReadonlySet<Schema.Top> },
+>(
+  endpoint: Endpoint
+): ReadonlyArray<DeclaredError<Endpoint>> =>
+  Array.from(endpoint.error) as ReadonlyArray<DeclaredError<Endpoint>>
+
+// Every error those endpoints declare, read from the contract itself so an
+// error added to an endpoint later maps to its declared status without an
+// SDK change. Plain bodies (not class instances) need this decode step.
+const LocalAuthError = Schema.Union(
+  Array.from(
+    new Set(LOCAL_AUTH_ENDPOINTS.flatMap((name) => getDeclaredErrors(AuthApi.endpoints[name])))
+  )
+)
+
+const decodeLocalAuthError = Schema.decodeUnknownExit(LocalAuthError)
+
+const getLocalAuthErrorStatus = (error: unknown): number | undefined => {
+  const candidate = isTaxMaxiError(error) ? error.cause : error
+
+  return Exit.match(decodeLocalAuthError(candidate), {
+    onFailure: () => undefined,
+    onSuccess: (details) => getDeclaredStatus(LocalAuthError.members, details),
+  })
 }
 
 /** Recover exact movement conflict or validation details from an SDK, Effect or encoded error. */
@@ -353,6 +468,7 @@ export const toTaxMaxiError = (error: unknown): TaxMaxiError => {
       requestId: getStringProperty(error, "requestId"),
       status:
         getTransactionOverrideErrorStatus(error) ??
+        getLocalAuthErrorStatus(error) ??
         getAnnotatedErrorStatus(error) ??
         getErrorStatusFromCode(code) ??
         500,
