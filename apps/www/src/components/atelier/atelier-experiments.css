@@ -71,8 +71,20 @@
   background: color-mix(in oklch, var(--primary), var(--background) 20%);
 }
 
+@media (hover: hover) and (pointer: fine) {
+  .atelier-primitive
+    :is(
+      [data-slot="button"],
+      [data-slot="dropdown-menu-trigger"]
+    )[data-variant="default"]:enabled:hover {
+    background: color-mix(in oklch, var(--primary), var(--background) 20%);
+  }
+}
+
 .atelier-primitive :is([data-slot="button"], [data-slot="dropdown-menu-trigger"]):focus-visible,
 .atelier-primitive [data-preview-state="focus"] {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 30%, transparent);
   outline: 2px solid var(--foreground);
   outline-offset: 3px;
 }
