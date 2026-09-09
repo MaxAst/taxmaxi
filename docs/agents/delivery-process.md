@@ -157,6 +157,9 @@ representative flow through the read, acceptance, writer, and calculation seams
 that exist. Name the actual inspected facts and where their links are recorded;
 raw source fields may differ from the effective asset or valuation a user sees.
 Expose a missing writer fact before designing a reader around it (ADR 0012).
+For reader and UI lifecycle acceptance, verify that the tested states are
+actually produced by writers and reach the read being used. Schema-valid
+fixtures alone do not prove this, even for result-preserving consumers.
 
 Use the existing Testing and seams section to map each acceptance behavior to
 its task, named test/seam, and exact expected outcome. This is proof coverage,
@@ -296,6 +299,9 @@ are not prose. Explicit task gates, required hosted CI, and independent review
 still apply. Merge only after required CI and review approve the exact final
 commit, subject to the `AGENTS.md` exception for carrying automated Codex
 approval across an unaffected rebase. Rerun checks when subsequent changes invalidate their evidence.
+
+Finish code generation before capturing browser screenshots or other browser
+proof, so generated-file changes cannot race the rendered app.
 
 For tests that open local listeners, default to OS-assigned ports (port 0)
 and read the actual bound address, unless the behavior under test requires a
