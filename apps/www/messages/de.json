@@ -91,6 +91,20 @@
       "logIn": "Anmelden",
       "agreementIntro": "Mit der Registrierung stimmst du folgendem zu:"
     },
+    "verifyEmail": {
+      "title": "E-Mail bestätigen",
+      "description": "Gib den Code ein, den wir an deine E-Mail-Adresse geschickt haben.",
+      "code": "Bestätigungscode",
+      "submit": "Bestätigen",
+      "resendPrompt": "Keinen Code erhalten?",
+      "resend": "Neuen Code senden",
+      "resent": "Ein neuer Code ist unterwegs.",
+      "resendWait": "In {seconds} s kannst du einen neuen Code anfordern.",
+      "codeInvalid": "Dieser Code stimmt nicht. Prüfe die E-Mail und versuche es erneut.",
+      "codeExpired": "Dieser Code ist abgelaufen. Fordere einen neuen an.",
+      "flowMissing": "Deine Bestätigungssitzung ist abgelaufen.",
+      "flowMissingLogIn": "Melde dich an, um einen neuen Code zu erhalten"
+    },
     "or": "oder",
     "noProviders": "Derzeit ist keine Anmeldemethode verfügbar.",
     "form": {

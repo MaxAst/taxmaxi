@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as TermsRouteImport } from './routes/terms'
 import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as PrivacyRouteImport } from './routes/privacy'
@@ -42,6 +43,11 @@ import { Route as DemoApiAiStructuredRouteImport } from './routes/demo/api.ai.st
 import { Route as DemoApiAiImageRouteImport } from './routes/demo/api.ai.image'
 import { Route as DemoApiAiChatRouteImport } from './routes/demo/api.ai.chat'
 
+const VerifyEmailRoute = VerifyEmailRouteImport.update({
+  id: '/verify-email',
+  path: '/verify-email',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TermsRoute = TermsRouteImport.update({
   id: '/terms',
   path: '/terms',
@@ -214,6 +220,7 @@ export interface FileRoutesByFullPath {
   '/privacy': typeof PrivacyRoute
   '/sign-up': typeof SignUpRoute
   '/terms': typeof TermsRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/app/assets': typeof AppAssetsRoute
   '/app/billing': typeof AppBillingRoute
   '/app/settings': typeof AppSettingsRoute
@@ -248,6 +255,7 @@ export interface FileRoutesByTo {
   '/privacy': typeof PrivacyRoute
   '/sign-up': typeof SignUpRoute
   '/terms': typeof TermsRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/app/assets': typeof AppAssetsRoute
   '/app/billing': typeof AppBillingRoute
   '/app/settings': typeof AppSettingsRoute
@@ -283,6 +291,7 @@ export interface FileRoutesById {
   '/privacy': typeof PrivacyRoute
   '/sign-up': typeof SignUpRoute
   '/terms': typeof TermsRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/app/assets': typeof AppAssetsRoute
   '/app/billing': typeof AppBillingRoute
   '/app/settings': typeof AppSettingsRoute
@@ -319,6 +328,7 @@ export interface FileRouteTypes {
     | '/privacy'
     | '/sign-up'
     | '/terms'
+    | '/verify-email'
     | '/app/assets'
     | '/app/billing'
     | '/app/settings'
@@ -353,6 +363,7 @@ export interface FileRouteTypes {
     | '/privacy'
     | '/sign-up'
     | '/terms'
+    | '/verify-email'
     | '/app/assets'
     | '/app/billing'
     | '/app/settings'
@@ -387,6 +398,7 @@ export interface FileRouteTypes {
     | '/privacy'
     | '/sign-up'
     | '/terms'
+    | '/verify-email'
     | '/app/assets'
     | '/app/billing'
     | '/app/settings'
@@ -422,6 +434,7 @@ export interface RootRouteChildren {
   PrivacyRoute: typeof PrivacyRoute
   SignUpRoute: typeof SignUpRoute
   TermsRoute: typeof TermsRoute
+  VerifyEmailRoute: typeof VerifyEmailRoute
   ArticlesSlugRoute: typeof ArticlesSlugRoute
   AssetsAssetIdRoute: typeof AssetsAssetIdRoute
   DemoAiChatRoute: typeof DemoAiChatRoute
@@ -445,6 +458,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/verify-email': {
+      id: '/verify-email'
+      path: '/verify-email'
+      fullPath: '/verify-email'
+      preLoaderRoute: typeof VerifyEmailRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/terms': {
       id: '/terms'
       path: '/terms'
@@ -697,6 +717,7 @@ const rootRouteChildren: RootRouteChildren = {
   PrivacyRoute: PrivacyRoute,
   SignUpRoute: SignUpRoute,
   TermsRoute: TermsRoute,
+  VerifyEmailRoute: VerifyEmailRoute,
   ArticlesSlugRoute: ArticlesSlugRoute,
   AssetsAssetIdRoute: AssetsAssetIdRoute,
   DemoAiChatRoute: DemoAiChatRoute,
