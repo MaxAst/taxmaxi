@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query"
 import { createFileRoute, redirect } from "@tanstack/react-router"
 import { CreditCard, Plus } from "lucide-react"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
   isTaxMaxiUnauthorizedError,
   type Account,
@@ -80,12 +80,13 @@ export const isTopUpActionDisabled = ({
 /**
  * Whether `status` already shows the purchase the person returned from.
  * Stripe writes it into TaxMaxi through webhooks that can land after the
- * person is back on this page (#133 T09b). An annual purchase shows once the
- * subscription is active or trialing and its credit grant has arrived; a
- * loader status that already carried the subscription has nothing left to
- * wait for. A top-up only shows as a higher balance than the one the overlay
- * loaded with, so a loader status that already carries it cannot be told
- * apart from one that does not.
+ * person is back on this page (#133 T09b). Stripe sends the subscription
+ * event and the credit-grant event separately and in any order, so an annual
+ * purchase shows only once the subscription is active or trialing and the
+ * credits are in; an active plan with zero credits is still waiting for its
+ * grant (#133, T09b note). A top-up only shows as a higher balance than the
+ * one the overlay loaded with, so a loader status that already carries it
+ * cannot be told apart from one that does not.
  */
 export const statusShowsPurchase = ({
   initialStatus,
@@ -97,8 +98,7 @@ export const statusShowsPurchase = ({
   readonly status: BillingStatus
 }): boolean =>
   kind === "annual"
-    ? hasActiveSubscription(status) &&
-      (status.credits > initialStatus.credits || hasActiveSubscription(initialStatus))
+    ? hasActiveSubscription(status) && status.credits > 0
     : status.credits > initialStatus.credits
 
 export const refreshBillingStatusAfterCheckout = async ({
@@ -214,7 +214,24 @@ export function BillingPageContent({
 }) {
   const locale = getLocale()
   const queryClient = useQueryClient()
+  // The status on screen: the loader's `status` until a read below replaces
+  // it. A new loader status (the route reloaded) replaces it too, so the poll
+  // effect, which starts from `status`, and the confirming state, which reads
+  // `liveStatus`, never disagree about where the wait began.
   const [liveStatus, setLiveStatus] = useState(status)
+  useEffect(() => {
+    setLiveStatus(status)
+  }, [status])
+  // False once the overlay unmounted: a status read that resolves after the
+  // close must not write over the dashboard's own re-read, or send the app to
+  // login from a component that is gone.
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
   const [pendingAction, setPendingAction] = useState<"annual" | "portal" | "topUp" | null>(null)
   const [error, setError] = useState<string | null>(null)
   // After a Checkout return the poll below reads status until it shows the
@@ -227,7 +244,7 @@ export function BillingPageContent({
     liveStatus.subscriptionStatus !== "canceled" &&
     liveStatus.subscriptionStatus !== "incomplete_expired"
   const topUpEligible = hasActiveSubscription(liveStatus)
-  // Stripe's webhook can land after the person is back here, so the visible
+  // Stripe's webhooks can land after the person is back here, so the visible
   // status may still predate the purchase. While it does, the annual card
   // must not offer Subscribe again: a second annual Checkout is refused by
   // the API because Stripe already has the subscription (#133 T09b). A
@@ -236,6 +253,11 @@ export function BillingPageContent({
   const confirmingAnnual =
     checkoutReturnKind === "annual" &&
     !statusShowsPurchase({ initialStatus: status, kind: "annual", status: liveStatus })
+  // The subscription event can land before the credit grant. Once the card
+  // shows the plan, the wait for the credits is silent: no notice and nothing
+  // disabled. The notice comes back only when the poll gave up, so the
+  // person can ask for a re-read (#133, T09b note).
+  const showConfirmingNotice = confirmingAnnual && (pollGaveUp || !subscribed)
 
   // The overlay renders above the mounted dashboard, whose first-sync wizard
   // reads billing through the `billingStatus` query. Every refreshed status is
@@ -281,7 +303,7 @@ export function BillingPageContent({
   // the overlay closed does not write over the dashboard's own re-read. A
   // 401 leaves the app; any other failure keeps the visible status as it is.
   const readStatusOnce = useCallback(
-    async (shouldApply: () => boolean = () => true) => {
+    async (shouldApply: () => boolean) => {
       const userId = readSessionUserId()
       setCheckingStatus(true)
       try {
@@ -389,7 +411,7 @@ export function BillingPageContent({
           </p>
         )}
 
-        {confirmingAnnual ? (
+        {showConfirmingNotice ? (
           <div className="flex flex-wrap items-center gap-3" role="status">
             <Text size="bodySm" tone="muted">
               {pollGaveUp
@@ -399,7 +421,7 @@ export function BillingPageContent({
             {pollGaveUp ? (
               <Button
                 disabled={checkingStatus}
-                onClick={() => void readStatusOnce()}
+                onClick={() => void readStatusOnce(() => mounted.current)}
                 size="sm"
                 variant="outline"
               >
