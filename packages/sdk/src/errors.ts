@@ -10,12 +10,15 @@ import {
   AssetLookupValidationError,
   AssetStaleRevisionError,
   AuthValidationError,
+  EmailVerificationRequiredError,
+  PasswordWeakError,
   PortfolioCalculationJobNotFoundResponse,
   SourceCreditRequiredError,
   TransactionOverrideConflictError,
   TransactionOverrideNotFoundError,
   TransactionOverrideReadonlyError,
   TransactionOverrideValidationError,
+  VerificationResendRateLimitedError,
 } from "@my/rest-api/contracts"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
@@ -156,6 +159,59 @@ export const getTaxMaxiCreditRequired = (error: unknown): TaxMaxiCreditRequired 
   })
 }
 
+export type TaxMaxiPasswordRequirement = PasswordWeakError["requirements"][number]
+
+export type TaxMaxiPasswordRequirements = {
+  readonly requirements: ReadonlyArray<TaxMaxiPasswordRequirement>
+  readonly minPasswordLength: number
+}
+
+const decodePasswordWeak = Schema.decodeUnknownExit(PasswordWeakError)
+
+/**
+ * Extract the unmet password rule codes and the minimum length from a weak
+ * password (400) refusal, or null for any other error. The codes carry no
+ * display text; clients map each code to their own copy.
+ */
+export const getTaxMaxiPasswordRequirements = (
+  error: unknown
+): TaxMaxiPasswordRequirements | null => {
+  const candidate = isTaxMaxiError(error) ? error.cause : error
+
+  return Exit.match(decodePasswordWeak(candidate), {
+    onFailure: () => null,
+    onSuccess: ({ minPasswordLength, requirements }) => ({ minPasswordLength, requirements }),
+  })
+}
+
+const decodeEmailVerificationRequired = Schema.decodeUnknownExit(EmailVerificationRequiredError)
+
+/**
+ * True when a login was refused (403) because the local email is still
+ * unverified. The API has restored the verification cookie, so the client
+ * can continue on its verify page.
+ */
+export const isTaxMaxiEmailVerificationRequiredError = (error: unknown): boolean => {
+  const candidate = isTaxMaxiError(error) ? error.cause : error
+
+  return Exit.isSuccess(decodeEmailVerificationRequired(candidate))
+}
+
+const decodeResendRateLimited = Schema.decodeUnknownExit(VerificationResendRateLimitedError)
+
+/**
+ * Extract the wait in seconds from a resend refusal (429), or null for any
+ * other error. A number only; clients render their own countdown.
+ */
+export const getTaxMaxiRetryAfterSeconds = (error: unknown): number | null => {
+  const candidate = isTaxMaxiError(error) ? error.cause : error
+
+  return Exit.match(decodeResendRateLimited(candidate), {
+    onFailure: () => null,
+    onSuccess: ({ retryAfterSeconds }) => retryAfterSeconds,
+  })
+}
+
 export type TaxMaxiAssetDecisionConflict =
   | "stale_revision"
   | "ambiguous_identity"
@@ -210,13 +266,36 @@ const decodeTransactionOverrideError = Schema.decodeUnknownExit(TransactionOverr
 
 // Generated client errors may be plain decoded values without an Error constructor.
 // Read status from the matching declared schema, preserving its exact API contract.
-const getTransactionOverrideErrorStatus = (error: unknown): number | undefined => {
-  const details = getTaxMaxiTransactionOverrideError(error)
-  if (details === null) return undefined
-  for (const errorSchema of TransactionOverrideError.members) {
+const getDeclaredStatus = (
+  members: ReadonlyArray<Schema.Top>,
+  details: unknown
+): number | undefined => {
+  for (const errorSchema of members) {
     if (Schema.is(errorSchema)(details)) return resolveAt<number>("httpApiStatus")(errorSchema.ast)
   }
   return undefined
+}
+
+const getTransactionOverrideErrorStatus = (error: unknown): number | undefined => {
+  const details = getTaxMaxiTransactionOverrideError(error)
+  return details === null ? undefined : getDeclaredStatus(TransactionOverrideError.members, details)
+}
+
+const LocalAuthError = Schema.Union([
+  PasswordWeakError,
+  EmailVerificationRequiredError,
+  VerificationResendRateLimitedError,
+])
+
+const decodeLocalAuthError = Schema.decodeUnknownExit(LocalAuthError)
+
+const getLocalAuthErrorStatus = (error: unknown): number | undefined => {
+  const candidate = isTaxMaxiError(error) ? error.cause : error
+
+  return Exit.match(decodeLocalAuthError(candidate), {
+    onFailure: () => undefined,
+    onSuccess: (details) => getDeclaredStatus(LocalAuthError.members, details),
+  })
 }
 
 /** Recover exact movement conflict or validation details from an SDK, Effect or encoded error. */
@@ -353,6 +432,7 @@ export const toTaxMaxiError = (error: unknown): TaxMaxiError => {
       requestId: getStringProperty(error, "requestId"),
       status:
         getTransactionOverrideErrorStatus(error) ??
+        getLocalAuthErrorStatus(error) ??
         getAnnotatedErrorStatus(error) ??
         getErrorStatusFromCode(code) ??
         500,

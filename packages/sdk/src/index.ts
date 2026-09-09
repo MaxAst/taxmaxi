@@ -170,9 +170,17 @@ export type {
   Account,
   AuthAuthorizeRedirectResponse,
   AuthEffectResource,
+  AuthLocalLoginInput,
+  AuthLoginResponse,
   AuthLogoutResponse,
   AuthOAuthSessionResponse,
   AuthPromiseResource,
+  AuthProvider,
+  AuthProviders,
+  AuthRegisterInput,
+  AuthVerificationFlow,
+  AuthVerifyEmailInput,
+  AuthVerifyEmailResponse,
 } from "./auth/index.ts"
 export {
   TaxMaxiError,
@@ -182,6 +190,9 @@ export {
   getTaxMaxiAssetDecisionErrorCode,
   getTaxMaxiAssetLookupErrorCode,
   getTaxMaxiCreditRequired,
+  getTaxMaxiPasswordRequirements,
+  getTaxMaxiRetryAfterSeconds,
+  isTaxMaxiEmailVerificationRequiredError,
   isTaxMaxiUnauthorizedError,
   toTaxMaxiError,
 } from "./errors.ts"
@@ -191,6 +202,8 @@ export type {
   TaxMaxiAssetLookupErrorCode,
   TaxMaxiCreditRequired,
   TaxMaxiFieldError,
+  TaxMaxiPasswordRequirement,
+  TaxMaxiPasswordRequirements,
 } from "./errors.ts"
 export type {
   BillingCatalog,
