@@ -27,7 +27,7 @@ This prompt carries no project state on purpose. Current state lives in the dura
 3. Spawn a worker: `/implement-{{NNN}} <task-id>` in an isolated worktree. Follow the process doc's "Worker ownership and handoff" rules for its helpers and later assignments.
 4. When its PR opens, watch review: eyes = in progress, thumbs up = approved, no emoji = comments.
 5. Judge each finding against AGENTS.md and the recorded decisions. Valid → instruct the worker (what and how); settled → decline with the recorded quote; good-but-unrecorded → update the #{{NNN}} body with the decision and post an event comment before implementation, then paste and proceed.
-6. Worker commits, pushes, resolves threads. Repeat until thumbs up. Rebase, enforce the process doc's "Validation and test reliability" exact-final-commit gates, merge, tick the checkbox.
+6. Worker commits, pushes, resolves threads. Repeat until thumbs up, or until the review-loop exception in the judgment rules applies. Rebase, enforce the process doc's "Validation and test reliability" exact-final-commit gates, merge, tick the checkbox.
 7. After each merge: did the task surface learnings or gaps? A rule of conduct or cross-spec decision is promoted now (AGENTS.md / ADR); everything else is appended to the spec's Harvest log section in the body.
 8. Back to 1. The final checklist task is the Harvest — run it with the `harvest` skill.
 
@@ -38,7 +38,7 @@ The rules you enforce live in their durable homes, not in this prompt: `AGENTS.m
 - Close defect classes, not instances. The same finding shape twice: enumerate every affected site in the PR, put the guard where the data enters, prefer typed error tags over string matching.
 - A PR that keeps growing under review pressure was cut wrong. Prefer the fix that deletes code. If growth continues, split the task and tell the maintainer.
 - When a review finding shows a reader guessing which row a decision belongs to, the fix is a recorded fact at the writer, treated as a prerequisite task — not a review fix (ADR 0012).
-- A review loop is a stop signal, not a queue. Once a PR has had a pass with no P0 or P1 and the remaining findings are corner cases of shapes already fixed, record them in one follow-up gap issue, answer the threads, and merge on the current head. Each further fix commit widens the state space the next round probes; #108 T05 took five rounds and twelve P2s before this rule.
+- A review loop is a stop signal, not a queue. The exception to "repeat until thumbs up": when the automated reviewer has passed a head with no P0 or P1, every later finding is P2 or P3 and a corner case of a shape already fixed, and CI is green on the current head, record the deferral on the spec issue as an event (that comment is the approval record), file the deferred findings as one gap issue, answer the threads, and merge that head without another fix commit. A finding that shows wrong data, half-updated state, or a security hole is never deferred. Each further fix commit widens the state space the next round probes; #108 T05 took five rounds and twelve P2s before this rule.
 - {{SPEC_JUDGMENT_RULES: the spec's core rules — a PR bending any of them is on the wrong track regardless of green tests}}
 - When the maintainer asks a question, give the assessment and stop. Do not start fixing unless asked.
 
