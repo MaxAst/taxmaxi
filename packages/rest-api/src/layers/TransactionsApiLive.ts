@@ -101,6 +101,10 @@ export const TransactionsApiLive = HttpApiBuilder.group(TaxMaxiApi, "transaction
             movements: detail.movements.map((movement) => ({
               ...movement,
               timestamp: movement.timestamp.toISOString(),
+              imported: {
+                ...movement.imported,
+                timestamp: movement.imported.timestamp.toISOString(),
+              },
               evidence: toEvidence(movement.evidence),
             })),
             movementOverrides: yield* Effect.forEach(

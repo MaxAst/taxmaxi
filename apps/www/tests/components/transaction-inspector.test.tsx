@@ -289,6 +289,7 @@ function richDetail(currentTotal: "1" | "30" = "1"): TransactionDetail {
     importedAt: "2025-03-02T00:00:00.000Z",
   }
   return {
+    attention: false,
     transactionId: IDS.transaction,
     timestamp: TIME,
     source: { sourceId: IDS.source, name: "Imported exchange", kind: "cex" },
@@ -300,6 +301,8 @@ function richDetail(currentTotal: "1" | "30" = "1"): TransactionDetail {
     classificationHistoryStatus: "unavailable",
     movements: [
       {
+        capture: null,
+        imported: { timestamp: TIME, assetId: IDS.asset, amount: "3", kind: "acquisition" },
         id: IDS.leg,
         transactionId: IDS.transaction,
         sourceId: IDS.source,

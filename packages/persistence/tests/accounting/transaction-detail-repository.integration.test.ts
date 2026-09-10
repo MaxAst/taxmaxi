@@ -25,6 +25,8 @@ import { CalculationRunService } from "../../src/services/CalculationRunService.
 import { drizzle } from "../../src/layers/PgClientLive.ts"
 import { PrincipalTransactionOverrideRepositoryLive } from "../../src/layers/PrincipalTransactionOverrideRepositoryLive.ts"
 import { PrincipalTransactionOverrideRepository } from "../../src/services/PrincipalTransactionOverrideRepository.ts"
+import { TransactionListRepositoryLive } from "../../src/layers/TransactionListRepositoryLive.ts"
+import { TransactionListRepository } from "../../src/services/TransactionListRepository.ts"
 import { TransactionDetailRepositoryLive } from "../../src/layers/TransactionDetailRepositoryLive.ts"
 import { TransactionDetailRepository } from "../../src/services/TransactionDetailRepository.ts"
 import { schema } from "../../src/schema/index.ts"
@@ -1300,6 +1302,192 @@ const expectResult = (
   expect(allocation?.treatmentCodes.length).toBeGreaterThan(0)
 }
 
+for (const parent of [
+  "other_transaction",
+  "no_transaction",
+  "unrelated_only",
+  "transaction_blocker",
+] as const) {
+  it.effect(`reads only the exact linked fee capture with ${parent}`, () =>
+    Effect.gen(function* () {
+      const fixture = yield* run(seedCalculation())
+      const fees = yield* run(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const feeAssetId = "00000000-0000-4000-8000-000000007299"
+          yield* db
+            .insert(schema.assets)
+            .values({ id: feeAssetId, name: "Unpriced fee", symbol: "FEE", type: "fungible" })
+          const [other] = yield* db
+            .insert(schema.transactions)
+            .values({
+              principalId: PRINCIPAL_ID,
+              sourceId: SOURCE_ID,
+              externalId: "fee-parent",
+              timestamp: time,
+            })
+            .returning({ id: schema.transactions.id })
+          if (other === undefined) return yield* Effect.die("Missing fee parent")
+          if (parent === "transaction_blocker") {
+            const [provider] = yield* db
+              .insert(schema.providerAssets)
+              .values({
+                provider: "synthetic",
+                providerAssetId: "unknown-fee-parent-asset",
+                currencyCode: "UNKNOWN",
+                name: "Unresolved parent asset",
+                exponent: 8,
+                providerType: "crypto",
+                rawProviderPayload: {},
+                evidenceRevision: 1,
+                discoveredAt: time,
+                retrievedAt: time,
+              })
+              .returning({ id: schema.providerAssets.id })
+            if (provider === undefined) return yield* Effect.die("Missing parent provider asset")
+            yield* db
+              .insert(schema.providerAssetSourceUses)
+              .values({ providerAssetRowId: provider.id, sourceId: SOURCE_ID })
+            yield* db.insert(schema.providerAssetTransactionUses).values({
+              providerAssetRowId: provider.id,
+              sourceId: SOURCE_ID,
+              transactionId: other.id,
+            })
+          }
+
+          return yield* db
+            .insert(schema.transactionLegs)
+            .values(
+              yield* prepareMovementLegFixtures(
+                (parent === "unrelated_only" ? ["unrelated"] : ["linked", "unrelated"]).map(
+                  (name) => ({
+                    movementIdentity: { sourceRecordKey: `fee-${name}`, componentKey: "fee" },
+                    principalId: PRINCIPAL_ID,
+                    sourceId: SOURCE_ID,
+                    externalId: `fee-${name}`,
+                    transactionId:
+                      name === "linked" && parent === "no_transaction" ? null : other.id,
+                    feeForTransactionId: name === "linked" ? fixture.saleId : other.id,
+                    timestamp: time,
+                    assetId: feeAssetId,
+                    amount: "0.1",
+                    kind: "fee" as const,
+                    provenance: "deterministic" as const,
+                    originKind: "none" as const,
+                  })
+                )
+              )
+            )
+            .returning({
+              id: schema.transactionLegs.id,
+              targetId: schema.transactionLegs.movementCorrectionTargetId,
+              feeForTransactionId: schema.transactionLegs.feeForTransactionId,
+              transactionId: schema.transactionLegs.transactionId,
+            })
+        })
+      )
+      yield* acceptTotal(fixture.acquisition.targetId, "20")
+      yield* recompute(1)
+      const linked = fees.find((fee) => fee.feeForTransactionId === fixture.saleId)
+      const unrelated = fees.find((fee) => fee.feeForTransactionId !== fixture.saleId)
+      if (unrelated === undefined) return yield* Effect.die("Missing unrelated fee")
+      const detail = yield* readCalculation(fixture.saleId)
+      const hasLinkedFee = parent !== "unrelated_only"
+      const hasLinkedBlocker = hasLinkedFee
+      expect(detail.attention).toBe(hasLinkedBlocker)
+      expect(detail.movements).toHaveLength(hasLinkedFee ? 2 : 1)
+      if (hasLinkedFee) {
+        if (linked === undefined) return yield* Effect.die("Missing linked fee")
+        expect(detail.movements.find((movement) => movement.id === linked.id)?.capture?.runId).toBe(
+          runId(1)
+        )
+        if (hasLinkedBlocker && parent !== "transaction_blocker")
+          expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).toContain(linked.id)
+      }
+      if (parent === "transaction_blocker") {
+        // The writer withholds both transactions connected by the explicit fee link.
+        expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).toContain(
+          unrelated.transactionId
+        )
+        const writer = yield* run(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const captures = yield* db
+              .select({
+                targetId: schema.calculationRunMovementInputs.targetId,
+                captured: schema.calculationRunMovementInputs.captured,
+              })
+              .from(schema.calculationRunMovementInputs)
+              .where(eq(schema.calculationRunMovementInputs.runId, runId(1)))
+            const allocations = yield* db
+              .select({ eventId: schema.calculationRunAllocations.dispositionEventId })
+              .from(schema.calculationRunAllocations)
+              .where(eq(schema.calculationRunAllocations.runId, runId(1)))
+            return {
+              captures: captures.map((row) => ({
+                ownSale: row.targetId === fixture.disposition.targetId,
+                outcome: row.captured.currentOutcome,
+                event: row.captured.effective.event?._tag,
+              })),
+              allocationCount: allocations.length,
+            }
+          })
+        )
+        expect(writer.allocationCount).toBe(0)
+        expect(writer.captures.find((capture) => capture.ownSale)).toMatchObject({
+          outcome: "withheld",
+          event: undefined,
+        })
+        expect(detail.calculation.allocations).toEqual([])
+        expect(
+          detail.movements.find(
+            (movement) => movement.movementCorrectionTargetId === fixture.disposition.targetId
+          )?.capture
+        ).toMatchObject({ outcome: "withheld", eventId: null })
+      } else {
+        expectResult(detail.calculation, "20", "10")
+      }
+      expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).not.toContain(
+        unrelated.id
+      )
+      const filtered = yield* context.runWithLayer({
+        layer: TransactionListRepositoryLive,
+        effect: Effect.flatMap(TransactionListRepository, (repository) =>
+          repository.list({
+            principalId: PRINCIPAL_ID,
+            jurisdiction: scope.jurisdiction,
+            reportingCurrency: EUR,
+            sourceIds: [],
+            from: null,
+            to: null,
+            order: "newest",
+            attention: true,
+            cursor: null,
+            limit: 100,
+          })
+        ),
+      })
+      expect(filtered.items.some((row) => row.transactionId === fixture.saleId)).toBe(
+        hasLinkedBlocker
+      )
+      expect(filtered.items.every((row) => row.attention)).toBe(true)
+      expect(filtered.totalCount).toBe(hasLinkedBlocker ? 2 : 1)
+      const stored = yield* run(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          return yield* db
+            .select({ eventId: schema.calculationRunBlockers.eventId })
+            .from(schema.calculationRunBlockers)
+            .where(eq(schema.calculationRunBlockers.runId, runId(1)))
+        })
+      )
+      expect(stored.map((blocker) => blocker.eventId)).toContain(
+        parent === "transaction_blocker" ? unrelated.transactionId : unrelated.id
+      )
+    })
+  )
+}
+
 describe("transaction detail calculation snapshot", () => {
   it.effect(
     "keeps accepted current input separate from the displayed run through replacement and withdrawal",
@@ -1312,6 +1500,16 @@ describe("transaction detail calculation snapshot", () => {
         const oldStored = yield* storedRun(1)
         const purchase = yield* readCalculation(fixture.purchaseId)
         const sale = yield* readCalculation(fixture.saleId)
+        expect(purchase.movements[0]?.capture).toMatchObject({
+          runId: runId(1),
+          selectedValue: { amount: "20", kind: "user_valuation" },
+          acquisitionCostBasis: null,
+        })
+        expect(sale.movements[0]?.capture).toMatchObject({
+          realizedResults: [
+            expect.objectContaining({ costBasis: "20", proceeds: "30", gainLoss: "10" }),
+          ],
+        })
         expectResult(sale.calculation, "20", "10")
         expect(sale.calculation.correctionInputs).toContainEqual(
           expect.objectContaining({
@@ -1480,7 +1678,7 @@ describe("transaction detail calculation snapshot", () => {
   )
 
   it.effect(
-    "does not attach old result events to regenerated legs with the same stable target",
+    "retains captured result events through regenerated legs with the same stable target",
     () =>
       Effect.gen(function* () {
         const fixture = yield* run(seedCalculation())
@@ -1583,8 +1781,13 @@ describe("transaction detail calculation snapshot", () => {
         expect(newId).not.toBe(fixture.disposition.id)
         expect(replayed.movements[0]?.movementCorrectionTargetId).toBe(fixture.disposition.targetId)
         expect(replayed.calculation.run?.id).toBe(runId(1))
-        expect(replayed.calculation.state).toBe("partial")
-        expect(replayed.calculation.allocations).toEqual([])
+        expect(replayed.calculation.state).toBe("complete")
+        expectResult(replayed.calculation, "20", "10")
+        expect(replayed.movements[0]?.capture).toMatchObject({
+          runId: runId(1),
+          eventId: fixture.disposition.id,
+          realizedResults: [expect.objectContaining({ proceeds: "30", gainLoss: "10" })],
+        })
         expect(yield* storedRun(1)).toEqual(old)
         yield* recompute(2)
         const recomputed = yield* readCalculation(fixture.saleId)

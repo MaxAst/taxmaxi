@@ -1130,6 +1130,27 @@ describe("TransactionsApiLive", () => {
         }
       }
       expect(new Set(seen).size).toBe(1204)
+      const selectedId = seen[0]
+      if (selectedId === undefined) return yield* Effect.die("Missing selected detail ID")
+      statements.length = 0
+      const inspected = yield* client.transactions.getTransaction({
+        params: { transactionId: selectedId },
+        query: { taxYear: TaxYear.make(2025) },
+      })
+      expect(inspected.movements).toHaveLength(1)
+      expect(inspected.movements[0]?.capture).toBeNull()
+      const detailCaptureReads = statements.filter(({ text }) =>
+        text.startsWith('select "calculation_run_movement_inputs".')
+      )
+      expect(detailCaptureReads).toHaveLength(3)
+      for (const read of detailCaptureReads) {
+        expect(read.text).toContain('"calculation_run_movement_inputs"."target_id" in (')
+        expect(read.params.slice(-1)).toEqual([inspected.movements[0]?.movementCorrectionTargetId])
+        expect(
+          read.params.filter((value) => typeof value === "string" && value.startsWith("20000000-"))
+        ).toEqual([])
+        expect(read.params).toContain(2025)
+      }
       expect(
         yield* getAuthenticatedStatus({
           path: "/v1/transactions?limit=501",
@@ -2003,6 +2024,37 @@ describe("TransactionsApiLive", () => {
           )
         expect(older).toHaveLength(1)
         expect(older[0]?.captured.currentOutcome).toBe("outside_period")
+        for (const row of capturedRows) {
+          const detail = yield* client.transactions.getTransaction({
+            params: { transactionId: row.transactionId },
+            query: { taxYear: TaxYear.make(2025) },
+          })
+          expect(detail.calculation.run?.id).toBe(capturedRunId)
+          expect(detail.attention).toBe(row.attention)
+          expect(detail.calculation.processedEventIds).toEqual([fixtureIds.reconciliationId])
+          expect(detail.movements).toHaveLength(2)
+          for (const movement of detail.movements) {
+            expect(movement.timestamp).toBe(occurredAt.toISOString())
+            expect(movement.imported.timestamp).toBe(
+              movement.id === fixtureIds.providerTransferLegId
+                ? providerOccurredAt.toISOString()
+                : occurredAt.toISOString()
+            )
+          }
+          for (const movement of row.movements)
+            expect(
+              detail.movements.find((item) => item.movementCorrectionTargetId === movement.targetId)
+                ?.capture
+            ).toEqual(movement.capture)
+        }
+        const wrongYear = yield* client.transactions.getTransaction({
+          params: { transactionId: fixtureIds.providerTransferTransactionId },
+          query: { taxYear: TaxYear.make(2024) },
+        })
+        expect(wrongYear.calculation.run?.id).toBe("00000000-0000-4000-8000-000000007248")
+        expect(wrongYear.movements.every((movement) => movement.capture === null)).toBe(true)
+        expect(wrongYear.calculation.allocations).toEqual([])
+        expect(wrongYear.calculation.income).toEqual([])
       }).pipe(Effect.provide(HttpLive), Effect.scoped)
     )
   )
@@ -3044,8 +3096,92 @@ describe("writer-produced transaction income", () => {
   )
 })
 
+const expectMatchingDetails = (page: typeof TransactionListResponse.Type) =>
+  Effect.gen(function* () {
+    const client = yield* makeAuthenticatedClient({ userId: USER_ID })
+    for (const row of page.transactions) {
+      const detail = yield* client.transactions.getTransaction({
+        params: { transactionId: row.transactionId },
+        query: { taxYear: TaxYear.make(2026) },
+      })
+      expect(detail.attention).toBe(row.attention)
+      for (const movement of row.movements) {
+        const inspected = detail.movements.find(
+          (item) => item.movementCorrectionTargetId === movement.targetId
+        )
+        expect(inspected?.capture).toEqual(movement.capture)
+        expect(inspected).toMatchObject({ amount: movement.amount, kind: movement.kind })
+        if (movement.capture !== null) {
+          expect(detail.calculation.run?.id).toBe(movement.capture.runId)
+          expect(inspected?.assetId).toBe(movement.capture.assetId)
+          expect(inspected?.capture?.acquisitionCostBasis).toBeNull()
+        }
+      }
+    }
+  })
+
 describe("writer-produced transaction list captures", () => {
   beforeEach(() => Effect.runPromise(context.recreateTestDatabase()))
+
+  it.effect("retains its own transaction blocker through real replay", () =>
+    Effect.gen(function* () {
+      const fixture = yield* seedCalculation()
+      const db = yield* drizzle
+      const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z"))
+      const [provider] = yield* db
+        .insert(schema.providerAssets)
+        .values({
+          provider: "synthetic",
+          providerAssetId: "unknown-own-transaction",
+          currencyCode: "UNKNOWN",
+          name: "Unresolved own asset",
+          exponent: 8,
+          providerType: "crypto",
+          rawProviderPayload: {},
+          evidenceRevision: 1,
+          discoveredAt: timestamp,
+          retrievedAt: timestamp,
+        })
+        .returning({ id: schema.providerAssets.id })
+      if (provider === undefined) return yield* Effect.die("Missing unknown provider asset")
+      yield* db
+        .insert(schema.providerAssetSourceUses)
+        .values({ providerAssetRowId: provider.id, sourceId: SOURCE_ID })
+      yield* db.insert(schema.providerAssetTransactionUses).values({
+        providerAssetRowId: provider.id,
+        sourceId: SOURCE_ID,
+        transactionId: fixture.purchaseId,
+      })
+      yield* recompute(45)
+      const client = yield* makeAuthenticatedClient({ userId: USER_ID })
+      const before = yield* client.transactions.getTransaction({
+        params: { transactionId: fixture.purchaseId },
+        query: { taxYear: TaxYear.make(2026) },
+      })
+      expect(before.attention).toBe(true)
+      expect(before.calculation.blockers.map((blocker) => blocker.eventId)).toContain(
+        fixture.purchaseId
+      )
+      yield* replaySyntheticSource()
+      const page = yield* client.transactions.listTransactions({
+        query: { limit: 10, attention: true },
+      })
+      const current = page.transactions.find((row) =>
+        row.movements.some((movement) => movement.targetId === fixture.acquisition.targetId)
+      )
+      if (current === undefined) return yield* Effect.die("Replayed owned blocker disappeared")
+      expect(current.transactionId).not.toBe(fixture.purchaseId)
+      const after = yield* client.transactions.getTransaction({
+        params: { transactionId: current.transactionId },
+        query: { taxYear: TaxYear.make(2026) },
+      })
+      expect(after.attention).toBe(true)
+      expect(after.calculation.run?.id).toBe(runId(45))
+      expect(after.calculation.blockers).toEqual(before.calculation.blockers)
+      expect(after.movements[0]?.capture).toEqual(before.movements[0]?.capture)
+      expect(after.movements[0]?.id).not.toBe(before.movements[0]?.id)
+    }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
 
   it.effect("keeps absent capture unavailable when its durable target reappears after replay", () =>
     Effect.gen(function* () {
@@ -3067,6 +3203,7 @@ describe("writer-produced transaction list captures", () => {
       expect(absent[0]?.captured).toMatchObject({ current: null, currentOutcome: "absent" })
       const client = yield* makeAuthenticatedClient({ userId: USER_ID })
       const response = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+      yield* expectMatchingDetails(response)
       const purchase = response.transactions.find((row) =>
         row.movements.some(({ targetId }) => targetId === fixture.acquisition.targetId)
       )
@@ -3098,6 +3235,7 @@ describe("writer-produced transaction list captures", () => {
         yield* recompute(43)
         const client = yield* makeAuthenticatedClient({ userId: USER_ID })
         const before = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        yield* expectMatchingDetails(before)
         const original = before.transactions.find((row) =>
           row.movements.some(({ targetId }) => targetId === fixture.acquisition.targetId)
         )?.movements[0]
@@ -3118,6 +3256,7 @@ describe("writer-produced transaction list captures", () => {
           timestamp: "2027-03-01T00:00:00Z",
         })
         const after = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        yield* expectMatchingDetails(after)
         const replayed = after.transactions.find((row) =>
           row.movements.some(({ targetId }) => targetId === fixture.acquisition.targetId)
         )?.movements[0]
@@ -3244,6 +3383,7 @@ describe("writer-produced transaction list captures", () => {
       yield* recompute(42)
       const client = yield* makeAuthenticatedClient({ userId: USER_ID })
       const response = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+      yield* expectMatchingDetails(response)
       const purchase = response.transactions.find(
         ({ transactionId }) => transactionId === fixture.purchaseId
       )
@@ -3281,6 +3421,7 @@ describe("writer-produced transaction list captures", () => {
         ),
       })
       const pending = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+      yield* expectMatchingDetails(pending)
       expect(
         pending.transactions.find((row) => row.transactionId === fixture.purchaseId)?.movements
       ).toEqual(purchase?.movements)
@@ -3328,6 +3469,7 @@ describe("writer-produced transaction list captures", () => {
         expect(result.status).toBe("partial")
         const client = yield* makeAuthenticatedClient({ userId: USER_ID })
         const response = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        yield* expectMatchingDetails(response)
         const purchase = response.transactions.find(
           ({ transactionId }) => transactionId === fixture.purchaseId
         )
@@ -3340,6 +3482,8 @@ describe("writer-produced transaction list captures", () => {
           selectedValue: { kind: "user_valuation", amount: "20", currency: "EUR" },
         })
         expect(sale?.realizedGainLoss).toBe("10")
+        expect(sale?.attention).toBe(true)
+        expect(purchase?.attention).toBe(false)
         expect(sale?.movements).toHaveLength(2)
         expect(new Set(sale?.movements.map(({ targetId }) => targetId))).toEqual(
           new Set([fixture.disposition.targetId, fee.targetId])
@@ -3359,6 +3503,7 @@ describe("writer-produced transaction list captures", () => {
         const fixture = yield* seedCalculation("10")
         const client = yield* makeAuthenticatedClient({ userId: USER_ID })
         const before = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        yield* expectMatchingDetails(before)
         expect(
           before.transactions
             .flatMap(({ movements }) => movements)
@@ -3388,7 +3533,20 @@ describe("writer-produced transaction list captures", () => {
           yield* sdk.effect.transactions.list({ limit: 10 }),
           yield* Effect.promise(() => sdk.transactions.list({ limit: 10 })),
         ]
+        for (const detail of [
+          yield* sdk.effect.transactions.get({ transactionId: fixture.purchaseId, taxYear: 2026 }),
+          yield* Effect.promise(() =>
+            sdk.transactions.get({ transactionId: fixture.saleId, taxYear: 2026 })
+          ),
+        ]) {
+          expect(detail.calculation.run?.id).toBe(runId(40))
+          expect(detail.movements[0]?.capture?.quantity).toBe("10")
+          expect(detail.movements[0]?.capture?.selectedValue?.amount).toBe(
+            detail.transactionId === fixture.purchaseId ? "20" : "30"
+          )
+        }
         for (const response of responses) {
+          yield* expectMatchingDetails(response)
           const purchase = response.transactions.find(
             ({ transactionId }) => transactionId === fixture.purchaseId
           )
@@ -3438,6 +3596,7 @@ describe("writer-produced transaction list captures", () => {
         }
         yield* replaySyntheticSource()
         const replayedPage = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        yield* expectMatchingDetails(replayedPage)
         expect(
           replayedPage.transactions.find((row) =>
             row.movements.some(({ targetId }) => targetId === fixture.disposition.targetId)
@@ -3449,6 +3608,7 @@ describe("writer-produced transaction list captures", () => {
           operation: "replace",
         })
         const pending = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        yield* expectMatchingDetails(pending)
         expect(
           pending.transactions.find((row) =>
             row.movements.some(({ targetId }) => targetId === fixture.acquisition.targetId)

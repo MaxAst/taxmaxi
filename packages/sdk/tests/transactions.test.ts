@@ -6,6 +6,7 @@ import { TaxMaxi, TaxMaxiError, type TransactionDetail } from "../src/index.ts"
 const TRANSACTION_ID = "00000000-0000-4000-8000-000000009901"
 const SOURCE_ID = "00000000-0000-4000-8000-000000009902"
 const DETAIL = {
+  attention: false,
   transactionId: TRANSACTION_ID,
   timestamp: "2025-03-01T00:00:00.000Z",
   source: { sourceId: SOURCE_ID, name: "Synthetic wallet", kind: "onchain" },
@@ -76,6 +77,25 @@ describe("transaction detail SDK", () => {
         `https://sdk.example.test/v1/transactions/${TRANSACTION_ID}?taxYear=2025`,
       ])
       expect(requests.map((request) => request.credentials)).toEqual(["include", "include"])
+    })
+  )
+
+  it.effect("preserves explicit attention independently of unavailable calculation values", () =>
+    Effect.gen(function* () {
+      const requests: Array<{ url: string; headers: Headers; credentials: string | undefined }> = []
+      const detail = { ...DETAIL, attention: true }
+      const client = TaxMaxi.fromBrowserSession({
+        baseUrl: "https://sdk.example.test",
+        fetch: makeFetch({ body: detail, requests }),
+      })
+      for (const response of [
+        yield* client.effect.transactions.get(READ),
+        yield* Effect.promise(() => client.transactions.get(READ)),
+      ]) {
+        expect(response.attention).toBe(true)
+        expect(response.calculation.run).toBeNull()
+        expect(response.calculation.monetaryStatus).toBe("unavailable")
+      }
     })
   )
 
