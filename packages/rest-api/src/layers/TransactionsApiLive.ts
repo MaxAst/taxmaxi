@@ -156,6 +156,8 @@ export const TransactionsApiLive = HttpApiBuilder.group(TaxMaxiApi, "transaction
               jurisdiction: GERMAN_JURISDICTION,
               reportingCurrency: EUR,
               sourceIds: query.sourceIds ?? (query.sourceId === undefined ? [] : [query.sourceId]),
+              assetIds: query.assetIds ?? [],
+              categories: query.categories ?? [],
               from: query.from ?? null,
               to: query.to ?? null,
               order: query.order ?? "newest",

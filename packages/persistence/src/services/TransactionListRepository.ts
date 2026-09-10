@@ -7,7 +7,7 @@
 import * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
-import type { JurisdictionCode } from "@my/core/accounting"
+import type { AcquisitionCause, DispositionCause, JurisdictionCode } from "@my/core/accounting"
 import type { CurrencyCode } from "@my/core/currency"
 import type { PersistenceError } from "../errors/RepositoryError.ts"
 
@@ -116,11 +116,21 @@ export interface TransactionListPage {
   readonly totalCount: number
 }
 
+/** Effective nonfee causes, plus broad staking and recorded custody movement. */
+export type TransactionFilterCategory =
+  | AcquisitionCause
+  | Exclude<DispositionCause, "fee">
+  | "staking"
+  | "custody_movement"
+
 export interface TransactionListParams {
   readonly principalId: string
   readonly jurisdiction: JurisdictionCode
   readonly reportingCurrency: CurrencyCode
   readonly sourceIds: ReadonlyArray<string>
+  /** Economic asset identities from the completed movement projection. */
+  readonly assetIds?: ReadonlyArray<string>
+  readonly categories?: ReadonlyArray<TransactionFilterCategory>
   /** UTC half-open occurrence interval. */
   readonly from: Date | null
   readonly to: Date | null
