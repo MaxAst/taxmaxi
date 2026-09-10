@@ -15,6 +15,7 @@ import { CurrencyCode } from "@my/core/currency"
 import * as BigDecimal from "effect/BigDecimal"
 import { and, asc, eq, exists, inArray, ne, or, sql } from "drizzle-orm"
 import * as Effect from "effect/Effect"
+import * as DateTime from "effect/DateTime"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import { UnsupportedJurisdictionError } from "@my/accounting"
@@ -23,10 +24,7 @@ import { isPersistenceError, PersistenceError } from "../errors/RepositoryError.
 import { schema } from "../schema/index.ts"
 import { PrincipalAssetOverrideRepository } from "../services/PrincipalAssetOverrideRepository.ts"
 import { PrincipalAssetOverrideRepositoryLive } from "./PrincipalAssetOverrideRepositoryLive.ts"
-import {
-  PrincipalTransactionOverrideRepository,
-  type PrincipalTransactionOverrideProjection,
-} from "../services/PrincipalTransactionOverrideRepository.ts"
+import { PrincipalTransactionOverrideRepository } from "../services/PrincipalTransactionOverrideRepository.ts"
 import {
   TransactionDetailRepository,
   type TransactionDetailRepositoryService,
@@ -36,6 +34,11 @@ import {
 } from "../services/TransactionDetailRepository.ts"
 import { PrincipalTransactionOverrideRepositoryLive } from "./PrincipalTransactionOverrideRepositoryLive.ts"
 import { drizzle } from "./PgClientLive.ts"
+import {
+  attentionPredicate,
+  loadCaptures,
+  type CapturedMovementProjection,
+} from "./TransactionReadProjection.ts"
 
 const Uuid = Schema.String.check(Schema.isUUID())
 
@@ -255,14 +258,12 @@ const make = Effect.gen(function* () {
   const readCalculation = ({
     executor,
     params,
-    movementIds,
-    movementOverrides,
+    captures,
     targetIds,
   }: {
     readonly executor: Pick<typeof db, "select">
     readonly params: Parameters<TransactionDetailRepositoryService["find"]>[0]
-    readonly movementIds: ReadonlyArray<string>
-    readonly movementOverrides: ReadonlyArray<PrincipalTransactionOverrideProjection>
+    readonly captures: ReadonlyArray<CapturedMovementProjection>
     readonly targetIds: ReadonlyArray<string>
   }) =>
     Effect.gen(function* () {
@@ -312,16 +313,12 @@ const make = Effect.gen(function* () {
       const processedIds = yield* Schema.decodeEffect(Schema.Array(Schema.String))(
         storedProcessedIds
       )
-      // The current factual projection records custody event links as well as leg events.
-      const eventIds = [
-        ...new Set([
-          ...movementIds,
-          ...movementOverrides.flatMap(
-            (projection) =>
-              projection.inputs.current?.custody.map((custody) => custody.reconciliationId) ?? []
-          ),
-        ]),
-      ]
+      const selectedCaptures = captures.filter(
+        (projection) => projection.movement.capture.runId === run.id
+      )
+      const eventIds = selectedCaptures.flatMap((projection) =>
+        projection.movement.capture.eventId === null ? [] : [projection.movement.capture.eventId]
+      )
       const allocations = yield* executor
         .select({
           sequence: schema.calculationRunAllocations.sequence,
@@ -400,6 +397,25 @@ const make = Effect.gen(function* () {
       const linkedEventIds = [
         ...new Set([
           ...eventIds,
+          ...selectedCaptures.flatMap(({ recorded }) =>
+            recorded.current === null
+              ? []
+              : [
+                  recorded.current.legId,
+                  ...(recorded.current.transactionId === null
+                    ? []
+                    : [recorded.current.transactionId]),
+                  ...recorded.current.custody
+                    .filter(
+                      (context) =>
+                        DateTime.getPart(
+                          DateTime.setZoneNamedUnsafe(context.occurredAt, "Europe/Berlin"),
+                          "year"
+                        ) === params.scope.taxYear
+                    )
+                    .map((context) => context.reconciliationId),
+                ]
+          ),
           ...allocations.flatMap((allocation) => [
             allocation.acquisitionEventId,
             allocation.dispositionEventId,
@@ -486,18 +502,13 @@ const make = Effect.gen(function* () {
         })
       )
       const processedEventIds = eventIds.filter((id) => processedIds.includes(id))
-      const expectedIds = movementOverrides.flatMap((projection) => {
-        const custody = projection.inputs.current?.custody ?? []
-        return custody.length > 0
-          ? custody.map((item) => item.reconciliationId)
-          : projection.inputs.current === null
-            ? []
-            : [projection.inputs.current.legId]
-      })
+      const expectedIds = eventIds
       const custodyIds = new Set(
-        movementOverrides.flatMap(
-          (projection) =>
-            projection.inputs.current?.custody.map((item) => item.reconciliationId) ?? []
+        selectedCaptures.flatMap((projection) =>
+          projection.movement.capture.eventKind === "custody_movement" &&
+          projection.movement.capture.eventId !== null
+            ? [projection.movement.capture.eventId]
+            : []
         )
       )
       const hasStoredResult = (id: string) =>
@@ -510,6 +521,10 @@ const make = Effect.gen(function* () {
           (row) => row.costBasis !== null && row.proceeds !== null && row.gainLoss !== null
         ) && derivedLots.every((row) => row.costBasisPerUnit !== null)
       const complete =
+        selectedCaptures.length === targetIds.length &&
+        selectedCaptures.every(
+          (projection) => projection.movement.capture.outcome === "included"
+        ) &&
         expectedIds.length > 0 &&
         expectedIds.every((id) => processedIds.includes(id) && hasStoredResult(id)) &&
         blockers.length === 0 &&
@@ -548,6 +563,10 @@ const make = Effect.gen(function* () {
           Effect.gen(function* () {
             const [transaction] = yield* tx
               .select({
+                attention: attentionPredicate(tx, {
+                  principalId: params.principalId,
+                  ...params.scope,
+                }),
                 transactionId: schema.transactions.id,
                 sourceRawRecordId: schema.transactions.sourceRawRecordId,
                 evidence: safeRawEvidence,
@@ -642,10 +661,12 @@ const make = Effect.gen(function* () {
                     .orderBy(asc(schema.transactionLegs.timestamp), asc(schema.transactionLegs.id))
             const movementIds = movements.map((movement) => movement.id)
             const transactionIds = [
-              params.transactionId,
-              ...movements.flatMap((movement) =>
-                movement.transactionId === null ? [] : [movement.transactionId]
-              ),
+              ...new Set([
+                params.transactionId,
+                ...movements.flatMap((movement) =>
+                  movement.transactionId === null ? [] : [movement.transactionId]
+                ),
+              ]),
             ]
             // Retained provider evidence belongs to its recorded transaction even without a leg.
             const linkedProviders = yield* tx
@@ -857,11 +878,15 @@ const make = Effect.gen(function* () {
               movements,
               principalId: params.principalId,
             })
+            const captures = yield* loadCaptures({
+              executor: tx,
+              scope: { principalId: params.principalId, ...params.scope },
+              selection: { kind: "targets", ids: targetIds },
+            })
             const calculation = yield* readCalculation({
               executor: tx,
               params,
-              movementIds,
-              movementOverrides,
+              captures: [...captures.values()],
               targetIds,
             })
             const { evidence: transactionEvidence, ...transactionFacts } = transaction
@@ -898,11 +923,34 @@ const make = Effect.gen(function* () {
                 ),
               ],
               reconciliations,
-              movements: movements.map((movement) => ({
-                ...movement,
-                evidenceStatus:
-                  movement.evidence === null ? ("unavailable" as const) : ("available" as const),
-              })),
+              movements: yield* Effect.forEach(movements, (movement) =>
+                Effect.gen(function* () {
+                  const projection = captures.get(movement.movementCorrectionTargetId)
+                  const capture = projection?.movement.capture ?? null
+                  const capturedTime = projection?.recorded.current?.occurredAt
+                  return {
+                    ...movement,
+                    imported: {
+                      timestamp: movement.timestamp,
+                      assetId: movement.assetId,
+                      amount: movement.amount,
+                      kind: movement.kind,
+                    },
+                    amount: projection?.movement.amount ?? (yield* exactDecimal(movement.amount)),
+                    assetId: capture?.assetId ?? movement.assetId,
+                    kind: projection?.movement.kind ?? movement.kind,
+                    timestamp:
+                      capturedTime === undefined
+                        ? movement.timestamp
+                        : DateTime.toDateUtc(capturedTime),
+                    capture,
+                    evidenceStatus:
+                      movement.evidence === null
+                        ? ("unavailable" as const)
+                        : ("available" as const),
+                  }
+                })
+              ),
               classificationHistoryStatus: "unavailable" as const,
             })
           }),

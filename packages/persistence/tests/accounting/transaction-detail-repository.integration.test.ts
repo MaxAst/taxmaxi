@@ -1300,6 +1300,87 @@ const expectResult = (
   expect(allocation?.treatmentCodes.length).toBeGreaterThan(0)
 }
 
+for (const parent of ["other_transaction", "no_transaction"] as const) {
+  it.effect(`reads only the exact linked fee capture with ${parent}`, () =>
+    Effect.gen(function* () {
+      const fixture = yield* run(seedCalculation())
+      const fees = yield* run(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const feeAssetId = "00000000-0000-4000-8000-000000007299"
+          yield* db
+            .insert(schema.assets)
+            .values({ id: feeAssetId, name: "Unpriced fee", symbol: "FEE", type: "fungible" })
+          const [other] = yield* db
+            .insert(schema.transactions)
+            .values({
+              principalId: PRINCIPAL_ID,
+              sourceId: SOURCE_ID,
+              externalId: "fee-parent",
+              timestamp: time,
+            })
+            .returning({ id: schema.transactions.id })
+          if (other === undefined) return yield* Effect.die("Missing fee parent")
+          return yield* db
+            .insert(schema.transactionLegs)
+            .values(
+              yield* prepareMovementLegFixtures(
+                ["linked", "unrelated"].map((name) => ({
+                  movementIdentity: { sourceRecordKey: `fee-${name}`, componentKey: "fee" },
+                  principalId: PRINCIPAL_ID,
+                  sourceId: SOURCE_ID,
+                  externalId: `fee-${name}`,
+                  transactionId: name === "linked" && parent === "no_transaction" ? null : other.id,
+                  feeForTransactionId: name === "linked" ? fixture.saleId : other.id,
+                  timestamp: time,
+                  assetId: feeAssetId,
+                  amount: "0.1",
+                  kind: "fee" as const,
+                  provenance: "deterministic" as const,
+                  originKind: "none" as const,
+                }))
+              )
+            )
+            .returning({
+              id: schema.transactionLegs.id,
+              targetId: schema.transactionLegs.movementCorrectionTargetId,
+              feeForTransactionId: schema.transactionLegs.feeForTransactionId,
+            })
+        })
+      )
+      yield* acceptTotal(fixture.acquisition.targetId, "20")
+      yield* recompute(1)
+      const linked = fees.find((fee) => fee.feeForTransactionId === fixture.saleId)
+      const unrelated = fees.find((fee) => fee.feeForTransactionId !== fixture.saleId)
+      if (linked === undefined || unrelated === undefined) return yield* Effect.die("Missing fees")
+      const detail = yield* readCalculation(fixture.saleId)
+      expect(detail.movements.map((movement) => movement.movementCorrectionTargetId)).toEqual(
+        expect.arrayContaining([fixture.disposition.targetId, linked.targetId])
+      )
+      expect(detail.movements).toHaveLength(2)
+      expect(detail.movements.find((movement) => movement.id === linked.id)?.capture?.runId).toBe(
+        runId(1)
+      )
+      expect(detail.calculation.allocations).toHaveLength(1)
+      expectResult(detail.calculation, "20", "10")
+      expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).toContain(linked.id)
+      expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).not.toContain(
+        unrelated.id
+      )
+      const stored = yield* run(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          return yield* db
+            .select({ eventId: schema.calculationRunBlockers.eventId })
+            .from(schema.calculationRunBlockers)
+            .where(eq(schema.calculationRunBlockers.runId, runId(1)))
+        })
+      )
+      expect(stored.map((blocker) => blocker.eventId)).toContain(unrelated.id)
+    })
+  )
+}
+
 describe("transaction detail calculation snapshot", () => {
   it.effect(
     "keeps accepted current input separate from the displayed run through replacement and withdrawal",
@@ -1312,6 +1393,16 @@ describe("transaction detail calculation snapshot", () => {
         const oldStored = yield* storedRun(1)
         const purchase = yield* readCalculation(fixture.purchaseId)
         const sale = yield* readCalculation(fixture.saleId)
+        expect(purchase.movements[0]?.capture).toMatchObject({
+          runId: runId(1),
+          selectedValue: { amount: "20", kind: "user_valuation" },
+          acquisitionCostBasis: null,
+        })
+        expect(sale.movements[0]?.capture).toMatchObject({
+          realizedResults: [
+            expect.objectContaining({ costBasis: "20", proceeds: "30", gainLoss: "10" }),
+          ],
+        })
         expectResult(sale.calculation, "20", "10")
         expect(sale.calculation.correctionInputs).toContainEqual(
           expect.objectContaining({
@@ -1480,7 +1571,7 @@ describe("transaction detail calculation snapshot", () => {
   )
 
   it.effect(
-    "does not attach old result events to regenerated legs with the same stable target",
+    "retains captured result events through regenerated legs with the same stable target",
     () =>
       Effect.gen(function* () {
         const fixture = yield* run(seedCalculation())
@@ -1583,8 +1674,13 @@ describe("transaction detail calculation snapshot", () => {
         expect(newId).not.toBe(fixture.disposition.id)
         expect(replayed.movements[0]?.movementCorrectionTargetId).toBe(fixture.disposition.targetId)
         expect(replayed.calculation.run?.id).toBe(runId(1))
-        expect(replayed.calculation.state).toBe("partial")
-        expect(replayed.calculation.allocations).toEqual([])
+        expect(replayed.calculation.state).toBe("complete")
+        expectResult(replayed.calculation, "20", "10")
+        expect(replayed.movements[0]?.capture).toMatchObject({
+          runId: runId(1),
+          eventId: fixture.disposition.id,
+          realizedResults: [expect.objectContaining({ proceeds: "30", gainLoss: "10" })],
+        })
         expect(yield* storedRun(1)).toEqual(old)
         yield* recompute(2)
         const recomputed = yield* readCalculation(fixture.saleId)

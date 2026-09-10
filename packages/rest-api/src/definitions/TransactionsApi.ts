@@ -198,6 +198,7 @@ const Evidence = Schema.Struct({
 
 /** Owned recorded facts, current decisions and one immutable calculation snapshot. */
 export const TransactionDetailResponse = Schema.Struct({
+  attention: Schema.Boolean,
   transactionId: Schema.String,
   timestamp: IsoDate,
   source: TransactionListSource,
@@ -219,6 +220,13 @@ export const TransactionDetailResponse = Schema.Struct({
   ),
   movements: Schema.Array(
     Schema.Struct({
+      capture: Schema.NullOr(TransactionListMovementCapture),
+      imported: Schema.Struct({
+        timestamp: IsoDate,
+        assetId: Schema.String,
+        amount: Schema.String,
+        kind: Schema.Literals(["acquisition", "disposal", "income", "fee"]),
+      }),
       id: Schema.String,
       transactionId: NullableText,
       sourceId: Schema.String,

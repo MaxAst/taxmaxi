@@ -71,6 +71,7 @@ const render = (element: ReactElement) => {
 }
 
 const detail = (): TransactionDetail => ({
+  attention: transaction.attention,
   transactionId: transaction.transactionId,
   timestamp: transaction.timestamp,
   source: transaction.source,

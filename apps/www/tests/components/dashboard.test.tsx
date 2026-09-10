@@ -609,6 +609,7 @@ describe("Dashboard calculation refresh", () => {
     let disappeared = false
     const requests: URL[] = []
     const detail = (): TransactionDetail => ({
+      attention: false,
       transactionId: row.transactionId,
       timestamp: row.timestamp,
       source: row.source,
@@ -842,6 +843,7 @@ describe("Dashboard calculation refresh", () => {
         page: { hasMore: false, nextCursor: null },
       })
       const response = (): TransactionDetail => ({
+        attention: false,
         transactionId: row.transactionId,
         timestamp: row.timestamp,
         source: row.source,

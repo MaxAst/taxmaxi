@@ -7,6 +7,7 @@ import * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import type * as Option from "effect/Option"
 import type { PersistenceError } from "../errors/RepositoryError.ts"
+import type { TransactionListMovementCapture } from "./TransactionListRepository.ts"
 import type { CalculationRunCorrectionInput } from "./FactualLedgerRepository.ts"
 import type { PrincipalAssetOverrideProjection } from "./PrincipalAssetOverrideRepository.ts"
 import type {
@@ -37,6 +38,14 @@ export interface TransactionDetailEvidenceLink {
 
 /** Recorded movement facts, including exact writer-selected links. */
 export interface TransactionDetailMovement {
+  readonly capture: TransactionListMovementCapture | null
+  /** Current imported evidence, separate from the completed movement displayed above it. */
+  readonly imported: {
+    readonly timestamp: Date
+    readonly assetId: string
+    readonly amount: string
+    readonly kind: "acquisition" | "disposal" | "income" | "fee"
+  }
   readonly id: string
   readonly transactionId: string | null
   readonly sourceId: string
@@ -126,6 +135,8 @@ export interface TransactionDetailCalculation {
 
 /** Owned facts, selected-run results and independent current correction projections. */
 export interface TransactionDetail {
+  /** Explicit owned review or linked blocker in the selected calculation scope. */
+  readonly attention: boolean
   readonly calculation: TransactionDetailCalculation
   readonly movementOverrides: ReadonlyArray<PrincipalTransactionOverrideProjection>
   readonly assetOverrides: ReadonlyArray<{
