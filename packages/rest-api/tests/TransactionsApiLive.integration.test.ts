@@ -578,7 +578,7 @@ const seedSourceFilterFixtures = Effect.gen(function* () {
 })
 
 // Source records and movements cross the same writer used by sync before API reads.
-const seedQueryFilterFixtures = (attention = false) =>
+const seedQueryFilterFixtures = (attention = false, duplicateMovement = false) =>
   Effect.gen(function* () {
     const fixture = yield* seedSyncEngineRepositoryFixture({
       principalId: fixtureIds.principalId,
@@ -744,7 +744,16 @@ const seedQueryFilterFixtures = (attention = false) =>
                           },
                         },
                       ]
-                    : [leg]
+                    : duplicateMovement && index === 0
+                      ? [
+                          leg,
+                          {
+                            ...leg,
+                            externalId: `${externalId}:second`,
+                            movementIdentity: { ...leg.movementIdentity, componentKey: "second" },
+                          },
+                        ]
+                      : [leg]
                 )
           ),
       })
@@ -757,6 +766,115 @@ await Effect.runPromise(context.recreateTestDatabase())
 
 describe("TransactionsApiLive", () => {
   beforeEach(() => Effect.runPromise(Effect.asVoid(context.recreateTestDatabase())))
+
+  it.effect("filters completed economic assets and nonfee causes with exact grouped counts", () =>
+    Effect.gen(function* () {
+      const fixture = yield* seedQueryFilterFixtures(true, true)
+      const client = yield* makeAuthenticatedClient({ userId: fixture.userId })
+      expect(
+        (yield* client.transactions.listTransactions({ query: { categories: ["unknown"] } }))
+          .totalCount
+      ).toBe(0)
+      expect(
+        (yield* client.transactions.listTransactions({ query: { assetIds: [TEST_BTC_ASSET_ID] } }))
+          .totalCount
+      ).toBe(0)
+      yield* context.runWithLayer({
+        layer: runLayer,
+        effect: Effect.flatMap(CalculationRunService, (service) =>
+          service.recompute({
+            id: runId(81),
+            principalId: PrincipalId.make(fixture.principalId),
+            jurisdiction: scope.jurisdiction,
+            taxYear: TaxYear.make(2025),
+            reportingCurrency: EUR,
+            accountingChoices: [],
+          })
+        ),
+      })
+      const secondAsset = "00000000-0000-4000-8000-000000009901"
+      const read = (
+        query: typeof import("../src/definitions/TransactionsApi.ts").TransactionListQuery.Type
+      ) => client.transactions.listTransactions({ query })
+      const expectIds = (response: TransactionListResponse, ids: ReadonlyArray<string>) => {
+        expect(response.totalCount).toBe(ids.length)
+        expect(response.transactions.map((row) => row.transactionId).sort()).toEqual(
+          [...ids].sort()
+        )
+      }
+      expectIds(yield* read({ assetIds: [TEST_BTC_ASSET_ID] }), fixture.ids.slice(0, 2))
+      expectIds(yield* read({ assetIds: [secondAsset] }), fixture.ids.slice(1, 3))
+      expectIds(
+        yield* read({ assetIds: [TEST_BTC_ASSET_ID, secondAsset, TEST_BTC_ASSET_ID] }),
+        fixture.ids.slice(0, 3)
+      )
+      // The fee has the second asset; the nonfee sale satisfies the category group.
+      expectIds(
+        yield* read({ assetIds: [secondAsset], categories: ["sale"] }),
+        fixture.ids.slice(1, 2)
+      )
+      const twoMovements = yield* read({ assetIds: [TEST_BTC_ASSET_ID], categories: ["purchase"] })
+      expectIds(twoMovements, fixture.ids.slice(0, 1))
+      expect(twoMovements.transactions[0]?.movements).toHaveLength(2)
+      expectIds(
+        yield* read({
+          assetIds: [secondAsset],
+          categories: ["purchase"],
+          sourceIds: [fixture.sourceId],
+        }),
+        []
+      )
+      expectIds(
+        yield* read({
+          assetIds: [TEST_BTC_ASSET_ID],
+          categories: ["sale", "purchase"],
+          attention: true,
+        }),
+        fixture.ids.slice(0, 2)
+      )
+      expectIds(
+        yield* read({
+          categories: ["purchase"],
+          to: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-02T00:00:00Z")),
+        }),
+        fixture.ids.slice(0, 1)
+      )
+      expectIds(yield* read({ categories: ["unknown"] }), [])
+      const query = {
+        assetIds: [TEST_BTC_ASSET_ID, secondAsset],
+        categories: ["purchase", "sale"],
+      } as const
+      const first = yield* read({ ...query, limit: 1 })
+      const cursor = first.page.nextCursor
+      if (cursor === null) return yield* Effect.die("Missing filtered cursor")
+      const equivalent = yield* read({
+        assetIds: [secondAsset.toUpperCase(), TEST_BTC_ASSET_ID, secondAsset],
+        categories: ["sale", "purchase", "sale"],
+        cursor,
+      })
+      expect(equivalent.totalCount).toBe(3)
+      expect(
+        new Set([...first.transactions, ...equivalent.transactions].map((row) => row.transactionId))
+          .size
+      ).toBe(3)
+      for (const change of [
+        { assetIds: [TEST_BTC_ASSET_ID] },
+        { categories: ["purchase"] as const },
+        { sourceIds: [fixture.sourceId] },
+        { attention: true },
+        { order: "oldest" as const },
+        { from: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-02T00:00:00Z")) },
+      ]) {
+        const error = yield* read({ ...query, ...change, cursor }).pipe(Effect.flip)
+        expect(error).toMatchObject({ _tag: "TransactionBadRequestError" })
+      }
+      const choices = yield* client.transactions.filterChoices()
+      expect(choices.assets.map((asset) => asset.assetId).sort()).toEqual(
+        [TEST_BTC_ASSET_ID, secondAsset].sort()
+      )
+      expect(new Set(choices.assets.map((asset) => asset.symbol))).toEqual(new Set(["BTC"]))
+    }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
 
   it.effect(
     "shares exact writer-linked attention across rows, count, cursor and historical choices",
@@ -979,6 +1097,9 @@ describe("TransactionsApiLive", () => {
           "?from=2025-03-02T00:00:00Z&to=2025-03-01T00:00:00Z",
           "?from=2025-03-01T00:00:00Z&to=2025-03-01T00:00:00Z",
           "?sourceIds=invalid",
+          "?assetIds=invalid",
+          "?categories=fee",
+          "?categories=made_up",
           "?order=sideways",
         ]) {
           expect(
@@ -3279,7 +3400,18 @@ describe("writer-produced transaction list captures", () => {
 
   it.effect("reads combined asset, category and price corrections from the completed capture", () =>
     Effect.gen(function* () {
-      const fixture = yield* seedCalculation("10")
+      const seeded = yield* seedCalculation("10")
+      const replayed = yield* replaySyntheticSource()
+      const acquisition = replayed.find((leg) => leg.targetId === seeded.acquisition.targetId)
+      const disposition = replayed.find((leg) => leg.targetId === seeded.disposition.targetId)
+      if (acquisition?.transactionId == null || disposition?.transactionId == null)
+        return yield* Effect.die("Missing replayed movements")
+      const fixture = {
+        acquisition,
+        disposition,
+        purchaseId: acquisition.transactionId,
+        saleId: disposition.transactionId,
+      }
       const db = yield* drizzle
       const replacementAssetId = "00000000-0000-4000-8000-000000007299"
       yield* db.insert(schema.assets).values({
@@ -3327,6 +3459,17 @@ describe("writer-produced transaction list captures", () => {
         .update(schema.transactions)
         .set({ transactionType: "staking_reward" })
         .where(eq(schema.transactions.id, fixture.purchaseId))
+      yield* recompute(45)
+      const filterClient = yield* makeAuthenticatedClient({ userId: USER_ID })
+      expect(
+        (yield* filterClient.transactions.listTransactions({
+          query: { assetIds: [replacementAssetId] },
+        })).totalCount
+      ).toBe(0)
+      expect(
+        (yield* filterClient.transactions.listTransactions({ query: { categories: ["staking"] } }))
+          .totalCount
+      ).toBe(1)
       const assetCorrection = yield* context.runWithLayer({
         layer: PrincipalAssetOverrideRepositoryLive,
         effect: Effect.flatMap(PrincipalAssetOverrideRepository, (repository) =>
@@ -3380,7 +3523,25 @@ describe("writer-produced transaction list captures", () => {
       yield* completeReplay(classified.processingJobId)
       const priced = yield* acceptTotal({ targetId: fixture.acquisition.targetId, amount: "20" })
       yield* completeReplay(priced.processingJobId)
+      expect(
+        (yield* filterClient.transactions.listTransactions({
+          query: { assetIds: [replacementAssetId] },
+        })).totalCount
+      ).toBe(0)
+      expect(
+        (yield* filterClient.transactions.listTransactions({ query: { categories: ["staking"] } }))
+          .totalCount
+      ).toBe(1)
       yield* recompute(42)
+      const filtered = yield* filterClient.transactions.listTransactions({
+        query: { assetIds: [replacementAssetId], categories: ["purchase"] },
+      })
+      expect(filtered.totalCount).toBe(1)
+      expect(filtered.transactions.map((row) => row.transactionId)).toEqual([fixture.purchaseId])
+      expect(
+        (yield* filterClient.transactions.listTransactions({ query: { categories: ["staking"] } }))
+          .totalCount
+      ).toBe(0)
       const client = yield* makeAuthenticatedClient({ userId: USER_ID })
       const response = yield* client.transactions.listTransactions({ query: { limit: 10 } })
       yield* expectMatchingDetails(response)
@@ -3425,6 +3586,11 @@ describe("writer-produced transaction list captures", () => {
       expect(
         pending.transactions.find((row) => row.transactionId === fixture.purchaseId)?.movements
       ).toEqual(purchase?.movements)
+      expect(
+        (yield* filterClient.transactions.listTransactions({
+          query: { assetIds: [replacementAssetId], categories: ["purchase"] },
+        })).totalCount
+      ).toBe(1)
     }).pipe(Effect.provide(HttpLive), Effect.scoped)
   )
 
@@ -3624,6 +3790,97 @@ describe("writer-produced transaction list captures", () => {
 
 describe("transaction detail HTTP and SDK", () => {
   beforeEach(() => Effect.runPromise(context.recreateTestDatabase()))
+
+  for (const style of ["Effect", "Promise"] as const) {
+    it.effect(
+      `switches corrected staking filters only with completed facts through the ${style} SDK`,
+      () =>
+        Effect.gen(function* () {
+          const fixture = yield* seedCalculation()
+          const db = yield* drizzle
+          yield* db
+            .update(schema.transactions)
+            .set({ transactionType: "other_income" })
+            .where(eq(schema.transactions.id, fixture.purchaseId))
+          // Normal sync writer creates the transaction and movement IDs used by all reads below.
+          yield* replaySyntheticSource()
+          yield* recompute(90)
+          const server = yield* HttpServer.HttpServer
+          if (server.address._tag !== "TcpAddress")
+            return yield* Effect.die("Expected TCP test server")
+          const sdk = new TaxMaxi({
+            apiKey: `user_${USER_ID}_admin`,
+            baseUrl: `http://127.0.0.1:${server.address.port}`,
+          })
+          const list = (
+            categories: ReadonlyArray<
+              "staking" | "staking_reward" | "passive_staking_reward" | "unknown"
+            >
+          ) =>
+            style === "Effect"
+              ? sdk.effect.transactions.list({ categories })
+              : Effect.promise(() => sdk.transactions.list({ categories }))
+          expect((yield* list(["staking"])).totalCount).toBe(0)
+          expect((yield* list(["unknown"])).totalCount).toBe(1)
+          let leafId: string | null = null
+          for (const [index, cause] of ["passive_staking_reward", "staking_reward"].entries()) {
+            const accepted = yield* context.runWithLayer({
+              layer: PrincipalTransactionOverrideRepositoryLive,
+              effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repository) =>
+                Effect.gen(function* () {
+                  const found = yield* repository.findContext({
+                    principalId: PRINCIPAL_ID,
+                    targetId: fixture.acquisition.targetId,
+                    reportingCurrency: EUR,
+                  })
+                  if (Option.isNone(found) || found.value.current === null)
+                    return yield* Effect.die("Missing receipt")
+                  const input = {
+                    _tag: "classification",
+                    input: {
+                      _tag: "inbound",
+                      cause:
+                        cause === "passive_staking_reward"
+                          ? "passive_staking_reward"
+                          : "staking_reward",
+                    },
+                  } as const
+                  const params = {
+                    principalId: PRINCIPAL_ID,
+                    actorUserId: USER_ID,
+                    targetId: fixture.acquisition.targetId,
+                    reportingCurrency: EUR,
+                    expectedSystemRevision: found.value.current.facts.systemRevision,
+                    reason: "Receipt is a staking reward",
+                    input,
+                  }
+                  const result =
+                    leafId === null
+                      ? yield* repository.create({ ...params, expectedLeafId: null })
+                      : yield* repository.replace({ ...params, expectedLeafId: leafId })
+                  if (Option.isNone(result))
+                    return yield* Effect.die("Classification was not accepted")
+                  return result.value
+                })
+              ),
+            })
+            leafId = accepted.overrideId
+            expect((yield* list(["staking"])).totalCount).toBe(index)
+            yield* completeReplay(accepted.processingJobId)
+            expect((yield* list(["staking"])).totalCount).toBe(index)
+            yield* recompute(91 + index)
+            const matched = yield* list(["staking"])
+            expect(matched.totalCount).toBe(1)
+            expect(matched.transactions).toHaveLength(1)
+            expect(matched.transactions[0]?.transactionType).toBe("other_income")
+            expect(matched.transactions[0]?.movements[0]?.capture?.cause).toBe(cause)
+            expect((yield* list(["unknown"])).totalCount).toBe(0)
+            expect((yield* list(["passive_staking_reward"])).totalCount).toBe(index === 0 ? 1 : 0)
+            expect((yield* list(["staking_reward"])).totalCount).toBe(index === 1 ? 1 : 0)
+          }
+        }).pipe(Effect.provide(HttpLive), Effect.scoped)
+    )
+  }
 
   for (const style of ["Effect", "Promise"] as const) {
     it.effect(`reads actual correction runs and retained history through the ${style} SDK`, () =>

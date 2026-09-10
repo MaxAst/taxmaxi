@@ -53,6 +53,25 @@ const TransactionAttentionQuery = Schema.Literals(["true", "false"]).pipe(
 export const TransactionListQuery = Schema.Struct({
   sourceId: Schema.optional(Schema.String.check(Schema.isUUID())),
   sourceIds: Schema.optional(Schema.Array(Schema.String.check(Schema.isUUID()))),
+  assetIds: Schema.optional(Schema.Array(Schema.String.check(Schema.isUUID()))),
+  categories: Schema.optional(
+    Schema.Array(
+      Schema.Literals([
+        "purchase",
+        "sale",
+        "gift",
+        "airdrop",
+        "mining_reward",
+        "staking",
+        "staking_reward",
+        "passive_staking_reward",
+        "reward",
+        "payment",
+        "unknown",
+        "custody_movement",
+      ])
+    )
+  ),
   from: Schema.optional(TransactionDateBoundary),
   to: Schema.optional(TransactionDateBoundary),
   order: Schema.optional(Schema.Literals(["newest", "oldest"])),
@@ -371,7 +390,7 @@ const listTransactions = HttpApiEndpoint.get("listTransactions", "/transactions"
   OpenApi.annotations({
     summary: "List transactions",
     description:
-      "Returns a stable cursor page of compact accounting transactions owned by the authenticated principal. Select exact owned sources with repeated sourceIds parameters or the sourceId shorthand, never both. Omitted or empty sourceIds selects all owned sources. Optional from/to timestamps require explicit UTC offsets and form an inclusive-start, exclusive-end interval. Order is newest (default) or oldest, with transaction IDs breaking timestamp ties. Optional attention=true selects rows with an explicitly linked owned review or blocker; false or omitted keeps all rows. Cursors are bound to the source set, dates, order and attention selection. Rows and totalCount share these filters and exclude provider activity without accounting movements.",
+      "Returns a stable cursor page of compact accounting transactions owned by the authenticated principal. Select exact owned sources with repeated sourceIds parameters or the sourceId shorthand, never both. Omitted or empty sourceIds selects all owned sources. Optional from/to timestamps require explicit UTC offsets and form an inclusive-start, exclusive-end interval. Order is newest (default) or oldest, with transaction IDs breaking timestamp ties. Optional attention=true selects rows with an explicitly linked owned review or blocker; false or omitted keeps all rows. Repeated assetIds select economic identities from the completed movement projection. Repeated categories select effective nonfee causes; staking includes staking_reward and passive_staking_reward. Missing captures do not match a category. Empty sets leave that group unfiltered. Choices within each source/asset/category group are ORed; groups are ANDed even when different movements match. Cursors are bound to the source, asset and category sets, dates, order and attention selection. Rows and totalCount share these filters and exclude provider activity without accounting movements.",
   })
 )
 

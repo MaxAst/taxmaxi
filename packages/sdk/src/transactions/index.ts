@@ -15,6 +15,10 @@ export type TransactionListItem = Transactions["transactions"][number]
 export type TransactionListInput = {
   readonly sourceId?: string
   readonly sourceIds?: ReadonlyArray<string>
+  /** Economic identities from completed movement facts; OR within the set. */
+  readonly assetIds?: ReadonlyArray<string>
+  /** Effective nonfee causes; staking includes passive and unspecified staking. */
+  readonly categories?: typeof TransactionListQuery.Type.categories
   /** Inclusive ISO timestamp. */
   readonly from?: string
   /** Exclusive ISO timestamp. */

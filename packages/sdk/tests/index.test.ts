@@ -740,6 +740,32 @@ describe("TaxMaxi Promise client", () => {
       })
   )
 
+  it.effect("encodes effective asset and category groups through both SDK resources", () =>
+    Effect.gen(function* () {
+      const capturedRequests: Array<CapturedRequest> = []
+      const taxmaxi = new TaxMaxi({
+        apiKey: "tm_transactions",
+        baseUrl: "https://sdk.example.test",
+        fetch: makeFetch(capturedRequests, encodeJson(transactionListResponse)),
+      })
+      const input = {
+        assetIds: ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"],
+        categories: ["staking", "purchase"],
+      } as const
+      yield* taxmaxi.effect.transactions.list(input)
+      yield* Effect.promise(() => taxmaxi.transactions.list(input))
+      for (const request of capturedRequests) {
+        const params = new URL(request.url).searchParams
+        expect(params.getAll("assetIds")).toEqual(input.assetIds)
+        expect(params.getAll("categories")).toEqual(input.categories)
+      }
+      yield* Effect.promise(() =>
+        expect(taxmaxi.transactions.list({ assetIds: ["invalid"] })).rejects.toBeDefined()
+      )
+      expect(capturedRequests).toHaveLength(2)
+    })
+  )
+
   it.effect(
     "encodes source sets, UTC interval and order through the shared transaction query",
     () =>

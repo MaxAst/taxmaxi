@@ -32,6 +32,7 @@ import {
   TransactionListInvalidCursorError,
   TransactionListRepository,
   TransactionListSourceNotFoundError,
+  type TransactionFilterCategory,
   type TransactionListItem,
   type TransactionListMovement,
   type TransactionListRepositoryService,
@@ -48,6 +49,8 @@ import {
 interface TransactionReadScope extends CalculationReadScope {
   readonly principalId: string
   readonly sourceIds: ReadonlyArray<string>
+  readonly assetIds: ReadonlyArray<string>
+  readonly categories: ReadonlyArray<TransactionFilterCategory>
   readonly from: string | null
   readonly to: string | null
   readonly order: "newest" | "oldest"
@@ -83,9 +86,11 @@ const eventTaxYear = sql<number>`extract(
 const matchingEventTaxYear = eq(schema.activeCalculationRuns.taxYear, eventTaxYear)
 
 const TransactionCursorPayload = Schema.Struct({
-  version: Schema.Literal(4),
+  version: Schema.Literal(5),
   principalId: Schema.String.check(Schema.isUUID()),
   sourceIds: Schema.Array(Schema.String.check(Schema.isUUID())),
+  assetIds: Schema.Array(Schema.String.check(Schema.isUUID())),
+  categories: Schema.Array(Schema.String),
   from: Schema.NullOr(Schema.String),
   to: Schema.NullOr(Schema.String),
   order: Schema.Literals(["newest", "oldest"]),
@@ -101,7 +106,7 @@ const makeCursor = ({
   id,
   scope,
 }: CursorParts & { readonly scope: TransactionReadScope }): string =>
-  Schema.encodeSync(TransactionCursor)({ version: 4, timestamp, id, ...scope })
+  Schema.encodeSync(TransactionCursor)({ version: 5, timestamp, id, ...scope })
 
 const parseCursor = ({
   cursor,
@@ -117,6 +122,8 @@ const parseCursor = ({
         Effect.flatMap((payload) =>
           payload.principalId.toLowerCase() === scope.principalId &&
           JSON.stringify(payload.sourceIds) === JSON.stringify(scope.sourceIds) &&
+          JSON.stringify(payload.assetIds) === JSON.stringify(scope.assetIds) &&
+          JSON.stringify(payload.categories) === JSON.stringify(scope.categories) &&
           payload.from === scope.from &&
           payload.to === scope.to &&
           payload.order === scope.order &&
@@ -159,11 +166,77 @@ const make = Effect.gen(function* () {
 
   const inputs = schema.calculationRunMovementInputs
 
+  // Each group matches a transaction through its durable movement targets. Separate
+  // EXISTS predicates allow different movements to satisfy different filter groups.
+  const capturedMatch = ({
+    executor,
+    scope,
+    predicate,
+  }: {
+    readonly executor: TransactionListExecutor
+    readonly scope: TransactionReadScope
+    readonly predicate: ReturnType<typeof sql>
+  }) =>
+    exists(
+      executor
+        .select({ targetId: inputs.targetId })
+        .from(schema.transactionLegs)
+        .innerJoin(
+          inputs,
+          and(
+            eq(inputs.targetId, schema.transactionLegs.movementCorrectionTargetId),
+            eq(inputs.sourceId, schema.transactionLegs.sourceId),
+            eq(inputs.principalId, scope.principalId)
+          )
+        )
+        .innerJoin(
+          schema.activeCalculationRuns,
+          and(eq(schema.activeCalculationRuns.runId, inputs.runId), activeRunScope(scope))
+        )
+        .where(and(ownedLeg(scope.principalId), capturedTarget(scope), predicate))
+    )
+
+  const categoryPredicate = (categories: ReadonlyArray<TransactionFilterCategory>) => {
+    const causes = [
+      ...new Set(
+        categories.flatMap((category) =>
+          category === "staking" ? ["staking_reward", "passive_staking_reward"] : [category]
+        )
+      ),
+    ]
+    const event = sql`${inputs.captured}->'effective'->'event'`
+    return sql`(
+      ${event}->>'_tag' in ('acquisition', 'disposition', 'custody_movement')
+      and ${inputs.captured}->'current'->>'legKind' <> 'fee'
+      and coalesce(${event}->>'cause', '') <> 'fee'
+      and ${inArray(
+        sql<string>`case when ${event}->>'_tag' = 'custody_movement'
+        then 'custody_movement' else ${event}->>'cause' end`,
+        causes
+      )}
+    )`
+  }
+
   const ownedScope = (executor: TransactionListExecutor, scope: TransactionReadScope) =>
     and(
       eq(schema.transactions.principalId, scope.principalId),
       eq(schema.sources.principalId, scope.principalId),
       scope.attention ? attentionPredicate(executor, scope) : undefined,
+      scope.assetIds.length === 0
+        ? undefined
+        : capturedMatch({
+            executor,
+            scope,
+            predicate: sql`${inArray(
+              sql<string>`coalesce(${inputs.captured}->'effective'->'event'->>'assetId',
+          ${inputs.captured}->'current'->>'effectiveAssetId',
+          ${inputs.captured}->'current'->>'storedAssetId')`,
+              scope.assetIds
+            )}`,
+          }),
+      scope.categories.length === 0
+        ? undefined
+        : capturedMatch({ executor, scope, predicate: categoryPredicate(scope.categories) }),
       scope.sourceIds.length === 0
         ? undefined
         : inArray(schema.transactions.sourceId, scope.sourceIds),
@@ -751,6 +824,8 @@ const make = Effect.gen(function* () {
         reportingCurrency: params.reportingCurrency,
         attention: params.attention ?? false,
         sourceIds: [...new Set(params.sourceIds.map((id) => id.toLowerCase()))].sort(),
+        assetIds: [...new Set((params.assetIds ?? []).map((id) => id.toLowerCase()))].sort(),
+        categories: [...new Set(params.categories ?? [])].sort(),
         from: params.from?.toISOString() ?? null,
         to: params.to?.toISOString() ?? null,
         order: params.order ?? "newest",
