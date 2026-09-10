@@ -2031,6 +2031,16 @@ describe("TransactionsApiLive", () => {
           })
           expect(detail.calculation.run?.id).toBe(capturedRunId)
           expect(detail.attention).toBe(row.attention)
+          expect(detail.calculation.processedEventIds).toEqual([fixtureIds.reconciliationId])
+          expect(detail.movements).toHaveLength(2)
+          for (const movement of detail.movements) {
+            expect(movement.timestamp).toBe(occurredAt.toISOString())
+            expect(movement.imported.timestamp).toBe(
+              movement.id === fixtureIds.providerTransferLegId
+                ? providerOccurredAt.toISOString()
+                : occurredAt.toISOString()
+            )
+          }
           for (const movement of row.movements)
             expect(
               detail.movements.find((item) => item.movementCorrectionTargetId === movement.targetId)

@@ -316,9 +316,15 @@ const make = Effect.gen(function* () {
       const selectedCaptures = captures.filter(
         (projection) => projection.movement.capture.runId === run.id
       )
-      const eventIds = selectedCaptures.flatMap((projection) =>
-        projection.movement.capture.eventId === null ? [] : [projection.movement.capture.eventId]
-      )
+      const eventIds = [
+        ...new Set(
+          selectedCaptures.flatMap((projection) =>
+            projection.movement.capture.eventId === null
+              ? []
+              : [projection.movement.capture.eventId]
+          )
+        ),
+      ]
       const allocations = yield* executor
         .select({
           sequence: schema.calculationRunAllocations.sequence,
@@ -927,7 +933,13 @@ const make = Effect.gen(function* () {
                 Effect.gen(function* () {
                   const projection = captures.get(movement.movementCorrectionTargetId)
                   const capture = projection?.movement.capture ?? null
-                  const capturedTime = projection?.recorded.current?.occurredAt
+                  const effectiveEvent = projection?.recorded.effective.event
+                  const capturedTime =
+                    effectiveEvent === undefined || effectiveEvent === null
+                      ? projection?.recorded.current?.occurredAt
+                      : yield* Schema.decodeEffect(Schema.DateTimeUtcFromMillis)(
+                          effectiveEvent.occurredAt.epochMillis
+                        )
                   return {
                     ...movement,
                     imported: {
