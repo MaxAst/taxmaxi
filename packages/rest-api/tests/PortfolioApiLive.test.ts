@@ -91,6 +91,35 @@ describe("makePortfolioSummary", () => {
 })
 
 describe("makePortfolioAssetRow", () => {
+  it("keeps known zero basis and signed sub-cent values for combined positions", () => {
+    const asset = makePortfolioAssetRow({
+      position: {
+        assetId: "btc",
+        symbol: "BTC",
+        name: "Bitcoin",
+        logoUrl: null,
+        coingeckoCoinId: "bitcoin",
+        amount: "13",
+        costBasis: "0",
+        costBasisCurrency: "EUR",
+        costBasisStatus: "known",
+      },
+      market: { price: "0.00001", logoUrl: "https://example.com/btc.png" },
+      currency: "eur",
+    })
+    expect(encodeAsset(asset)).toMatchObject({
+      amount: "13",
+      totalValue: "0.00013",
+      profitLoss: "0.00013",
+    })
+    expect(encodeSummary(makePortfolioSummary([asset]))).toEqual({
+      totalValue: "0.00013",
+      costBasis: "0",
+      profitLoss: "0.00013",
+      profitLossPercentage: null,
+    })
+  })
+
   it("suppresses unrealized profit when the position has pending cost basis", () => {
     const asset = makePortfolioAssetRow({
       position: {

@@ -13,6 +13,13 @@ export class PortfolioSourceNotFoundResponse extends Schema.TaggedError<Portfoli
   { httpApiStatus: 404 }
 ) {}
 
+/** The two source query forms cannot be combined. */
+export class PortfolioBadRequestResponse extends Schema.TaggedError<PortfolioBadRequestResponse>()(
+  "PortfolioBadRequestResponse",
+  { code: Schema.Literal("conflicting_source_filters") },
+  { httpApiStatus: 400 }
+) {}
+
 export class PortfolioAssetRow extends Schema.Class<PortfolioAssetRow>("PortfolioAssetRow")({
   assetId: Schema.String,
   symbol: Schema.String,
@@ -73,18 +80,19 @@ export const PortfolioCurrency = Schema.String.pipe(
 
 const PortfolioAssetsQuery = Schema.Struct({
   sourceId: Schema.optional(Schema.String.check(Schema.isUUID())),
+  sourceIds: Schema.optional(Schema.Array(Schema.String.check(Schema.isUUID()))),
   currency: Schema.optional(PortfolioCurrency),
 })
 
 const listPortfolioAssets = HttpApiEndpoint.get("listPortfolioAssets", "/assets", {
   query: PortfolioAssetsQuery,
   success: PortfolioAssetsResponse,
-  error: [PortfolioSourceNotFoundResponse, InternalServerError],
+  error: [PortfolioBadRequestResponse, PortfolioSourceNotFoundResponse, InternalServerError],
 }).annotateMerge(
   OpenApi.annotations({
     summary: "List portfolio assets",
     description:
-      "Returns positions from the active calculation run across all user sources or one selected source, plus the latest run status and live CoinGecko values.",
+      "Returns positions from the active calculation run across all user sources or the union of selected sources’ captured custody units, counted once, plus the latest run status and live CoinGecko values. Select owned sources with repeated sourceIds parameters or the sourceId shorthand, never both. Omitted or empty sourceIds selects all sources.",
   })
 )
 

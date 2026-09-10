@@ -20,10 +20,11 @@ export class PortfolioSourceNotFoundError extends Schema.TaggedError<PortfolioSo
   { sourceId: Schema.String }
 ) {}
 
-/** Active calculation scope and optional source view requested by the portfolio reader. */
+/** Active calculation scope and source-set view requested by the portfolio reader. */
 export interface ActiveRunPortfolioScope {
   readonly principalId: PrincipalId
-  readonly sourceId: SourceId | null
+  /** Empty selects all sources; selected sources include their captured custody units once. */
+  readonly sourceIds: ReadonlyArray<SourceId>
   readonly jurisdiction: JurisdictionCode
   readonly taxYear: TaxYear
   readonly reportingCurrency: CurrencyCode
