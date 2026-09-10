@@ -45,7 +45,7 @@ export function transactionResults(transaction: TransactionListItem) {
   const hasIncome =
     transaction.income !== null || transaction.movements.some(({ kind }) => kind === "income")
   const label = (value: string | null) =>
-    transaction.calculationState === "partial"
+    value === null && transaction.calculationState === "partial"
       ? m["app.dashboard.transactions.gainLossPending"]()
       : formatTransactionAmount({ value, currency: transaction.fiatCurrency })
   const results = []
@@ -63,31 +63,137 @@ export function transactionResults(transaction: TransactionListItem) {
     )
   ) {
     results.push({
-      label: m["app.dashboard.transactions.realizedGainLoss"](),
+      label: transaction.movements.some(
+        ({ kind, capture }) => kind === "fee" && (capture?.realizedResults.length ?? 0) > 0
+      )
+        ? m["app.dashboard.transactions.totalGainLoss"]()
+        : m["app.dashboard.transactions.realizedGainLoss"](),
       amount: label(transaction.realizedGainLoss),
     })
   }
   return results
 }
 
-export function transactionMovements(transaction: TransactionListItem) {
-  return transaction.movements.map((movement) => {
-    const parsed = decimal.safeParse(movement.amount)
-    const amount = parsed.success ? parsed.data.replace(/^-/, "") : null
-    const value =
-      amount === null
-        ? m["app.dashboard.transactions.valueUnavailable"]()
-        : `${amount} ${movement.assetSymbol}`
-    if (movement.kind === "fee")
-      return m["app.dashboard.transactions.feeMovement"]({ amount: value })
-    return movement.kind === "acquisition" || movement.kind === "income"
-      ? m["app.dashboard.transactions.receivedMovement"]({
-          amount: amount === null ? value : `+${value}`,
-        })
-      : m["app.dashboard.transactions.sentMovement"]({
-          amount: amount === null ? value : `−${value}`,
-        })
-  })
+export function transactionMovementLabel(movement: Movement): string {
+  const parsed = decimal.safeParse(movement.amount)
+  const amount = parsed.success ? parsed.data.replace(/^-/, "") : null
+  const value =
+    amount === null
+      ? m["app.dashboard.transactions.valueUnavailable"]()
+      : `${amount} ${movement.assetSymbol}`
+  if (movement.kind === "fee") return m["app.dashboard.transactions.feeMovement"]({ amount: value })
+  return movement.kind === "acquisition" || movement.kind === "income"
+    ? m["app.dashboard.transactions.receivedMovement"]({
+        amount: amount === null ? value : `+${value}`,
+      })
+    : m["app.dashboard.transactions.sentMovement"]({
+        amount: amount === null ? value : `−${value}`,
+      })
+}
+
+type Movement = TransactionListItem["movements"][number]
+type DisplayFact = { readonly label: string; readonly amount: string }
+
+/** Present recorded movement money without substituting valuation for consideration or basis. */
+export function transactionMovementFacts(movement: Movement): ReadonlyArray<DisplayFact> {
+  const capture = movement.capture
+  const facts: Array<DisplayFact> = []
+  const add = (label: string, value: string | null, currency: string | null) =>
+    facts.push({ label, amount: formatTransactionAmount({ value, currency }) })
+  const fee = movement.kind === "fee"
+  const providerLabel = fee
+    ? m["app.dashboard.transactions.feePaid"]()
+    : capture?.cause === "purchase"
+      ? m["app.dashboard.transactions.paid"]()
+      : capture?.cause === "sale"
+        ? m["app.dashboard.transactions.receivedValue"]()
+        : m["app.dashboard.transactions.providerAmount"]()
+  for (const value of capture?.providerConsiderations ?? [])
+    add(providerLabel, value.amount, value.currency)
+  if (
+    capture?.cause === "purchase" ||
+    capture?.cause === "sale" ||
+    capture?.eventKind === "custody_movement"
+  ) {
+    if (capture.providerConsiderations.length === 0) add(providerLabel, null, null)
+  }
+  const selected = capture?.selectedValue
+  if (selected !== undefined && selected !== null) {
+    const label = fee
+      ? m["app.dashboard.transactions.feeValuation"]()
+      : selected.kind === "market_quote"
+        ? m["app.dashboard.transactions.marketValuation"]()
+        : selected.kind === "user_valuation"
+          ? m["app.dashboard.transactions.userValuation"]()
+          : m["app.dashboard.transactions.selectedConsideration"]()
+    add(label, selected.amount, selected.currency)
+  } else if (fee || capture?.eventKind === "acquisition") {
+    add(
+      fee
+        ? m["app.dashboard.transactions.feeValue"]()
+        : m["app.dashboard.transactions.valuation"](),
+      null,
+      null
+    )
+  }
+  const results = capture?.realizedResults ?? []
+  const currencies = [...new Set(results.map((result) => result.currency))]
+  for (const currency of currencies) {
+    const inCurrency = results.filter((result) => result.currency === currency)
+    const sum = (field: "proceeds" | "costBasis" | "gainLoss") => {
+      let total = BigDecimal.make(0n, 0)
+      for (const result of inCurrency) {
+        const parsed = decimal.safeParse(result[field])
+        if (!parsed.success) return null
+        total = BigDecimal.sum(total, BigDecimal.fromStringUnsafe(parsed.data))
+      }
+      return BigDecimal.format(total)
+    }
+    if (fee) add(m["app.dashboard.transactions.feeGainLoss"](), sum("gainLoss"), currency)
+    else {
+      add(m["app.dashboard.transactions.proceeds"](), sum("proceeds"), currency)
+      add(m["app.dashboard.transactions.costBasis"](), sum("costBasis"), currency)
+    }
+  }
+  if (
+    !fee &&
+    (capture === null || capture.eventKind === null) &&
+    (selected === undefined || selected === null)
+  )
+    add(m["app.dashboard.transactions.movementValue"](), null, null)
+  if (!fee && capture?.eventKind === "disposition" && results.length === 0)
+    add(m["app.dashboard.transactions.proceeds"](), null, null)
+  return facts
+}
+
+/** Label only the cause captured for this movement, without inventing a row-wide category. */
+export function transactionMovementCause(movement: Movement): string | null {
+  switch (movement.capture?.cause) {
+    case "purchase":
+      return m["app.dashboard.transactions.causes.purchase"]()
+    case "sale":
+      return m["app.dashboard.transactions.causes.sale"]()
+    case "gift":
+      return m["app.dashboard.transactions.causes.gift"]()
+    case "airdrop":
+      return m["app.dashboard.transactions.types.airdrop"]()
+    case "mining_reward":
+      return m["app.dashboard.transactions.types.mining_reward"]()
+    case "staking_reward":
+      return m["app.dashboard.transactions.types.staking_reward"]()
+    case "passive_staking_reward":
+      return m["app.dashboard.transactions.causes.passiveStaking"]()
+    case "reward":
+      return m["app.dashboard.transactions.causes.reward"]()
+    case "payment":
+      return m["app.dashboard.transactions.causes.payment"]()
+    case "fee":
+      return null
+    case "unknown":
+      return m["app.dashboard.transactions.unclassified"]()
+    default:
+      return null
+  }
 }
 
 export function transactionTypeLabel(value: string | null): string {

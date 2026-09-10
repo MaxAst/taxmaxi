@@ -502,7 +502,30 @@
         "previousPage": "Previous page",
         "previous": "Previous",
         "nextPage": "Next page",
-        "next": "Next"
+        "next": "Next",
+        "paid": "Paid",
+        "receivedValue": "Received",
+        "providerAmount": "Provider amount",
+        "feePaid": "Fee paid",
+        "feeValuation": "Fee valuation",
+        "feeValue": "Fee value",
+        "marketValuation": "Market valuation",
+        "userValuation": "Your valuation",
+        "selectedConsideration": "Selected consideration",
+        "valuation": "Valuation",
+        "proceeds": "Proceeds",
+        "costBasis": "Cost basis",
+        "feeGainLoss": "Fee gain/loss",
+        "totalGainLoss": "Total gain/loss (including fees)",
+        "causes": {
+          "purchase": "Purchase",
+          "sale": "Sale",
+          "gift": "Gift",
+          "passiveStaking": "Passive staking reward",
+          "reward": "Reward",
+          "payment": "Payment"
+        },
+        "movementValue": "Value"
       }
     }
   },

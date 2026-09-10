@@ -195,6 +195,147 @@ describe("TransactionsTable", () => {
     }
   )
 
+  it.each([
+    "buy_fiat",
+    "sell_fiat",
+    "swap_crypto_to_crypto",
+    "staking_reward",
+    "internal_transfer",
+    "partial",
+  ])("presents captured facts for %s without hiding known partial values", (shape) => {
+    const purchase = {
+      targetId: "purchase",
+      amount: "1",
+      assetSymbol: "ETH",
+      kind: "acquisition",
+      capture: {
+        runId: "completed-run",
+        eventId: "purchase-event",
+        outcome: "included",
+        quantity: "1",
+        assetId: "eth",
+        assetSymbol: "ETH",
+        eventKind: "acquisition",
+        cause: "purchase",
+        valuationState: "selected",
+        selectedValue: { kind: "market_quote", amount: "22", currency: "EUR" },
+        providerConsiderations: [{ amount: "20", currency: "EUR" }],
+        acquisitionCostBasis: null,
+        realizedResults: [],
+      },
+    } satisfies TransactionListItem["movements"][number]
+    const sale = {
+      ...purchase,
+      targetId: "sale",
+      assetSymbol: "BTC",
+      kind: "disposal",
+      capture: {
+        ...purchase.capture,
+        runId: "completed-run",
+        eventId: "sale-event",
+        outcome: "included",
+        quantity: "1",
+        assetId: "btc",
+        assetSymbol: "BTC",
+        eventKind: "disposition",
+        cause: "sale",
+        valuationState: "selected",
+        selectedValue: { kind: "observed_consideration", amount: "30", currency: "EUR" },
+        providerConsiderations: [{ amount: "30", currency: "EUR" }],
+        acquisitionCostBasis: null,
+        realizedResults: [
+          {
+            acquisitionEventId: "prior-purchase-event",
+            quantity: "1",
+            costBasis: "20",
+            proceeds: "30",
+            gainLoss: "10",
+            currency: "EUR",
+          },
+        ],
+      },
+    } satisfies TransactionListItem["movements"][number]
+    const isIncome = shape === "staking_reward"
+    const isTransfer = shape === "internal_transfer"
+    const isPurchase = shape === "buy_fiat"
+    const principal = isIncome
+      ? {
+          ...purchase,
+          kind: "income" as const,
+          capture: {
+            ...purchase.capture,
+            cause: "staking_reward",
+            providerConsiderations: [],
+            selectedValue: { kind: "market_quote" as const, amount: "2", currency: "EUR" },
+          },
+        }
+      : isTransfer
+        ? {
+            ...sale,
+            capture: {
+              ...sale.capture,
+              eventKind: "custody_movement" as const,
+              valuationState: "not_evaluated" as const,
+              cause: null,
+              selectedValue: null,
+              providerConsiderations: [],
+              realizedResults: [],
+            },
+          }
+        : isPurchase
+          ? purchase
+          : sale
+    render(
+      <TransactionsWithInspector
+        {...defaultProps}
+        transactions={[
+          {
+            ...transaction,
+            transactionType: shape === "partial" ? "sell_fiat" : shape,
+            description: null,
+            income: isIncome ? "2" : null,
+            realizedGainLoss: isIncome || isTransfer || isPurchase ? null : "10",
+            calculationState: shape === "partial" ? "partial" : "complete",
+            attention: shape === "partial",
+            needsReview: false,
+            movements: shape === "swap_crypto_to_crypto" ? [sale, purchase] : [principal],
+          },
+        ]}
+      />
+    )
+    if (isPurchase || shape === "swap_crypto_to_crypto") {
+      expect(screen.getByText("Paid: +€20.00")).toBeTruthy()
+      expect(screen.getByText("Market valuation: +€22.00")).toBeTruthy()
+      expect(screen.queryByText("Paid: +€22.00")).toBeNull()
+    }
+    if (!isIncome && !isTransfer && !isPurchase) {
+      expect(screen.getByText("Proceeds: +€30.00")).toBeTruthy()
+      expect(screen.getAllByText("+€10.00")).toHaveLength(2)
+    }
+    if (isIncome) expect(screen.getAllByText("+€2.00")).toHaveLength(2)
+    if (shape === "swap_crypto_to_crypto") {
+      expect(screen.getByText("Received +1 ETH · Purchase")).toBeTruthy()
+      expect(screen.getByText("Sent −1 BTC · Sale")).toBeTruthy()
+    }
+    if (isTransfer) {
+      expect(screen.getByText("Sent −1 BTC")).toBeTruthy()
+      expect(screen.getByText("Provider amount: Unavailable")).toBeTruthy()
+    }
+    if (shape === "partial") expect(screen.getByLabelText("Needs review")).toBeTruthy()
+    expect(screen.queryByText("Not applicable")).toBeNull()
+    expect(screen.queryByText("Pending")).toBeNull()
+  })
+
+  it("uses row attention rather than the imported review flag", () => {
+    render(
+      <TransactionsWithInspector
+        {...defaultProps}
+        transactions={[{ ...transaction, needsReview: true, attention: false }]}
+      />
+    )
+    expect(screen.queryByLabelText("Needs review")).toBeNull()
+  })
+
   it("keeps loading bounded at page size 500", () => {
     render(<TransactionsWithInspector {...defaultProps} pageSize={500} loading transactions={[]} />)
     expect(screen.getAllByRole("status")).toHaveLength(1)
@@ -277,9 +418,7 @@ describe("TransactionsTable", () => {
       expect(screen.getByText("Staking reward")).toBeTruthy()
       expect(screen.getAllByText(/Income/).length).toBe(2)
       expect(screen.queryByText("Realized gain/loss")).toBeNull()
-      expect(
-        screen.getAllByText(calculationState === "complete" ? "+€12.34" : "Pending").length
-      ).toBe(2)
+      expect(screen.getAllByText("+€12.34").length).toBe(2)
     }
   )
 
@@ -485,7 +624,7 @@ describe("TransactionsTable", () => {
     expect(screen.getByText("Fee: 1e-18 ETH")).toBeTruthy()
     expect(screen.getAllByText("+<€0.01")).toHaveLength(2)
     expect(screen.getAllByText("−<€0.01")).toHaveLength(2)
-    expect(screen.queryByText(/Unavailable/)).toBeNull()
+    expect(screen.getByText("Fee value: Unavailable")).toBeTruthy()
   })
 
   it("keeps unavailable movement amounts unsigned", () => {
