@@ -687,7 +687,15 @@ describe("TaxMaxi Promise client", () => {
             transactionType: "buy_fiat",
             description: null,
             externalId: null,
-            movements: [{ amount: "0.1", assetSymbol: "BTC", kind: "acquisition" }],
+            movements: [
+              {
+                targetId: "00000000-0000-4000-8000-000000000301",
+                capture: null,
+                amount: "0.1",
+                assetSymbol: "BTC",
+                kind: "acquisition",
+              },
+            ],
             income: null,
             realizedGainLoss: null,
             fiatCurrency: null,
@@ -713,6 +721,100 @@ describe("TaxMaxi Promise client", () => {
           url: `https://sdk.example.test/v1/transactions?sourceId=${sourceId}&cursor=source-cursor&limit=1`,
         }),
       ])
+    })
+  )
+
+  it.effect("decodes original purchase value and exact sale allocations after full disposal", () =>
+    Effect.gen(function* () {
+      const capturedRequests: Array<CapturedRequest> = []
+      const source = {
+        sourceId: "00000000-0000-4000-8000-000000000302",
+        name: "Synthetic wallet",
+        kind: "onchain",
+      } as const
+      const capture = {
+        runId: "00000000-0000-4000-8000-000000000303",
+        eventId: "00000000-0000-4000-8000-000000000304",
+        outcome: "included",
+        quantity: "10",
+        assetId: "00000000-0000-4000-8000-000000000305",
+        assetSymbol: "TOKEN",
+        eventKind: "acquisition",
+        cause: "purchase",
+        valuationState: "selected",
+        selectedValue: { kind: "user_valuation", amount: "20", currency: "EUR" },
+        providerConsiderations: [],
+        acquisitionCostBasis: null,
+        realizedResults: [],
+      } as const
+      const row = {
+        transactionId: "00000000-0000-4000-8000-000000000306",
+        timestamp: "2025-03-05T12:00:00.000Z",
+        source,
+        transactionType: "buy_fiat",
+        description: null,
+        externalId: null,
+        movements: [
+          {
+            targetId: "00000000-0000-4000-8000-000000000307",
+            capture,
+            amount: "10",
+            assetSymbol: "TOKEN",
+            kind: "acquisition",
+          },
+        ],
+        income: null,
+        realizedGainLoss: null,
+        fiatCurrency: "EUR",
+        calculationState: "complete",
+        needsReview: false,
+      } as const
+      const response = {
+        transactions: [
+          row,
+          {
+            ...row,
+            transactionId: "00000000-0000-4000-8000-000000000308",
+            timestamp: "2025-04-05T12:00:00.000Z",
+            transactionType: "sell_fiat",
+            realizedGainLoss: "10",
+            movements: [
+              {
+                targetId: "00000000-0000-4000-8000-000000000309",
+                amount: "10",
+                assetSymbol: "TOKEN",
+                kind: "disposal",
+                capture: {
+                  ...capture,
+                  eventId: "00000000-0000-4000-8000-000000000310",
+                  eventKind: "disposition",
+                  cause: "sale",
+                  selectedValue: { kind: "observed_consideration", amount: "30", currency: "EUR" },
+                  providerConsiderations: [{ amount: "30", currency: "EUR" }],
+                  realizedResults: [
+                    {
+                      acquisitionEventId: "00000000-0000-4000-8000-000000000304",
+                      quantity: "10",
+                      costBasis: "20",
+                      proceeds: "30",
+                      gainLoss: "10",
+                      currency: "EUR",
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+        totalCount: 2,
+        page: { nextCursor: null, hasMore: false },
+      } as const
+      const taxmaxi = new TaxMaxi({
+        apiKey: "00000000-0000-4000-8000-000000000305",
+        baseUrl: "https://sdk.example.test",
+        fetch: makeFetch(capturedRequests, encodeJson(response)),
+      })
+      yield* Effect.promise(() => expect(taxmaxi.transactions.list()).resolves.toEqual(response))
     })
   )
 
