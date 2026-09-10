@@ -22,6 +22,14 @@ import { TransactionInspector } from "#/components/transaction-inspector"
 import { m } from "#/paraglide/messages"
 
 beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  )
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: vi
@@ -365,12 +373,12 @@ describe("TransactionsTable", () => {
     const opener = screen.getByRole("button", { name: openName() })
     expect(opener.tagName).toBe("BUTTON")
     expect(opener.getAttribute("type")).toBe("button")
-    expect(opener.getAttribute("aria-haspopup")).toBe("dialog")
+    expect(opener.getAttribute("aria-haspopup")).toBeNull()
     expect(opener.getAttribute("aria-expanded")).toBe("false")
     opener.focus()
     fireEvent.click(opener)
     expect(defaultProps.onSelect).toHaveBeenCalledExactlyOnceWith(transaction, opener)
-    expect(screen.getAllByRole("dialog")).toHaveLength(1)
+    expect(screen.getAllByRole("complementary")).toHaveLength(1)
     expect(opener.getAttribute("aria-expanded")).toBe("true")
     const close = screen.getByRole("button", { name: m["app.inspector.close"]() })
     expect(document.activeElement).toBe(close)
@@ -385,7 +393,7 @@ describe("TransactionsTable", () => {
     expect(opener.hasAttribute("disabled")).toBe(true)
     fireEvent.click(opener)
     expect(defaultProps.onSelect).not.toHaveBeenCalled()
-    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(screen.queryByRole("complementary")).toBeNull()
   })
 
   it.each(["complete", "partial"] as const)(
@@ -692,7 +700,7 @@ describe("TransactionsTable", () => {
 
     const mobileGain = screen
       .getAllByText("+€2,000.00")
-      .find((element) => element.className.includes("sm:hidden"))
+      .find((element) => element.className.includes("@min-[36rem]:hidden"))
     expect(mobileGain).toBeDefined()
 
     rerender(
@@ -710,7 +718,7 @@ describe("TransactionsTable", () => {
     )
     const mobilePending = screen
       .getAllByText("Pending")
-      .find((element) => element.className.includes("sm:hidden"))
+      .find((element) => element.className.includes("@min-[36rem]:hidden"))
     expect(mobilePending).toBeDefined()
   })
 

@@ -86,8 +86,8 @@ export function TransactionsTable({
         })
 
   return (
-    <section aria-busy={loading} className="flex min-w-0 flex-col gap-5">
-      <header className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+    <section aria-busy={loading} className="@container flex min-w-0 flex-col gap-5">
+      <header className="flex flex-col gap-2 @min-[36rem]:flex-row @min-[36rem]:items-end @min-[36rem]:justify-between">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
             {m["app.dashboard.transactions.eyebrow"]()}
@@ -152,7 +152,7 @@ export function TransactionsTable({
             {transactions.map((transaction) => (
               <article
                 data-selected={transaction.transactionId === selectedTransactionId}
-                className="relative grid min-h-20 grid-cols-[5.5rem_minmax(0,1fr)] items-center gap-3 px-3 py-3.5 sm:grid-cols-[8rem_minmax(0,1fr)_minmax(8rem,auto)] sm:px-4 data-[selected=true]:bg-muted/40"
+                className="relative grid min-h-20 grid-cols-[5.5rem_minmax(0,1fr)] items-center gap-3 px-3 py-3.5 @min-[36rem]:grid-cols-[8rem_minmax(0,1fr)_minmax(8rem,auto)] sm:px-4 data-[selected=true]:bg-muted/40"
                 key={transaction.transactionId}
               >
                 <button
@@ -160,7 +160,6 @@ export function TransactionsTable({
                     description: transaction.description ?? m["app.treatment.transaction"](),
                     transactionId: transaction.transactionId,
                   })}
-                  aria-haspopup="dialog"
                   aria-expanded={transaction.transactionId === selectedTransactionId}
                   className="absolute inset-0 min-h-11 w-full cursor-pointer rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-default"
                   disabled={disabled}
@@ -231,7 +230,7 @@ export function TransactionsTable({
                   {transactionResults(transaction).map((result) => (
                     <p
                       key={result.label}
-                      className="mt-2 text-sm font-semibold tabular-nums sm:hidden"
+                      className="mt-2 text-sm font-semibold tabular-nums @min-[36rem]:hidden"
                     >
                       <span className="text-muted-foreground">{result.label}: </span>
                       {result.amount}
@@ -239,7 +238,7 @@ export function TransactionsTable({
                   ))}
                 </div>
 
-                <div className="hidden text-right sm:block">
+                <div className="hidden text-right @min-[36rem]:block">
                   {transactionResults(transaction).map((result) => (
                     <div key={result.label}>
                       <p className="font-semibold tabular-nums">{result.amount}</p>

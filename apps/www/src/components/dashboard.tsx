@@ -186,10 +186,32 @@ export function Dashboard({
     taxYear: number
     description: string
   } | null>(null)
+  const navigationRequest = useRef(0)
+  const navigating = useRef(false)
+  const [sequenceRefreshVersion, setSequenceRefreshVersion] = useState<number | null>(null)
+  const [navigationPending, setNavigationPending] = useState(false)
+  const [navigationFailure, setNavigationFailure] = useState<-1 | 1 | null>(null)
+  const cancelNavigation = useCallback(() => {
+    navigationRequest.current += 1
+    navigating.current = false
+    setNavigationPending(false)
+    setNavigationFailure(null)
+  }, [])
+  const closeInspector = () => {
+    cancelNavigation()
+    setSelectedTransaction(null)
+  }
+  useEffect(
+    () => () => {
+      navigationRequest.current += 1
+    },
+    []
+  )
   const transactionOpenerRef = useRef<HTMLElement | null>(null)
   const transactionListRef = useRef<HTMLDivElement | null>(null)
 
   const selectTransaction = (transaction: TransactionListItem, trigger: HTMLElement) => {
+    cancelNavigation()
     transactionOpenerRef.current = trigger
     setSelectedTransaction({
       transactionId: transaction.transactionId,
@@ -220,10 +242,11 @@ export function Dashboard({
 
   const handleUnauthorized = useCallback(async () => {
     dependentReadsAllowed.current = false
+    cancelNavigation()
     setAuthenticationLost(true)
     await queryClient.cancelQueries({ queryKey: queryKeys.all })
     await onUnauthorized?.()
-  }, [onUnauthorized, queryClient])
+  }, [cancelNavigation, onUnauthorized, queryClient])
 
   useEffect(() => {
     const onVisibilityChange = () => setIsVisible(document.visibilityState !== "hidden")
@@ -261,6 +284,8 @@ export function Dashboard({
 
   const changeTransactionPageSize = (size: TransactionPageSize) => {
     if (size === transactionPageSize) return
+    cancelNavigation()
+    setSequenceRefreshVersion(null)
     setTransactionPageSize(size)
     setTransactionCursors([null])
     setSelectedTransaction(null)
@@ -271,6 +296,16 @@ export function Dashboard({
       // The current session keeps the chosen size even if saving is blocked.
     }
   }
+
+  const resetTransactionSequence = useCallback(() => {
+    cancelNavigation()
+    setTransactionCursors([null])
+    setSequenceRefreshVersion(
+      queryClient.getQueryState(
+        queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
+      )?.dataUpdateCount ?? 0
+    )
+  }, [cancelNavigation, queryClient, transactionPageSize])
 
   const accountsById = useMemo(
     () => new Map(accounts.map((account) => [account.id, account])),
@@ -313,6 +348,55 @@ export function Dashboard({
     enabled: !authenticationLost && pageSizeLoaded,
   })
 
+  // Refetching the current page supersedes a speculative neighbour request.
+  // The SDK may still finish after cancellation, so selection has its own token.
+  useEffect(
+    () =>
+      queryClient.getQueryCache().subscribe((event) => {
+        if (
+          event.type !== "updated" ||
+          (event.action.type !== "invalidate" && event.action.type !== "fetch")
+        )
+          return
+        const key = queryKeys.transactionList({
+          cursor: transactionCursor,
+          limit: transactionPageSize,
+        })
+        if (JSON.stringify(event.query.queryKey) === JSON.stringify(key)) cancelNavigation()
+      }),
+    [cancelNavigation, queryClient, transactionCursor, transactionPageSize]
+  )
+  const pageShape = transactionQuery.data
+    ? JSON.stringify([
+        transactionQuery.data.totalCount,
+        transactionQuery.data.transactions.map((row) => row.transactionId),
+      ])
+    : null
+  const [observedPage, setObservedPage] = useState({ cursor: transactionCursor, shape: pageShape })
+  if (observedPage.cursor !== transactionCursor || observedPage.shape !== pageShape) {
+    setObservedPage({ cursor: transactionCursor, shape: pageShape })
+    if (
+      transactionCursor !== null &&
+      observedPage.cursor === transactionCursor &&
+      observedPage.shape !== null &&
+      pageShape !== null
+    ) {
+      setTransactionCursors([null])
+      setSequenceRefreshVersion(
+        queryClient.getQueryState(
+          queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
+        )?.dataUpdateCount ?? 0
+      )
+    }
+  }
+  useEffect(() => {
+    if (sequenceRefreshVersion !== null && transactionCursor === null)
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.transactionList({ cursor: null, limit: transactionPageSize }),
+        exact: true,
+      })
+  }, [queryClient, sequenceRefreshVersion, transactionCursor, transactionPageSize])
+
   const survivingRow = transactionQuery.data?.transactions.find(
     (row) => row.transactionId === selectedTransaction?.transactionId
   )
@@ -340,6 +424,10 @@ export function Dashboard({
     const isFirstResponse = observedRunIds.current.size === 0
     observedRunIds.current.add(runId)
     if (isFirstResponse) return
+    // A new run may follow a remote sync. Equal visible rows/count cannot
+    // establish that the prefix before this cursor stayed unchanged.
+    cancelNavigation()
+    if (transactionCursor !== null) resetTransactionSequence()
     const refreshDependentReads = async () => {
       // Invalidation alone reuses initial pending reads. Cancel their delivery
       // first so a response started before this run cannot replace its results.
@@ -354,7 +442,15 @@ export function Dashboard({
       ])
     }
     void refreshDependentReads()
-  }, [activeRunId, authenticationLost, hasPortfolio, queryClient])
+  }, [
+    activeRunId,
+    authenticationLost,
+    cancelNavigation,
+    hasPortfolio,
+    queryClient,
+    resetTransactionSequence,
+    transactionCursor,
+  ])
 
   // Billing is only needed while the first-sync wizard can show. It is read
   // through the query cache so a billing overlay refresh moves the wizard
@@ -424,18 +520,124 @@ export function Dashboard({
     transactionQuery.error,
   ])
 
+  const selectedRowIndex =
+    transactionQuery.data?.transactions.findIndex(
+      (row) => row.transactionId === selectedTransaction?.transactionId
+    ) ?? -1
+  const sequenceReady =
+    sequenceRefreshVersion === null ||
+    (queryClient.getQueryState(
+      queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
+    )?.dataUpdateCount ?? 0) > sequenceRefreshVersion
+  if (sequenceRefreshVersion !== null && sequenceReady) setSequenceRefreshVersion(null)
+  const position =
+    transactionQuery.isError ||
+    transactionQuery.isFetching ||
+    !sequenceReady ||
+    selectedRowIndex < 0
+      ? null
+      : (transactionCursors.length - 1) * transactionPageSize + selectedRowIndex + 1
+  const totalTransactions = transactionQuery.data?.totalCount ?? 0
+  const navigateTransaction = async (direction: -1 | 1) => {
+    if (navigating.current || authenticationLost || selectedRowIndex < 0 || position === null)
+      return
+    if (direction === -1 ? position <= 1 : position >= totalTransactions) return
+    const rows = transactionQuery.data?.transactions ?? []
+    const adjacent = rows[selectedRowIndex + direction]
+    if (adjacent) {
+      selectTransaction(
+        adjacent,
+        transactionOpenerRef.current ?? transactionListRef.current ?? document.body
+      )
+      return
+    }
+    const cursors =
+      direction === -1
+        ? transactionCursors.slice(0, -1)
+        : [...transactionCursors, transactionQuery.data?.page.nextCursor ?? null]
+    if (!cursors.length || (direction === 1 && cursors.at(-1) === null)) return
+    const request = ++navigationRequest.current
+    const userId = queryClient.getQueryData(queries.account(taxmaxi).queryKey)?.account.id
+    navigating.current = true
+    setNavigationPending(true)
+    setNavigationFailure(null)
+    const input = { cursor: cursors.at(-1) ?? null, limit: transactionPageSize }
+    try {
+      // A neighbour is speculative until it succeeds. Do not move the visible
+      // query or write a late response into another session's cache.
+      const page = await taxmaxi.transactions.list(input)
+      if (
+        request !== navigationRequest.current ||
+        !dependentReadsAllowed.current ||
+        userId !== queryClient.getQueryData(queries.account(taxmaxi).queryKey)?.account.id
+      )
+        return
+      // Query cache delivery precedes React's run-change effect. Compare the
+      // producer here too so a response cannot slip through that interval.
+      const currentRunId = queryClient.getQueryData(
+        queries.portfolioAssets(taxmaxi, selectedSourceId).queryKey
+      )?.activeRun?.runId
+      if (currentRunId !== activeRunId || page.totalCount !== totalTransactions) {
+        resetTransactionSequence()
+        return
+      }
+      const row = direction === 1 ? page.transactions[0] : page.transactions.at(-1)
+      if (!row) {
+        setNavigationFailure(direction)
+        return
+      }
+      if (userId === undefined) return
+      setSessionQueryData({
+        queryClient,
+        queryKey: queryKeys.transactionList(input),
+        userId,
+        data: page,
+      })
+      setTransactionCursors(cursors)
+      selectTransaction(
+        row,
+        transactionOpenerRef.current ?? transactionListRef.current ?? document.body
+      )
+    } catch (error) {
+      if (
+        request !== navigationRequest.current ||
+        !dependentReadsAllowed.current ||
+        userId !== queryClient.getQueryData(queries.account(taxmaxi).queryKey)?.account.id
+      )
+        return
+      if (isTaxMaxiUnauthorizedError(error)) void handleUnauthorized()
+      else setNavigationFailure(direction)
+    } finally {
+      if (request === navigationRequest.current) {
+        navigating.current = false
+        setNavigationPending(false)
+      }
+    }
+  }
+
   const goToNextTransactionPage = () => {
     const nextCursor = transactionQuery.data?.page.nextCursor
     if (nextCursor === null || nextCursor === undefined) return
+    cancelNavigation()
+    setSelectedTransaction(null)
     setTransactionCursors((current) => [...current, nextCursor])
   }
 
   const goToPreviousTransactionPage = () => {
+    cancelNavigation()
+    setSelectedTransaction(null)
     setTransactionCursors((current) => (current.length > 1 ? current.slice(0, -1) : current))
   }
 
   const handleSourceSyncCompleted = useCallback(
     async (sourceId: AccountId) => {
+      cancelNavigation()
+      if (selectedTransaction !== null || transactionCursor !== null)
+        setSequenceRefreshVersion(
+          queryClient.getQueryState(
+            queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
+          )?.dataUpdateCount ?? 0
+        )
       setTransactionCursors([null])
       setSyncCompletedAt(Date.now())
       setFastRefresh(true)
@@ -451,7 +653,14 @@ export function Dashboard({
       void queryClient.invalidateQueries({ queryKey: queryKeys.billingStatus() })
       await onSourceSyncCompleted?.(sourceId)
     },
-    [onSourceSyncCompleted, queryClient]
+    [
+      cancelNavigation,
+      onSourceSyncCompleted,
+      queryClient,
+      transactionPageSize,
+      selectedTransaction,
+      transactionCursor,
+    ]
   )
 
   // A pending completion clears once its overview query has fetched
@@ -526,6 +735,10 @@ export function Dashboard({
   }, [activeAccountIds, activeAccounts, portfolioQuery.data, taxYear])
 
   const onAccountScopeChange = (scope: AccountScope) => {
+    if (scope === accountScope) return
+    cancelNavigation()
+    setTransactionCursors([null])
+    setSelectedTransaction(null)
     setAccountScope(scope)
   }
 
@@ -769,27 +982,52 @@ export function Dashboard({
                   )}
                 </TabsContent>
                 <TabsContent value="transactions">
-                  <div
-                    ref={transactionListRef}
-                    tabIndex={-1}
-                    role="region"
-                    aria-label={m["app.dashboard.tabs.transactions"]()}
-                  >
-                    <TransactionsTable
+                  <div className="flex items-start gap-5">
+                    <div
+                      className="min-w-0 flex-1"
+                      ref={transactionListRef}
+                      tabIndex={-1}
+                      role="region"
+                      aria-label={m["app.dashboard.tabs.transactions"]()}
+                    >
+                      <TransactionsTable
+                        disabled={authenticationLost}
+                        onSelect={selectTransaction}
+                        selectedTransactionId={selectedTransaction?.transactionId ?? null}
+                        error={transactionQuery.isError}
+                        hasNextPage={transactionQuery.data?.page.hasMore ?? false}
+                        loading={transactionQuery.isFetching}
+                        onNextPage={goToNextTransactionPage}
+                        onPreviousPage={goToPreviousTransactionPage}
+                        onRetry={() => void transactionQuery.refetch()}
+                        pageIndex={transactionCursors.length - 1}
+                        pageSize={transactionPageSize}
+                        onPageSizeChange={changeTransactionPageSize}
+                        totalCount={transactionQuery.data?.totalCount ?? 0}
+                        transactions={transactionQuery.data?.transactions ?? []}
+                      />
+                    </div>
+                    <TransactionInspector
+                      navigation={{
+                        position,
+                        total: totalTransactions,
+                        canPrevious: position !== null && position > 1,
+                        canNext: position !== null && position < totalTransactions,
+                        pending: navigationPending,
+                        failed: navigationFailure !== null,
+                        onNavigate: (direction) => void navigateTransaction(direction),
+                        onRetry: () => {
+                          if (navigationFailure !== null)
+                            void navigateTransaction(navigationFailure)
+                        },
+                      }}
+                      selection={selectedTransaction}
+                      taxmaxi={taxmaxi}
                       disabled={authenticationLost}
-                      onSelect={selectTransaction}
-                      selectedTransactionId={selectedTransaction?.transactionId ?? null}
-                      error={transactionQuery.isError}
-                      hasNextPage={transactionQuery.data?.page.hasMore ?? false}
-                      loading={transactionQuery.isFetching}
-                      onNextPage={goToNextTransactionPage}
-                      onPreviousPage={goToPreviousTransactionPage}
-                      onRetry={() => void transactionQuery.refetch()}
-                      pageIndex={transactionCursors.length - 1}
-                      pageSize={transactionPageSize}
-                      onPageSizeChange={changeTransactionPageSize}
-                      totalCount={transactionQuery.data?.totalCount ?? 0}
-                      transactions={transactionQuery.data?.transactions ?? []}
+                      onUnauthorized={handleUnauthorized}
+                      onClose={closeInspector}
+                      returnFocusRef={transactionOpenerRef}
+                      fallbackFocusRef={transactionListRef}
                     />
                   </div>
                 </TabsContent>
@@ -797,15 +1035,6 @@ export function Dashboard({
               </Tabs>
             </div>
           </SourceCards>
-          <TransactionInspector
-            selection={selectedTransaction}
-            taxmaxi={taxmaxi}
-            disabled={authenticationLost}
-            onUnauthorized={handleUnauthorized}
-            onClose={() => setSelectedTransaction(null)}
-            returnFocusRef={transactionOpenerRef}
-            fallbackFocusRef={transactionListRef}
-          />
         </>
       )}
     </div>

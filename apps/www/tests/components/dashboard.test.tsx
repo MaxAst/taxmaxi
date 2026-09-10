@@ -28,6 +28,14 @@ import { queryKeys, queries, refreshTransactionQueries } from "#/integrations/ta
 import type { Account, SourceSyncSeed } from "#/lib/dashboard-types"
 
 beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  )
   const storedValues = new Map<string, string>()
   const storage: Storage = {
     get length() {
@@ -322,10 +330,10 @@ describe("Dashboard transaction pagination", () => {
         fireEvent.click(
           await screen.findByRole("button", { name: /Open transaction · Size test row/ })
         )
-        await screen.findByRole("dialog")
+        await screen.findByRole("complementary")
       }
       fireEvent.change(pageSizeControl, { target: { value: String(size) } })
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      await waitFor(() => expect(screen.queryByRole("complementary")).toBeNull())
       await waitFor(() => expect(screen.getByText("1–1 of 1204")).toBeTruthy())
       expect(window.localStorage.getItem("taxmaxi.transactions.page-size.v1")).toBe(String(size))
       view.unmount()
@@ -829,7 +837,7 @@ describe("Dashboard calculation refresh", () => {
     expect(screen.getByText("Boundary transaction")).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
     await tick(500)
-    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(screen.queryByRole("complementary")).toBeNull()
     expect(document.activeElement).toBe(screen.getByRole("region", { name: "Transactions" }))
   })
 
@@ -2189,5 +2197,211 @@ describe("Dashboard first-sync body (#108 T05, T06, T07)", () => {
     // A queued job is not a credit stop, so billing is not read again.
     await waitFor(() => expect(queryClient.getQueryState(billingKey())?.fetchStatus).toBe("idle"))
     expect(billingReads).toBe(1)
+  })
+})
+
+describe("Inspector cursor navigation", () => {
+  const page = (offset: number): TransactionListResponse => ({
+    transactions: Array.from({ length: 25 }, (_, index) =>
+      transaction(`row-${offset + index + 1}`, `Transaction ${offset + index + 1}`)
+    ),
+    totalCount: 1204,
+    page: { hasMore: true, nextCursor: `page-${offset + 25}` },
+  })
+  function setup() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    client.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
+    testTaxMaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://navigation.example.test" })
+    vi.spyOn(testTaxMaxi.portfolio, "listAssets").mockResolvedValue(portfolio())
+    vi.spyOn(testTaxMaxi.portfolio, "getCalculationStatus").mockImplementation(
+      () => new Promise(() => {})
+    )
+    vi.spyOn(testTaxMaxi.transactions, "get").mockImplementation(() => new Promise(() => {}))
+    const list = vi
+      .spyOn(testTaxMaxi.transactions, "list")
+      .mockImplementation(async (input) => page(input?.cursor === "page-25" ? 25 : 0))
+    const view = render(
+      <QueryClientProvider client={client}>
+        <Dashboard accounts={[]} sourceOverviews={syncedOverviews} />
+      </QueryClientProvider>
+    )
+    return { client, list, ...view }
+  }
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it("crosses both boundaries only after success, retries in place, and uses the exact total", async () => {
+    const { client, list } = setup()
+    await screen.findByText("Transaction 25")
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open transaction · Transaction 25 · row-25" })
+    )
+    expect(screen.getByText("25 of 1,204")).toBeTruthy()
+    let resolve: ((page: TransactionListResponse) => void) | undefined
+    let reject: ((error: Error) => void) | undefined
+    list.mockImplementationOnce(
+      () =>
+        new Promise((yes, no) => {
+          resolve = yes
+          reject = no
+        })
+    )
+    const next = screen.getByRole("button", { name: "Next transaction" })
+    fireEvent.click(next)
+    fireEvent.click(next)
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(next).toHaveProperty("disabled", true)
+    expect(screen.getByText("25 of 1,204")).toBeTruthy()
+    await act(async () => reject?.(new Error("Neighbour unavailable")))
+    expect(await screen.findByText(/Could not load the neighbouring page/)).toBeTruthy()
+    expect(screen.getByText("25 of 1,204")).toBeTruthy()
+    list.mockImplementationOnce(
+      () =>
+        new Promise((yes) => {
+          resolve = yes
+        })
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Retry results" }))
+    await act(async () => resolve?.(page(25)))
+    expect(await screen.findByText("26 of 1,204")).toBeTruthy()
+    expect(screen.getByText("26–50 of 1204")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Next transaction" }))
+    expect(screen.getByText("27 of 1,204")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Previous transaction" }))
+    list.mockImplementationOnce(
+      () =>
+        new Promise((yes) => {
+          resolve = yes
+        })
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Previous transaction" }))
+    expect(screen.getByText("26 of 1,204")).toBeTruthy()
+    await act(async () => resolve?.(page(0)))
+    expect(await screen.findByText("25 of 1,204")).toBeTruthy()
+    client.clear()
+  })
+
+  it.each(["close", "size", "source", "account", "refetch", "sync", "run"])(
+    "ignores a neighbour superseded by %s",
+    async (change) => {
+      const { client, list } = setup()
+      await screen.findByText("Transaction 25")
+      fireEvent.click(
+        screen.getByRole("button", { name: "Open transaction · Transaction 25 · row-25" })
+      )
+      let finish: ((page: TransactionListResponse) => void) | undefined
+      list.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          })
+      )
+      fireEvent.click(screen.getByRole("button", { name: "Next transaction" }))
+      await act(async () => {
+        if (change === "close")
+          fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
+        if (change === "size")
+          fireEvent.change(screen.getByRole("combobox", { name: "Rows per page" }), {
+            target: { value: "50" },
+          })
+        if (change === "source") fireEvent.click(screen.getByRole("button", { name: "Source A" }))
+        if (change === "account") client.removeQueries({ queryKey: queryKeys.account() })
+        if (change === "refetch")
+          await client.invalidateQueries({ queryKey: queryKeys.transactionLists() })
+        if (change === "sync") await syncState.onCompleted?.(SOURCE_A)
+        if (change === "run") {
+          vi.mocked(testTaxMaxi.portfolio.listAssets).mockResolvedValue(portfolio(RUN_B))
+          await client.invalidateQueries({ queryKey: queryKeys.portfolioAssets() })
+        }
+      })
+      await act(async () => finish?.(page(25)))
+      expect(screen.queryByText("26 of 1,204")).toBeNull()
+      expect(
+        client.getQueryData(queryKeys.transactionList({ cursor: "page-25", limit: 25 }))
+      ).toBeUndefined()
+      if (change === "close" || change === "size" || change === "source")
+        expect(screen.queryByRole("complementary")).toBeNull()
+      client.clear()
+    }
+  )
+
+  it("resets instead of reporting a false position when a neighbour reveals a new total", async () => {
+    const { client, list } = setup()
+    await screen.findByText("Transaction 25")
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open transaction · Transaction 25 · row-25" })
+    )
+    list.mockResolvedValueOnce({ ...page(25), totalCount: 1205 }).mockResolvedValueOnce({
+      transactions: [
+        transaction("new-row", "Newly imported transaction"),
+        ...page(0).transactions.slice(0, 24),
+      ],
+      totalCount: 1205,
+      page: { hasMore: true, nextCursor: "page-24" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Next transaction" }))
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(3))
+    expect(screen.queryByText("26 of 1,205")).toBeNull()
+    expect(screen.getByRole("complementary").textContent).toContain("Transaction 25")
+    expect(screen.getByText("1–25 of 1205")).toBeTruthy()
+    expect(screen.getByText("Position unavailable")).toBeTruthy()
+    expect(
+      client.getQueryData(queryKeys.transactionList({ cursor: "page-25", limit: 25 }))
+    ).toBeUndefined()
+    client.clear()
+  })
+
+  it("resets cursor history on a remote run change even if the visible page shape is unchanged", async () => {
+    const { client, list } = setup()
+    await screen.findByText("Transaction 25")
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+    await screen.findByText("Transaction 26")
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open transaction · Transaction 26 · row-26" })
+    )
+    expect(screen.getByText("26 of 1,204")).toBeTruthy()
+    const before = list.mock.calls.length
+    vi.mocked(testTaxMaxi.portfolio.listAssets).mockResolvedValue(portfolio(RUN_B))
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: queryKeys.portfolioAssets() })
+    })
+    await screen.findByText("1–25 of 1204")
+    expect(list.mock.calls.slice(before).some(([input]) => input?.cursor === null)).toBe(true)
+    expect(screen.getByRole("complementary").textContent).toContain("Transaction 26")
+    expect(screen.getByText("Position unavailable")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Next transaction" })).toHaveProperty(
+      "disabled",
+      true
+    )
+    client.clear()
+  })
+
+  it("keeps absent-row detail reachable with no invented position or navigation", async () => {
+    const { client, list } = setup()
+    await screen.findByText("Transaction 1")
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open transaction · Transaction 1 · row-1" })
+    )
+    expect(screen.getByRole("button", { name: "Previous transaction" })).toHaveProperty(
+      "disabled",
+      true
+    )
+    list.mockResolvedValue({
+      transactions: [],
+      totalCount: 0,
+      page: { hasMore: false, nextCursor: null },
+    })
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: queryKeys.transactionLists() })
+    })
+    expect(await screen.findByText("Position unavailable")).toBeTruthy()
+    expect(screen.getByRole("complementary")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Next transaction" })).toHaveProperty(
+      "disabled",
+      true
+    )
+    client.clear()
   })
 })

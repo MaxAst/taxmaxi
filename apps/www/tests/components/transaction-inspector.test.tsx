@@ -389,6 +389,14 @@ function richDetail(currentTotal: "1" | "30" = "1"): TransactionDetail {
 const clients: QueryClient[] = []
 let mobile = false
 beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  )
   mobile = false
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
@@ -410,8 +418,10 @@ function mount(
   {
     selection = SELECTION,
     readStatus = false,
+    navigation,
   }: {
     selection?: Selection | null
+    navigation?: ComponentProps<typeof TransactionInspector>["navigation"]
     readStatus?: boolean
   } = {}
 ) {
@@ -428,6 +438,7 @@ function mount(
   const element = (value: Selection | null, disabled = false) => (
     <QueryClientProvider client={client}>
       <TransactionInspector
+        navigation={navigation}
         selection={value}
         taxmaxi={taxmaxi}
         disabled={disabled}
@@ -515,14 +526,68 @@ function sdkClient(body: TransactionDetail) {
 }
 
 describe("TransactionInspector", () => {
+  it("disables next at the exact last position and supports keyboard previous", async () => {
+    const { taxmaxi } = sdkClient(richDetail())
+    const onNavigate = vi.fn()
+    mount(taxmaxi, {
+      navigation: {
+        position: 1204,
+        total: 1204,
+        canPrevious: true,
+        canNext: false,
+        pending: false,
+        failed: false,
+        onNavigate,
+        onRetry: vi.fn(),
+      },
+    })
+    await screen.findByRole("heading", { name: "Recorded transaction" })
+    expect(screen.getByText("1,204 of 1,204")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Next transaction" })).toHaveProperty(
+      "disabled",
+      true
+    )
+    fireEvent.keyDown(screen.getByRole("button", { name: "Close transaction" }), { key: "ArrowUp" })
+    expect(onNavigate).toHaveBeenCalledWith(-1)
+  })
+
+  it("uses one mobile detail view, preserves it on refresh, and restores Back focus", async () => {
+    mobile = true
+    const { taxmaxi } = sdkClient(richDetail())
+    const get = vi.spyOn(taxmaxi.transactions, "get").mockResolvedValue(richDetail())
+    const view = mount(taxmaxi)
+    fireEvent.click(await screen.findByRole("button", { name: "View transaction details" }))
+    await screen.findByRole("heading", { name: "Recorded transaction" })
+    const back = screen.getByRole("button", { name: "Back to overview" })
+    expect(document.activeElement).toBe(back)
+    get.mockResolvedValue({ ...richDetail(), externalId: "refreshed same transaction" })
+    await act(async () => {
+      await view.client.invalidateQueries({
+        queryKey: queries.transactionDetail(taxmaxi, SELECTION).queryKey,
+      })
+    })
+    expect(await screen.findByText("refreshed same transaction")).toBeTruthy()
+    expect(screen.getAllByRole("dialog")).toHaveLength(1)
+    fireEvent.click(back)
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "View transaction details" })
+    )
+    fireEvent.click(screen.getByRole("button", { name: "View transaction details" }))
+    view.select({ ...SELECTION, transactionId: IDS.other })
+    expect(await screen.findByRole("button", { name: "View transaction details" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Back to overview" })).toBeNull()
+  })
+
   it.each([false, true])(
     "preserves evidence, current decisions and captured facts on mobile=%s",
     async (isMobile) => {
       mobile = isMobile
       const { taxmaxi, fetch } = sdkClient(richDetail())
       mount(taxmaxi)
+      if (isMobile)
+        fireEvent.click(await screen.findByRole("button", { name: "View transaction details" }))
       await screen.findByRole("heading", { name: "Recorded transaction" })
-      expect(screen.getAllByRole("dialog")).toHaveLength(1)
+      expect(screen.getAllByRole(mobile ? "dialog" : "complementary")).toHaveLength(1)
       expect(fetch).toHaveBeenCalledTimes(1)
       const movements = within(section("Movements"))
       expect(movements.getByText("3")).toBeTruthy()
@@ -697,7 +762,7 @@ describe("TransactionInspector", () => {
       finish?.({ ...richDetail(), externalId: "late-first" })
     })
     expect(screen.queryByText("late-first")).toBeNull()
-    expect(screen.getAllByRole("dialog")).toHaveLength(1)
+    expect(screen.getAllByRole(mobile ? "dialog" : "complementary")).toHaveLength(1)
     expect(get).toHaveBeenNthCalledWith(2, { transactionId: IDS.other, taxYear: 2025 })
   })
 
@@ -753,10 +818,10 @@ describe("TransactionInspector", () => {
     const opener = screen.getByRole("button", { name: "Open fixture" })
     opener.focus()
     fireEvent.click(opener)
-    await screen.findByRole("heading", { name: "Recorded transaction" })
+    await screen.findByRole("button", { name: "Close transaction" })
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close transaction" }))
     fireEvent.keyDown(document.activeElement ?? document, { key: "Escape" })
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    await waitFor(() => expect(screen.queryByRole(mobile ? "dialog" : "complementary")).toBeNull())
     await waitFor(() => expect(document.activeElement).toBe(opener))
   })
   it.each([false, true])(
@@ -809,10 +874,12 @@ describe("TransactionInspector", () => {
         </QueryClientProvider>
       )
       fireEvent.click(screen.getByRole("button", { name: "Open fixture" }))
-      await screen.findByRole("heading", { name: "Recorded transaction" })
+      await screen.findByRole("button", { name: "Close transaction" })
       fireEvent.click(screen.getByText("Remove row"))
       fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      await waitFor(() =>
+        expect(screen.queryByRole(mobile ? "dialog" : "complementary")).toBeNull()
+      )
       await waitFor(() =>
         expect(document.activeElement).toBe(
           screen.getByRole("region", { name: "Fixture transactions" })
@@ -1202,7 +1269,7 @@ describe("selected transaction refresh", () => {
       complete?.(Response.json(richDetail()))
     })
     await advanceRefresh(10_000)
-    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(screen.queryByRole(mobile ? "dialog" : "complementary")).toBeNull()
     expect(calls).toBe(1)
     expect(
       view.client.getQueryData(
