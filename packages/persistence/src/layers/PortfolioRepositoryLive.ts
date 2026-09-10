@@ -4,7 +4,7 @@
  * @module PortfolioRepositoryLive
  */
 
-import { and, asc, count, eq, gt } from "drizzle-orm"
+import { and, asc, count, eq, gt, inArray } from "drizzle-orm"
 import * as BigDecimal from "effect/BigDecimal"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -122,31 +122,35 @@ const aggregatePositions = ({
 const make = Effect.gen(function* () {
   const db = yield* drizzle
 
-  const ensureOwnedSource = ({
+  const ensureOwnedSources = ({
     principalId,
-    sourceId,
+    sourceIds,
   }: {
     readonly principalId: string
-    readonly sourceId: string | null
+    readonly sourceIds: ReadonlyArray<string>
   }) =>
     Effect.gen(function* () {
-      if (sourceId === null) return
+      if (sourceIds.length === 0) return
 
-      const [ownedSource] = yield* db
+      const ownedSources = yield* db
         .select({ id: schema.sources.id })
         .from(schema.sources)
-        .where(and(eq(schema.sources.id, sourceId), eq(schema.sources.principalId, principalId)))
-        .limit(1)
-        .pipe(wrapSqlError("portfolioRepository.ownedSource"))
+        .where(
+          and(inArray(schema.sources.id, sourceIds), eq(schema.sources.principalId, principalId))
+        )
+        .pipe(wrapSqlError("portfolioRepository.ownedSources"))
 
-      if (ownedSource === undefined) {
-        return yield* new PortfolioSourceNotFoundError({ sourceId })
+      const ownedIds = new Set(ownedSources.map(({ id }) => id))
+      const missingId = sourceIds.find((id) => !ownedIds.has(id))
+      if (missingId !== undefined) {
+        return yield* new PortfolioSourceNotFoundError({ sourceId: missingId })
       }
     })
 
   const getActiveRunPortfolio: PortfolioRepositoryShape["getActiveRunPortfolio"] = (scope) =>
     Effect.gen(function* () {
-      yield* ensureOwnedSource(scope)
+      const sourceIds = [...new Set(scope.sourceIds.map((id) => id.toLowerCase()))].sort()
+      yield* ensureOwnedSources({ principalId: scope.principalId, sourceIds })
 
       const [activeRunRow] = yield* db
         .select({
@@ -197,26 +201,25 @@ const make = Effect.gen(function* () {
         blockerCounts,
       } as const
 
-      let custodyUnitId: string | null = null
-      if (scope.sourceId !== null) {
-        const [membership] = yield* db
+      let custodyUnitIds: ReadonlyArray<string> | null = null
+      if (sourceIds.length > 0) {
+        const memberships = yield* db
           .select({ custodyUnitId: schema.calculationRunCustodyUnitSources.custodyUnitId })
           .from(schema.calculationRunCustodyUnitSources)
           .where(
             and(
               eq(schema.calculationRunCustodyUnitSources.runId, activeRun.runId),
               eq(schema.calculationRunCustodyUnitSources.principalId, scope.principalId),
-              eq(schema.calculationRunCustodyUnitSources.sourceId, scope.sourceId)
+              inArray(schema.calculationRunCustodyUnitSources.sourceId, sourceIds)
             )
           )
-          .limit(1)
           .pipe(wrapSqlError("portfolioRepository.getActiveRunPortfolio.sourceMembership"))
 
-        if (membership === undefined) {
+        if (memberships.length === 0) {
           return { activeRun, positions: [] }
         }
 
-        custodyUnitId = membership.custodyUnitId
+        custodyUnitIds = [...new Set(memberships.map(({ custodyUnitId }) => custodyUnitId))]
       }
 
       const rows = yield* db
@@ -235,9 +238,9 @@ const make = Effect.gen(function* () {
           and(
             eq(schema.calculationRunDerivedLots.runId, activeRun.runId),
             gt(schema.calculationRunDerivedLots.remainingQuantity, "0"),
-            custodyUnitId === null
+            custodyUnitIds === null
               ? undefined
-              : eq(schema.calculationRunDerivedLots.custodyUnitId, custodyUnitId)
+              : inArray(schema.calculationRunDerivedLots.custodyUnitId, custodyUnitIds)
           )
         )
         .orderBy(asc(schema.assets.symbol), asc(schema.assets.id))

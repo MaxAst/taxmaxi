@@ -407,6 +407,94 @@ const seedValuedAndUnpricedFacts = Effect.gen(function* () {
   return { principalId: fixture.principalId, taxYear }
 })
 
+const sharedSourceIds = {
+  b: "00000000-0000-4000-8000-0000000000ab",
+  c: "00000000-0000-4000-8000-0000000000ac",
+  empty: "00000000-0000-4000-8000-0000000000ad",
+}
+
+// The calculation writer, rather than this fixture, creates the captured membership and lots.
+const seedSharedCustodyFacts = Effect.gen(function* () {
+  const fixture = yield* seedSyncEngineRepositoryFixture(fixtureIds)
+  yield* seedSyncEngineAssets(fixture)
+  const db = yield* drizzle
+  const [account] = yield* db
+    .select({ cexId: schema.cexAccount.cexId })
+    .from(schema.cexAccount)
+    .where(eq(schema.cexAccount.id, fixture.cexAccountId))
+  if (account === undefined) return yield* Effect.die("Missing fixture exchange account")
+  for (const sourceId of Object.values(sharedSourceIds)) {
+    const [created] = yield* db
+      .insert(schema.cexAccount)
+      .values({
+        principalId: fixture.principalId,
+        cexId: account.cexId,
+        providerAccountId: sourceId,
+      })
+      .returning({ id: schema.cexAccount.id })
+    if (created === undefined) return yield* Effect.die("Missing created fixture account")
+    yield* db.insert(schema.sources).values({
+      id: sourceId,
+      principalId: fixture.principalId,
+      name: sourceId,
+      providerKey: "coinbase",
+      sourceableType: "cex",
+      cexAccountId: created.id,
+    })
+  }
+  yield* db
+    .update(schema.custodyUnitSources)
+    .set({ custodyUnitId: fixture.sourceId })
+    .where(eq(schema.custodyUnitSources.sourceId, sharedSourceIds.b))
+  const taxYear = yield* currentGermanTaxYear
+  const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe(`${taxYear}-01-02T00:00:00Z`))
+  for (const { sourceId, amount, externalId } of [
+    { sourceId: fixture.sourceId, amount: "10", externalId: "shared-unit-ten" },
+    { sourceId: sharedSourceIds.c, amount: "3", externalId: "separate-unit-three" },
+  ]) {
+    const [transaction] = yield* db
+      .insert(schema.transactions)
+      .values({
+        sourceId,
+        externalId,
+        principalId: fixture.principalId,
+        timestamp,
+        transactionType: "buy_fiat",
+      })
+      .returning({ id: schema.transactions.id })
+    if (transaction === undefined) return yield* Effect.die("Missing fixture purchase")
+    yield* db.insert(schema.transactionLegs).values(
+      yield* prepareMovementLegFixtures([
+        {
+          sourceId,
+          amount,
+          externalId,
+          principalId: fixture.principalId,
+          timestamp,
+          transactionId: transaction.id,
+          assetId: TEST_BTC_ASSET_ID,
+          kind: "acquisition",
+          provenance: "deterministic",
+          originKind: "none",
+          movementIdentity: { sourceRecordKey: externalId, componentKey: "principal" },
+        },
+      ])
+    )
+  }
+  yield* db
+    .update(schema.assets)
+    .set({ coingeckoCoinId: null })
+    .where(eq(schema.assets.id, TEST_BTC_ASSET_ID))
+  yield* db.insert(schema.assetPrices).values({
+    assetId: TEST_BTC_ASSET_ID,
+    timestamp: DateTime.toDateUtc(DateTime.makeUnsafe(`${taxYear}-01-02T00:00:00Z`)),
+    price: "2",
+    currency: "EUR",
+    source: "portfolio-custody-proof",
+  })
+  return { principalId: fixture.principalId, taxYear }
+})
+
 const seedOtherCustodyUnitPosition = Effect.gen(function* () {
   const db = yield* drizzle
   const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-05-02T10:00:00.000Z"))
@@ -867,6 +955,137 @@ describe("PortfolioApiLive", () => {
 
       expect(responses.all.body).toMatchObject({ assets: [{ amount: "5" }] })
       expect(responses.selected.body).toMatchObject({ assets: [{ amount: "2" }] })
+    })
+  )
+
+  it.effect("reads the union of writer-captured custody units once through HTTP and SDK", () =>
+    Effect.gen(function* () {
+      const scope = yield* seedSharedCustodyFacts.pipe(
+        Effect.provide(TestPgClientLive),
+        Effect.scoped
+      )
+      yield* context.runWithLayer({
+        layer: CalculationRunServiceTestLive,
+        effect: makeRecompute({ ...scope, runId: fixtureIds.activeRunId }),
+      })
+      // Move B into C's live unit after capture: the active run must still place B with A.
+      yield* Effect.flatMap(drizzle, (db) =>
+        db
+          .update(schema.custodyUnitSources)
+          .set({ custodyUnitId: sharedSourceIds.c })
+          .where(eq(schema.custodyUnitSources.sourceId, sharedSourceIds.b))
+      ).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+      yield* Effect.gen(function* () {
+        const a = fixtureIds.sourceId
+        const b = sharedSourceIds.b
+        const c = sharedSourceIds.c
+        for (const { sourceIds, amount } of [
+          { sourceIds: [a], amount: "10" },
+          { sourceIds: [a, b], amount: "10" },
+          { sourceIds: [a, b, c], amount: "13" },
+          { sourceIds: [a, a, b, b.toUpperCase()], amount: "10" },
+          { sourceIds: [b.toUpperCase()], amount: "10" },
+          { sourceIds: [], amount: "13" },
+        ]) {
+          const query = new URLSearchParams(sourceIds.map((id) => ["sourceIds", id]))
+          const response = yield* getPortfolio({
+            userId: fixtureIds.userId,
+            path: `/v1/portfolio/assets?${query}`,
+          })
+          expect(response.status).toBe(200)
+          expect(response.body).toMatchObject({
+            activeRun: { runId: fixtureIds.activeRunId, status: "complete", blockerCounts: [] },
+            assets: [
+              {
+                assetId: TEST_BTC_ASSET_ID,
+                amount,
+                currentPrice: null,
+                totalValue: null,
+                profitLoss: null,
+              },
+            ],
+            summary: {
+              totalValue: null,
+              costBasis: null,
+              profitLoss: null,
+              profitLossPercentage: null,
+            },
+          })
+          yield* HttpServer.addressFormattedWith((baseUrl) =>
+            Effect.gen(function* () {
+              const client = new TaxMaxi({ baseUrl, apiKey: `user_${fixtureIds.userId}_admin` })
+              expect(yield* client.effect.portfolio.listAssets({ sourceIds })).toEqual(
+                response.body
+              )
+              expect(
+                yield* Effect.promise(() => client.portfolio.listAssets({ sourceIds }))
+              ).toEqual(response.body)
+            })
+          )
+        }
+        const shorthand = yield* getPortfolio({
+          userId: fixtureIds.userId,
+          path: `/v1/portfolio/assets?sourceId=${b.toUpperCase()}`,
+        })
+        expect(shorthand.body).toMatchObject({ assets: [{ amount: "10" }] })
+        const empty = yield* getPortfolio({
+          userId: fixtureIds.userId,
+          path: `/v1/portfolio/assets?sourceIds=${sharedSourceIds.empty}`,
+        })
+        expect(empty.body).toMatchObject({
+          activeRun: { runId: fixtureIds.activeRunId },
+          assets: [],
+        })
+      }).pipe(Effect.provide(HttpLive), Effect.scoped)
+    })
+  )
+
+  it.effect("rejects conflicting, malformed and foreign portfolio source selections", () =>
+    Effect.gen(function* () {
+      yield* seedActivePortfolioRun.pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+      const foreign = yield* seedSyncEngineRepositoryFixture({
+        userId: "00000000-0000-4000-8000-000000000681",
+        principalId: "00000000-0000-4000-8000-000000000682",
+        sourceId: "00000000-0000-4000-8000-000000000683",
+      }).pipe(Effect.provide(TestPgClientLive), Effect.scoped)
+      yield* Effect.gen(function* () {
+        for (const sourceId of [foreign.sourceId, "00000000-0000-4000-8000-000000000699"]) {
+          const response = yield* getPortfolio({
+            userId: fixtureIds.userId,
+            path: `/v1/portfolio/assets?sourceIds=${fixtureIds.sourceId}&sourceIds=${sourceId}`,
+          })
+          expect(response.status).toBe(404)
+          expect(response.body).toMatchObject({ _tag: "PortfolioSourceNotFoundResponse" })
+        }
+        for (const query of [
+          `sourceId=${fixtureIds.sourceId}&sourceIds=${fixtureIds.sourceId}`,
+          "sourceIds=bad",
+          `sourceIds=${fixtureIds.sourceId}&sourceIds=bad`,
+          "sourceIds=",
+        ]) {
+          expect(
+            (yield* getPortfolio({
+              userId: fixtureIds.userId,
+              path: `/v1/portfolio/assets?${query}`,
+            })).status
+          ).toBe(400)
+        }
+        yield* HttpServer.addressFormattedWith((baseUrl) =>
+          Effect.gen(function* () {
+            const client = new TaxMaxi({ baseUrl, apiKey: `user_${fixtureIds.userId}_admin` })
+            const input = { sourceId: fixtureIds.sourceId, sourceIds: [fixtureIds.sourceId] }
+            expect(yield* Effect.flip(client.effect.portfolio.listAssets(input))).toMatchObject({
+              code: "conflicting_source_filters",
+            })
+            yield* Effect.promise(() =>
+              expect(client.portfolio.listAssets(input)).rejects.toMatchObject({
+                status: 400,
+                code: "PortfolioBadRequestResponse",
+              })
+            )
+          })
+        )
+      }).pipe(Effect.provide(HttpLive), Effect.scoped)
     })
   )
 

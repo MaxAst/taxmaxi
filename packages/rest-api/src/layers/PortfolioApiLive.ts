@@ -16,6 +16,7 @@ import * as Option from "effect/Option"
 import { InternalServerError } from "../definitions/ApiErrors.ts"
 import {
   PortfolioCalculationStatusResponse,
+  PortfolioBadRequestResponse,
   PortfolioCalculationJobNotFoundResponse,
   PortfolioAssetRow,
   PortfolioActiveRunResponse,
@@ -129,6 +130,9 @@ export const PortfolioApiLive = HttpApiBuilder.group(TaxMaxiApi, "portfolio", (h
       )
       .handle("listPortfolioAssets", ({ query: urlParams }) =>
         Effect.gen(function* () {
+          if (urlParams.sourceId !== undefined && urlParams.sourceIds !== undefined) {
+            return yield* new PortfolioBadRequestResponse({ code: "conflicting_source_filters" })
+          }
           const { principal } = yield* principalResolutionService.resolveCurrentUserPrincipal.pipe(
             Effect.mapError(() => internalError("Failed to resolve the current user."))
           )
@@ -139,7 +143,10 @@ export const PortfolioApiLive = HttpApiBuilder.group(TaxMaxiApi, "portfolio", (h
           const portfolio = yield* portfolioRepository
             .getActiveRunPortfolio({
               principalId: principal.id,
-              sourceId: urlParams.sourceId === undefined ? null : SourceId.make(urlParams.sourceId),
+              sourceIds: (
+                urlParams.sourceIds ??
+                (urlParams.sourceId === undefined ? [] : [urlParams.sourceId])
+              ).map((id) => SourceId.make(id)),
               jurisdiction: GERMAN_JURISDICTION,
               taxYear,
               reportingCurrency: EUR,

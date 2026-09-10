@@ -1332,7 +1332,13 @@ describe("TaxMaxi Promise client", () => {
       )
       yield* Effect.promise(() => taxmaxi.portfolio.listAssets({ sourceId, currency: "eur" }))
 
-      expect(capturedRequests.map((request) => request.url)).toEqual([
+      const sourceIds = [sourceId, "00000000-0000-4000-8000-000000000002", sourceId]
+      yield* taxmaxi.effect.portfolio.listAssets({ sourceIds, currency: "EUR" })
+      expect(new URL(capturedRequests[2]?.url ?? "").searchParams.getAll("sourceIds")).toEqual(
+        sourceIds
+      )
+
+      expect(capturedRequests.slice(0, 2).map((request) => request.url)).toEqual([
         "https://sdk.example.test/v1/portfolio/assets?currency=eur",
         `https://sdk.example.test/v1/portfolio/assets?sourceId=${sourceId}&currency=eur`,
       ])

@@ -10,7 +10,10 @@ import type { TaxMaxiEffectClient } from "../client.ts"
 export type PortfolioAssets = Schema.Codec.Encoded<typeof PortfolioAssetsResponse>
 
 export interface PortfolioAssetsInput {
+  /** Single-source shorthand; cannot be combined with sourceIds. */
   readonly sourceId?: string
+  /** Owned sources whose captured custody units are included once; empty selects all. */
+  readonly sourceIds?: ReadonlyArray<string>
   readonly currency?: string
 }
 
@@ -67,6 +70,7 @@ export const makePortfolioEffectResource = (
         resolved.portfolio.listPortfolioAssets({
           query: {
             sourceId: input.sourceId,
+            sourceIds: input.sourceIds,
             currency: input.currency?.toLowerCase(),
           },
         })
