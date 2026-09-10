@@ -1,3 +1,4 @@
+import { SourceReplayRepository } from "@my/sync-engine/services"
 import { PrincipalAssetOverrideRepositoryLive } from "../../persistence/src/layers/PrincipalAssetOverrideRepositoryLive.ts"
 import { PrincipalAssetOverrideRepository } from "../../persistence/src/services/PrincipalAssetOverrideRepository.ts"
 import { JurisdictionCode, TaxYear, type MovementPriceInput } from "@my/core/accounting"
@@ -51,6 +52,7 @@ import {
   seedSyncEngineAssets,
   seedSyncEngineRepositoryFixture,
   TEST_BTC_ASSET_ID,
+  TEST_BTC_REPRESENTATION_ID,
 } from "../../persistence/tests/support/integration-test-kit.ts"
 import { TaxMaxiApi } from "../src/definitions/TaxMaxiApi.ts"
 import type { TransactionListResponse } from "../src/definitions/TransactionsApi.ts"
@@ -660,7 +662,7 @@ describe("TransactionsApiLive", () => {
           ({ text }) =>
             text.startsWith("select ") && text.includes('from "calculation_run_movement_inputs"')
         )
-        expect(captureReads).toHaveLength(2)
+        expect(captureReads).toHaveLength(3)
         for (const read of captureReads) {
           expect(read.params).toContain(fixture.principalId)
           expect(read.params.slice(-selectedIds.length)).toEqual(selectedIds)
@@ -740,9 +742,9 @@ describe("TransactionsApiLive", () => {
         expect(
           response.transactions.find((row) => row.transactionId === fixtureIds.buyTransactionId)
         ).toMatchObject({
-          income: "12.34",
+          income: null,
           realizedGainLoss: null,
-          fiatCurrency: "EUR",
+          fiatCurrency: null,
           calculationState: "complete",
         })
         expect(
@@ -750,7 +752,7 @@ describe("TransactionsApiLive", () => {
         ).toMatchObject({ income: null, fiatCurrency: null, calculationState: "partial" })
         expect(
           response.transactions.find((row) => row.transactionId === fixtureIds.sellTransactionId)
-        ).toMatchObject({ income: null, realizedGainLoss: "2000" })
+        ).toMatchObject({ income: null, realizedGainLoss: null })
         yield* db
           .update(schema.activeCalculationRuns)
           .set({ runId: null })
@@ -785,8 +787,8 @@ describe("TransactionsApiLive", () => {
               description: "Sell BTC",
               externalId: "transaction-sell",
               movements: [{ amount: "0.4", assetSymbol: "BTC", kind: "disposal" }],
-              realizedGainLoss: "2000",
-              fiatCurrency: "EUR",
+              realizedGainLoss: null,
+              fiatCurrency: null,
               calculationState: "complete",
               needsReview: false,
             },
@@ -1030,7 +1032,7 @@ describe("TransactionsApiLive", () => {
       expect(
         after[1]?.transactions.find((row) => row.transactionId === fixtureIds.sellTransactionId)
       ).toMatchObject({
-        realizedGainLoss: "2000",
+        realizedGainLoss: null,
         calculationState: "complete",
         movements: [{ amount: "0.4", assetSymbol: "BTC", kind: "disposal" }],
         needsReview: false,
@@ -1243,8 +1245,8 @@ describe("TransactionsApiLive", () => {
         )
 
         expect(transaction).toMatchObject({
-          realizedGainLoss: "1000",
-          fiatCurrency: "EUR",
+          realizedGainLoss: null,
+          fiatCurrency: null,
           calculationState: "complete",
         })
       }).pipe(Effect.provide(HttpLive), Effect.scoped)
@@ -1256,7 +1258,10 @@ describe("TransactionsApiLive", () => {
       Effect.gen(function* () {
         const fixture = yield* seedTransactions
         const db = yield* drizzle
-        const occurredAt = DateTime.toDateUtc(DateTime.makeUnsafe("2025-04-01T12:00:00.000Z"))
+        const occurredAt = DateTime.toDateUtc(DateTime.makeUnsafe("2025-01-01T00:01:00.000Z"))
+        const providerOccurredAt = DateTime.toDateUtc(
+          DateTime.makeUnsafe("2024-12-31T22:59:00.000Z")
+        )
         const [address] = yield* db
           .insert(schema.addresses)
           .values({
@@ -1284,7 +1289,7 @@ describe("TransactionsApiLive", () => {
             externalId: "provider-transfer-transaction",
             providerFiatAmount: "999",
             providerFiatCurrency: "EUR",
-            timestamp: occurredAt,
+            timestamp: providerOccurredAt,
             transactionType: "internal_transfer",
           },
           {
@@ -1353,7 +1358,7 @@ describe("TransactionsApiLive", () => {
           sourceId: fixture.sourceId,
           transactionId: fixtureIds.providerTransferTransactionId,
           externalId: "provider-transfer",
-          timestamp: occurredAt,
+          timestamp: providerOccurredAt,
           direction: "outbound",
           processingMode: "accounting_only",
           fromAccountRef: "own:coinbase",
@@ -1371,7 +1376,7 @@ describe("TransactionsApiLive", () => {
               sourceId: fixture.sourceId,
               principalId: fixture.principalId,
               externalId: "provider-transfer-transaction:disposal",
-              timestamp: occurredAt,
+              timestamp: providerOccurredAt,
               assetId: TEST_BTC_ASSET_ID,
               amount: "0.2",
               kind: "disposal",
@@ -1480,6 +1485,19 @@ describe("TransactionsApiLive", () => {
           layer: runLayer,
           effect: Effect.flatMap(CalculationRunService, (service) =>
             service.recompute({
+              id: CalculationRunId.make("00000000-0000-4000-8000-000000007248"),
+              principalId: PrincipalId.make(fixture.principalId),
+              jurisdiction: JurisdictionCode.make("DE"),
+              taxYear: TaxYear.make(2024),
+              reportingCurrency: EUR,
+              accountingChoices: [],
+            })
+          ),
+        })
+        yield* context.runWithLayer({
+          layer: runLayer,
+          effect: Effect.flatMap(CalculationRunService, (service) =>
+            service.recompute({
               id: capturedRunId,
               principalId: PrincipalId.make(fixture.principalId),
               jurisdiction: JurisdictionCode.make("DE"),
@@ -1499,6 +1517,7 @@ describe("TransactionsApiLive", () => {
         for (const row of capturedRows) {
           expect(row.movements[0]?.capture).toMatchObject({
             runId: capturedRunId,
+            outcome: "included",
             eventKind: "custody_movement",
             valuationState: "not_evaluated",
             selectedValue: null,
@@ -1517,6 +1536,20 @@ describe("TransactionsApiLive", () => {
           )
         expect(recorded).toHaveLength(2)
         for (const row of recorded) expect(row.captured.current?.structure).toBe("custody")
+        const older = yield* db
+          .select({ captured: schema.calculationRunMovementInputs.captured })
+          .from(schema.calculationRunMovementInputs)
+          .where(
+            and(
+              eq(schema.calculationRunMovementInputs.runId, "00000000-0000-4000-8000-000000007248"),
+              eq(
+                schema.calculationRunMovementInputs.transactionId,
+                fixtureIds.providerTransferTransactionId
+              )
+            )
+          )
+        expect(older).toHaveLength(1)
+        expect(older[0]?.captured.currentOutcome).toBe("outside_period")
       }).pipe(Effect.provide(HttpLive), Effect.scoped)
     )
   )
@@ -1549,7 +1582,7 @@ describe("TransactionsApiLive", () => {
           {
             transactionId: fixtureIds.sellTransactionId,
             calculationState: "complete",
-            realizedGainLoss: "2000",
+            realizedGainLoss: null,
           },
         ])
       }).pipe(Effect.provide(HttpLive), Effect.scoped)
@@ -2093,6 +2126,147 @@ const seedCalculation = (quantity = "2") =>
     }
   })
 
+// Replay the fixture through the real reset and normalization writers, preserving writer-recorded targets.
+const replaySyntheticSource = (replacement?: {
+  readonly kind?: "acquisition" | "disposal" | "income" | "fee"
+  readonly amount?: string
+  readonly assetId?: string
+  readonly afterReset?: () => ReturnType<typeof recompute>
+}) =>
+  Effect.gen(function* () {
+    const db = yield* drizzle
+    const transactions = yield* db
+      .select({
+        id: schema.transactions.id,
+        externalId: schema.transactions.externalId,
+        timestamp: schema.transactions.timestamp,
+        transactionType: schema.transactions.transactionType,
+        providerTransactionType: schema.transactions.providerTransactionType,
+        providerFiatAmount: schema.transactions.providerFiatAmount,
+        providerFiatCurrency: schema.transactions.providerFiatCurrency,
+      })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.sourceId, SOURCE_ID))
+    const legs = yield* db
+      .select({
+        id: schema.transactionLegs.id,
+        transactionId: schema.transactionLegs.transactionId,
+        targetId: schema.transactionLegs.movementCorrectionTargetId,
+        externalId: schema.transactionLegs.externalId,
+        amount: schema.transactionLegs.amount,
+        kind: schema.transactionLegs.kind,
+        assetId: schema.transactionLegs.assetId,
+        sourceRecordKey: schema.movementCorrectionTargets.sourceRecordKey,
+        componentKey: schema.movementCorrectionTargets.componentKey,
+      })
+      .from(schema.transactionLegs)
+      .innerJoin(
+        schema.movementCorrectionTargets,
+        eq(schema.movementCorrectionTargets.id, schema.transactionLegs.movementCorrectionTargetId)
+      )
+      .where(eq(schema.transactionLegs.sourceId, SOURCE_ID))
+    const reset = yield* SourceReplayRepository
+    yield* reset.resetSourceDerivedState({ sourceId: SOURCE_ID })
+    if (replacement?.afterReset !== undefined) yield* replacement.afterReset()
+    const writer = yield* SourceNormalizationRepository
+    for (const old of transactions) {
+      yield* writer.persistNormalizedArtifacts({
+        transaction: {
+          sourceId: SOURCE_ID,
+          sourceRawRecordId: null,
+          externalId: old.externalId,
+          externalGroupId: null,
+          timestamp: old.timestamp,
+          transactionType: old.transactionType,
+          providerTransactionType: old.providerTransactionType,
+          providerStatus: "completed",
+          providerResourcePath: null,
+          providerDescription: null,
+          providerCreatedAt: old.timestamp,
+          providerUpdatedAt: old.timestamp,
+          metadata: null,
+          providerFiatAmount: old.providerFiatAmount,
+          providerFiatCurrency: old.providerFiatCurrency,
+          principalId: PRINCIPAL_ID,
+        },
+        venueContext: {
+          venueType: "cex",
+          cexAccountId: null,
+          externalAccountId: null,
+          externalOrderId: null,
+          externalFillId: null,
+          side: null,
+          instrument: null,
+          fillPrice: null,
+          commissionAmount: null,
+          commissionCurrency: null,
+          metadata: null,
+        },
+        providerTransfers: [],
+        canonicalTransfers: [],
+        providerAssetRowIds: [],
+        transactionReview: null,
+        resolvedTransactionType: {
+          providerTransactionType:
+            old.providerTransactionType ?? old.transactionType ?? "synthetic",
+          transactionType: old.transactionType,
+          inventoryEffect: "unknown",
+          taxTreatment: "requires_additional_rule_logic",
+          resolutionStrategy: "static",
+          pairedRecordRequired: false,
+          mappingStatus: "approved",
+        },
+        deriveLegs: ({ transaction }) =>
+          Effect.succeed(
+            legs
+              .filter((leg) => leg.transactionId === old.id)
+              .map((leg) => ({
+                movementIdentity: {
+                  _tag: "identified" as const,
+                  sourceRecordKey: leg.sourceRecordKey,
+                  componentKey: leg.componentKey,
+                },
+                sourceId: SOURCE_ID,
+                sourceRawRecordId: null,
+                externalId: leg.externalId,
+                txHash: null,
+                timestamp: old.timestamp,
+                principalId: PRINCIPAL_ID,
+                addressId: null,
+                assetId: replacement?.assetId ?? leg.assetId,
+                amount: replacement?.amount ?? leg.amount,
+                kind: replacement?.kind ?? leg.kind,
+                provenance: "deterministic" as const,
+                originKind: "none" as const,
+                derivationRule: "synthetic-replay",
+                metadata: null,
+                transactionId: transaction.id,
+                sourceTransferId: null,
+                fiatAmount: null,
+                fiatCurrency: null,
+                feeForTransactionId: null,
+              }))
+          ),
+      })
+    }
+    const replayed = yield* db
+      .select({
+        id: schema.transactionLegs.id,
+        transactionId: schema.transactionLegs.transactionId,
+        targetId: schema.transactionLegs.movementCorrectionTargetId,
+      })
+      .from(schema.transactionLegs)
+      .where(eq(schema.transactionLegs.sourceId, SOURCE_ID))
+    expect(replayed).toHaveLength(legs.length)
+    for (const leg of replayed) {
+      const old = legs.find(({ targetId }) => targetId === leg.targetId)
+      expect(old).toBeDefined()
+      expect(leg.id).not.toBe(old?.id)
+      expect(leg.transactionId).not.toBe(old?.transactionId)
+    }
+    return replayed
+  })
+
 const changePrice = ({
   operation,
   targetId,
@@ -2390,12 +2564,101 @@ describe("writer-produced transaction income", () => {
         selectedValue: { kind: "user_valuation", amount: "0.25", currency: "EUR" },
       })
       expect(storedDisposals[0]?.eventId).toBe(disposal.id)
+      const replayed = yield* replaySyntheticSource()
+      const afterReplay = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+      const incomeRow = afterReplay.transactions.find((row) =>
+        row.movements.some(({ targetId }) => targetId === disposal.targetId)
+      )
+      expect(incomeRow).toMatchObject({
+        income: "2",
+        realizedGainLoss: "-0.25",
+        fiatCurrency: "EUR",
+      })
+      expect(
+        incomeRow?.movements.find(({ targetId }) => targetId === disposal.targetId)?.capture
+      ).toMatchObject({ eventId: disposal.id, runId: runId(30) })
+      expect(replayed.find(({ targetId }) => targetId === disposal.targetId)?.id).not.toBe(
+        disposal.id
+      )
     }).pipe(Effect.provide(HttpLive), Effect.scoped)
   )
 })
 
 describe("writer-produced transaction list captures", () => {
   beforeEach(() => Effect.runPromise(context.recreateTestDatabase()))
+
+  it.effect("keeps absent capture unavailable when its durable target reappears after replay", () =>
+    Effect.gen(function* () {
+      const fixture = yield* seedCalculation("10")
+      const accepted = yield* acceptTotal({ targetId: fixture.acquisition.targetId, amount: "20" })
+      yield* completeReplay(accepted.processingJobId)
+      yield* replaySyntheticSource({ afterReset: () => recompute(44) })
+      const db = yield* drizzle
+      const absent = yield* db
+        .select({ captured: schema.calculationRunMovementInputs.captured })
+        .from(schema.calculationRunMovementInputs)
+        .where(
+          and(
+            eq(schema.calculationRunMovementInputs.runId, runId(44)),
+            eq(schema.calculationRunMovementInputs.targetId, fixture.acquisition.targetId)
+          )
+        )
+      expect(absent).toHaveLength(1)
+      expect(absent[0]?.captured).toMatchObject({ current: null, currentOutcome: "absent" })
+      const client = yield* makeAuthenticatedClient({ userId: USER_ID })
+      const response = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+      const purchase = response.transactions.find((row) =>
+        row.movements.some(({ targetId }) => targetId === fixture.acquisition.targetId)
+      )
+      expect(purchase).toMatchObject({ income: null, realizedGainLoss: null, fiatCurrency: null })
+      expect(purchase?.movements[0]?.capture).toBeNull()
+      const retained = yield* db
+        .select({ captured: schema.calculationRunMovementInputs.captured })
+        .from(schema.calculationRunMovementInputs)
+        .where(
+          and(
+            eq(schema.calculationRunMovementInputs.runId, runId(44)),
+            eq(schema.calculationRunMovementInputs.targetId, fixture.acquisition.targetId)
+          )
+        )
+      expect(retained).toEqual(absent)
+    }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
+
+  it.effect(
+    "retains withheld movement display facts after replay changes the imported movement",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* seedCalculation("10")
+        const db = yield* drizzle
+        yield* db
+          .update(schema.transactionLegs)
+          .set({ assetRepresentationId: TEST_BTC_REPRESENTATION_ID })
+          .where(eq(schema.transactionLegs.id, fixture.acquisition.id))
+        yield* recompute(43)
+        const client = yield* makeAuthenticatedClient({ userId: USER_ID })
+        const before = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        const original = before.transactions.find((row) =>
+          row.movements.some(({ targetId }) => targetId === fixture.acquisition.targetId)
+        )?.movements[0]
+        expect(original).toMatchObject({
+          amount: "10",
+          assetSymbol: "BTC",
+          kind: "acquisition",
+          capture: { runId: runId(43), outcome: "withheld", eventId: null },
+        })
+        const replayAssetId = "00000000-0000-4000-8000-000000007297"
+        yield* db
+          .insert(schema.assets)
+          .values({ id: replayAssetId, name: "New replay asset", symbol: "NEW", type: "fungible" })
+        yield* replaySyntheticSource({ kind: "fee", amount: "99", assetId: replayAssetId })
+        const after = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        const replayed = after.transactions.find((row) =>
+          row.movements.some(({ targetId }) => targetId === fixture.acquisition.targetId)
+        )?.movements[0]
+        expect(replayed).toEqual(original)
+      }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
 
   it.effect("reads combined asset, category and price corrections from the completed capture", () =>
     Effect.gen(function* () {
@@ -2695,6 +2958,13 @@ describe("writer-produced transaction list captures", () => {
             }),
           ])
         }
+        yield* replaySyntheticSource()
+        const replayedPage = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        expect(
+          replayedPage.transactions.find((row) =>
+            row.movements.some(({ targetId }) => targetId === fixture.disposition.targetId)
+          )
+        ).toMatchObject({ realizedGainLoss: "10", fiatCurrency: "EUR" })
         yield* acceptTotal({
           targetId: fixture.acquisition.targetId,
           amount: "40",
@@ -2702,8 +2972,9 @@ describe("writer-produced transaction list captures", () => {
         })
         const pending = yield* client.transactions.listTransactions({ query: { limit: 10 } })
         expect(
-          pending.transactions.find(({ transactionId }) => transactionId === fixture.purchaseId)
-            ?.movements[0]?.capture
+          pending.transactions.find((row) =>
+            row.movements.some(({ targetId }) => targetId === fixture.acquisition.targetId)
+          )?.movements[0]?.capture
         ).toMatchObject({
           runId: runId(40),
           quantity: "10",
