@@ -1,3 +1,9 @@
+import {
+  validateTransactionSearch,
+  updateTransactionSearch,
+  parseTransactionFilters,
+  type TransactionFilters,
+} from "#/lib/transaction-filters"
 import { Outlet, createFileRoute, redirect } from "@tanstack/react-router"
 import { useSuspenseQueries, useSuspenseQuery } from "@tanstack/react-query"
 import { useCallback, useMemo } from "react"
@@ -99,6 +105,7 @@ export const loadAppPageData = async ({
 }
 
 export const Route = createFileRoute("/app")({
+  validateSearch: validateTransactionSearch,
   beforeLoad: async () => {
     const { isAuthenticated } = await getAuthStatus()
 
@@ -145,6 +152,14 @@ function RouteComponent() {
   const { queryClient, taxmaxi } = Route.useRouteContext()
 
   const navigate = Route.useNavigate()
+  const search = Route.useSearch()
+  const filters = useMemo(() => parseTransactionFilters(search), [search])
+  const onFiltersChange = useCallback(
+    (next: TransactionFilters) => {
+      void navigate({ search: (previous) => updateTransactionSearch(previous, next) })
+    },
+    [navigate]
+  )
   const onLogout = useAppLogout()
 
   const {
@@ -231,6 +246,8 @@ function RouteComponent() {
         <AccountMenu onLogout={onLogout} />
       </AppHeader>
       <Dashboard
+        filters={filters}
+        onFiltersChange={onFiltersChange}
         accounts={sourceAccounts}
         createWalletSource={createWalletSource}
         getSourceSyncJob={getSourceSyncJob}

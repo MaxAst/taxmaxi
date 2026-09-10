@@ -1,4 +1,6 @@
 {
+  "app.transactionFilters.invalidUrl": "Die Transaktionsfilter in diesem Link sind ungültig. Prüfe die Filter und versuche es erneut.",
+  "app.transactionFilters.reversedDates": "Das Enddatum muss am oder nach dem Startdatum liegen.",
   "app.treatment.toggle": "Behandlung · {year}",
   "app.treatment.heading": "Behandlungsergebnisse · {description} · {transactionId}",
   "app.treatment.requestedYear": "Angefragtes Steuerjahr: {year}",
