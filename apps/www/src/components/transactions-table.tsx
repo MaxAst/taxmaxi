@@ -7,7 +7,9 @@ import { Button } from "#/components/ui/button"
 import { m } from "#/paraglide/messages"
 import { getLocale } from "#/paraglide/runtime"
 import {
-  transactionMovements,
+  transactionMovementLabel,
+  transactionMovementFacts,
+  transactionMovementCause,
   transactionResults,
   transactionTypeLabel,
 } from "#/lib/transaction-display"
@@ -179,7 +181,7 @@ export function TransactionsTable({
                     <span className="truncate font-medium">
                       {transactionTypeLabel(transaction.transactionType)}
                     </span>
-                    {transaction.needsReview ? (
+                    {transaction.attention ? (
                       <CircleAlert
                         aria-label={m["app.dashboard.transactions.needsReview"]()}
                         className="size-4 shrink-0 text-amber-600 dark:text-amber-300"
@@ -197,9 +199,25 @@ export function TransactionsTable({
                     {transaction.movements.length === 0 ? (
                       <p>{m["app.dashboard.transactions.movementsPending"]()}</p>
                     ) : (
-                      transactionMovements(transaction).map((movement, index) => (
-                        <p key={index}>{movement}</p>
-                      ))
+                      transaction.movements.map((movement) => {
+                        const cause = transactionMovementCause(movement)
+                        return (
+                          <div key={movement.targetId} className="space-y-0.5">
+                            <p>
+                              {transactionMovementLabel(movement)}
+                              {cause !== null &&
+                              cause !== transactionTypeLabel(transaction.transactionType) ? (
+                                <> · {cause}</>
+                              ) : null}
+                            </p>
+                            {transactionMovementFacts(movement).map((fact, factIndex) => (
+                              <p key={`${fact.label}-${factIndex}`}>
+                                {fact.label}: {fact.amount}
+                              </p>
+                            ))}
+                          </div>
+                        )
+                      })
                     )}
                   </div>
                   <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-muted-foreground">

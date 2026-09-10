@@ -502,7 +502,30 @@
         "previousPage": "Vorherige Seite",
         "previous": "Zurück",
         "nextPage": "Nächste Seite",
-        "next": "Weiter"
+        "next": "Weiter",
+        "paid": "Bezahlt",
+        "receivedValue": "Erhalten",
+        "providerAmount": "Anbieterbetrag",
+        "feePaid": "Bezahlte Gebühr",
+        "feeValuation": "Gebührenbewertung",
+        "feeValue": "Gebührenwert",
+        "marketValuation": "Marktbewertung",
+        "userValuation": "Deine Bewertung",
+        "selectedConsideration": "Ausgewählte Gegenleistung",
+        "valuation": "Bewertung",
+        "proceeds": "Erlös",
+        "costBasis": "Anschaffungskosten",
+        "feeGainLoss": "Gebührengewinn/-verlust",
+        "totalGainLoss": "Gesamtgewinn/-verlust (inkl. Gebühren)",
+        "causes": {
+          "purchase": "Kauf",
+          "sale": "Verkauf",
+          "gift": "Geschenk",
+          "passiveStaking": "Passive Staking-Belohnung",
+          "reward": "Belohnung",
+          "payment": "Zahlung"
+        },
+        "movementValue": "Wert"
       }
     }
   },
