@@ -204,6 +204,92 @@ beforeEach(() =>
 )
 
 describe("CalculationRunServiceLive", () => {
+  it.effect("persists corrected and uncorrected captures during deliberate recomputation", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => runPg(seedCorrectionMovement))
+      yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const [transaction] = yield* db
+              .insert(schema.transactions)
+              .values({
+                sourceId: SOURCE_ID,
+                principalId: PRINCIPAL_ID,
+                externalId: "synthetic-uncorrected-purchase",
+                timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-02-02T00:00:00Z")),
+                transactionType: "buy_fiat",
+                providerFiatAmount: "20",
+                providerFiatCurrency: "EUR",
+              })
+              .returning({ id: schema.transactions.id })
+            if (transaction === undefined) return yield* Effect.die("Missing synthetic transaction")
+            yield* db.insert(schema.transactionLegs).values(
+              yield* prepareMovementLegFixtures([
+                {
+                  movementIdentity: {
+                    sourceRecordKey: "synthetic-uncorrected-purchase",
+                    componentKey: "principal",
+                  },
+                  sourceId: SOURCE_ID,
+                  principalId: PRINCIPAL_ID,
+                  externalId: "synthetic-uncorrected-leg",
+                  timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-02-02T00:00:00Z")),
+                  assetId: TEST_BTC_ASSET_ID,
+                  amount: "10",
+                  kind: "acquisition",
+                  provenance: "deterministic",
+                  originKind: "none",
+                  transactionId: transaction.id,
+                },
+              ])
+            )
+          })
+        )
+      )
+      yield* Effect.promise(() => recompute(FIRST_RUN_ID))
+      const captures = yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return yield* db
+              .select({
+                runId: schema.calculationRunMovementInputs.runId,
+                principalId: schema.calculationRunMovementInputs.principalId,
+                targetId: schema.calculationRunMovementInputs.targetId,
+                captured: schema.calculationRunMovementInputs.captured,
+                valuation: schema.calculationRunMovementInputs.valuation,
+              })
+              .from(schema.calculationRunMovementInputs)
+              .where(eq(schema.calculationRunMovementInputs.runId, FIRST_RUN_ID))
+          })
+        )
+      )
+      expect(captures).toHaveLength(2)
+      expect(
+        captures.every(
+          (capture) => capture.runId === FIRST_RUN_ID && capture.principalId === PRINCIPAL_ID
+        )
+      ).toBe(true)
+      const corrected = captures.find((capture) => capture.targetId === fixture.targetId)
+      expect(corrected?.valuation).toEqual({
+        _tag: "selected",
+        kind: "user_valuation",
+        total: { amount: "1e-25", currency: "EUR" },
+      })
+      const uncorrected = captures.find((capture) => capture.targetId !== fixture.targetId)
+      expect(storedDecimalEquals(uncorrected?.captured.current?.quantity, "10")).toBe(true)
+      expect(uncorrected?.valuation).toEqual({
+        _tag: "selected",
+        kind: "observed_consideration",
+        total: { amount: "20", currency: "EUR" },
+      })
+      expect(uncorrected?.captured).not.toHaveProperty("history")
+      expect(uncorrected?.captured).not.toHaveProperty("corrections")
+      expect(yield* Effect.promise(() => readCorrectionInputs(FIRST_RUN_ID))).toHaveLength(1)
+    })
+  )
+
   it.effect("records explicit empty sync capture for a new accounting snapshot", () =>
     Effect.gen(function* () {
       yield* Effect.promise(() => recompute(FIRST_RUN_ID))
@@ -853,7 +939,44 @@ describe("CalculationRunServiceLive", () => {
             })
           )
         )
+        const readMovementInputs = (runId: CalculationRunId) =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({
+                  runId: schema.calculationRunMovementInputs.runId,
+                  principalId: schema.calculationRunMovementInputs.principalId,
+                  sourceId: schema.calculationRunMovementInputs.sourceId,
+                  targetId: schema.calculationRunMovementInputs.targetId,
+                  transactionId: schema.calculationRunMovementInputs.transactionId,
+                  eventId: schema.calculationRunMovementInputs.eventId,
+                  captured: schema.calculationRunMovementInputs.captured,
+                  valuation: schema.calculationRunMovementInputs.valuation,
+                })
+                .from(schema.calculationRunMovementInputs)
+                .where(eq(schema.calculationRunMovementInputs.runId, runId))
+            })
+          )
         const withheld = yield* Effect.promise(() => recompute(FIRST_RUN_ID))
+        const withheldMovements = yield* Effect.promise(() => readMovementInputs(FIRST_RUN_ID))
+        expect(withheldMovements).toEqual([
+          expect.objectContaining({
+            runId: FIRST_RUN_ID,
+            principalId: PRINCIPAL_ID,
+            sourceId: SOURCE_ID,
+            targetId: fixture.targetId,
+            transactionId: fixture.transactionId,
+            eventId: null,
+            captured: expect.objectContaining({
+              targetId: fixture.targetId,
+              currentOutcome: "withheld",
+              current: expect.objectContaining({ legId: fixture.legId }),
+              effective: expect.objectContaining({ event: null, valuationFacts: [] }),
+            }),
+            valuation: { _tag: "not_evaluated" },
+          }),
+        ])
         const [captured] = yield* Effect.promise(() => readCorrectionInputs(FIRST_RUN_ID))
         expect(withheld.status).toBe("partial")
         expect(captured?.captured).toMatchObject({
@@ -875,6 +998,26 @@ describe("CalculationRunServiceLive", () => {
         )
         yield* Effect.promise(() => recompute(SECOND_RUN_ID))
         const [absent] = yield* Effect.promise(() => readCorrectionInputs(SECOND_RUN_ID))
+        expect(yield* Effect.promise(() => readMovementInputs(SECOND_RUN_ID))).toEqual([
+          expect.objectContaining({
+            runId: SECOND_RUN_ID,
+            principalId: PRINCIPAL_ID,
+            sourceId: SOURCE_ID,
+            targetId: fixture.targetId,
+            transactionId: null,
+            eventId: null,
+            captured: expect.objectContaining({
+              targetId: fixture.targetId,
+              current: null,
+              currentOutcome: "absent",
+              effective: expect.objectContaining({ event: null }),
+            }),
+            valuation: { _tag: "not_evaluated" },
+          }),
+        ])
+        expect(yield* Effect.promise(() => readMovementInputs(FIRST_RUN_ID))).toEqual(
+          withheldMovements
+        )
         expect(absent?.captured).toMatchObject({
           current: null,
           currentOutcome: "absent",

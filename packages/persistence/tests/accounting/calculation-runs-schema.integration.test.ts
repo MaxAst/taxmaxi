@@ -87,6 +87,170 @@ const insertRun = ({ id, taxYear = 2025 }: { readonly id: string; readonly taxYe
     })
   })
 
+describe("complete movement capture schema", () => {
+  it.effect("checks a foreign movement owner at commit and rolls its capture back", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => runPg(seedSyncEngineRepositoryFixture()))
+      yield* Effect.promise(() =>
+        runPg(
+          seedSyncEngineRepositoryFixture({
+            userId: WRITER_USER_ID,
+            principalId: WRITER_PRINCIPAL_ID,
+            sourceId: WRITER_SOURCE_ID,
+          })
+        )
+      )
+      yield* Effect.promise(() => runPg(insertRun({ id: CALCULATION_RUN_ID })))
+      const targetId = yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .update(schema.calculationRuns)
+              .set({ status: "running", completedAt: null })
+              .where(eq(schema.calculationRuns.id, CALCULATION_RUN_ID))
+            const [target] = yield* db
+              .insert(schema.movementCorrectionTargets)
+              .values({
+                principalId: WRITER_PRINCIPAL_ID,
+                sourceId: WRITER_SOURCE_ID,
+                sourceRecordKey: "foreign-capture",
+                componentKey: "principal",
+              })
+              .returning({ id: schema.movementCorrectionTargets.id })
+            if (target === undefined) return yield* Effect.die("Missing synthetic foreign target")
+            return target.id
+          })
+        )
+      )
+      let insertedBeforeCommit = false
+      const outcome = yield* Effect.promise(() =>
+        runPg(
+          Effect.exit(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.transaction((tx) =>
+                Effect.gen(function* () {
+                  yield* tx.insert(schema.calculationRunMovementInputs).values({
+                    runId: CALCULATION_RUN_ID,
+                    principalId: TEST_PRINCIPAL_ID,
+                    sourceId: WRITER_SOURCE_ID,
+                    targetId,
+                    eventId: null,
+                    transactionId: null,
+                    captured: {
+                      targetId,
+                      current: null,
+                      currentOutcome: "absent",
+                      system: { event: null, valuationFacts: [] },
+                      effective: { event: null, valuationFacts: [] },
+                    },
+                    valuation: { _tag: "not_evaluated" },
+                  })
+                  insertedBeforeCommit = true
+                })
+              )
+            })
+          )
+        )
+      )
+      expect(insertedBeforeCommit).toBe(true)
+      expect(outcome._tag).toBe("Failure")
+      const captures = yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            return yield* db
+              .select({ targetId: schema.calculationRunMovementInputs.targetId })
+              .from(schema.calculationRunMovementInputs)
+          })
+        )
+      )
+      expect(captures).toEqual([])
+    })
+  )
+
+  it.effect("rejects mutation and insertion after finalization of movement captures", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => runPg(seedSyncEngineRepositoryFixture()))
+      yield* Effect.promise(() => runPg(insertRun({ id: CALCULATION_RUN_ID })))
+      const row = yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const [target] = yield* db
+              .insert(schema.movementCorrectionTargets)
+              .values({
+                principalId: TEST_PRINCIPAL_ID,
+                sourceId: TEST_SOURCE_ID,
+                sourceRecordKey: "synthetic-absent-capture",
+                componentKey: "principal",
+              })
+              .returning({ id: schema.movementCorrectionTargets.id })
+            if (target === undefined) return yield* Effect.die("Missing synthetic target")
+            yield* db
+              .update(schema.calculationRuns)
+              .set({ status: "running", completedAt: null })
+              .where(eq(schema.calculationRuns.id, CALCULATION_RUN_ID))
+            const value = {
+              runId: CALCULATION_RUN_ID,
+              principalId: TEST_PRINCIPAL_ID,
+              sourceId: TEST_SOURCE_ID,
+              targetId: target.id,
+              eventId: null,
+              transactionId: null,
+              captured: {
+                targetId: target.id,
+                current: null,
+                currentOutcome: "absent",
+                system: { event: null, valuationFacts: [] },
+                effective: { event: null, valuationFacts: [] },
+              },
+              valuation: { _tag: "not_evaluated" },
+            } satisfies typeof schema.calculationRunMovementInputs.$inferInsert
+            yield* db.insert(schema.calculationRunMovementInputs).values(value)
+            return value
+          })
+        )
+      )
+      const reject = (effect: Parameters<typeof runPg<unknown, unknown>>[0]) =>
+        Effect.promise(() => runPg(Effect.exit(effect)))
+      const updated = yield* reject(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db.update(schema.calculationRunMovementInputs).set({ eventId: null })
+        })
+      )
+      expect(updated._tag).toBe("Failure")
+      const deleted = yield* reject(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db.delete(schema.calculationRunMovementInputs)
+        })
+      )
+      expect(deleted._tag).toBe("Failure")
+      yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db
+              .update(schema.calculationRuns)
+              .set({ status: "complete", completedAt: yield* DateTime.nowAsDate })
+              .where(eq(schema.calculationRuns.id, CALCULATION_RUN_ID))
+          })
+        )
+      )
+      const inserted = yield* reject(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db.insert(schema.calculationRunMovementInputs).values(row).onConflictDoNothing()
+        })
+      )
+      expect(inserted._tag).toBe("Failure")
+    })
+  )
+})
+
 describe("completed-sync coverage schema", () => {
   it.effect("user deletion cascades through coverage without deleting another owner's work", () =>
     Effect.gen(function* () {
@@ -625,6 +789,7 @@ describe("calculation-runs schema", () => {
       yield* runRepository(
         Effect.flatMap(CalculationRunRepository, (repository) =>
           repository.persist({
+            movements: new Map(),
             writeMode: "atomic",
             syncCapture: { requestIds: [] },
             correctionInputs: [],
@@ -982,6 +1147,7 @@ describe("calculation-runs schema", () => {
             yield* db.execute(sql`drop table calculation_run_allocations`)
             yield* db.execute(sql`drop table calculation_run_custody_unit_sources`)
             yield* db.execute(sql`drop table calculation_run_custody_units`)
+            yield* db.execute(sql`drop table calculation_run_movement_inputs`)
             yield* db.execute(sql`drop table calculation_run_correction_inputs`)
             yield* db.execute(sql`drop table calculation_runs`)
             yield* db.execute(sql`drop table custody_unit_sources`)

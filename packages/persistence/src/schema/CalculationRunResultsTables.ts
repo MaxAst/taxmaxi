@@ -12,6 +12,11 @@ import {
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core"
+import type {
+  CalculationRunMovementInput,
+  CalculationRunMovementValuation,
+} from "../services/CalculationRunRepository.ts"
+import { movementCorrectionTargets } from "./MovementCorrectionTargetsTable.ts"
 import { assets } from "./AssetsTable.ts"
 import { calculationRuns } from "./CalculationRunsTables.ts"
 import { custodyUnits } from "./CustodyUnitsTables.ts"
@@ -26,6 +31,69 @@ export interface CalculationRunExplanationMatch {
   readonly acquisitionEventId: string
   readonly quantity: string
 }
+
+/** Complete movement facts frozen with one finalized calculation run, independently of corrections. */
+export const calculationRunMovementInputs = pgTable(
+  "calculation_run_movement_inputs",
+  {
+    runId: uuid("run_id").notNull(),
+    principalId: uuid("principal_id").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    targetId: uuid("target_id").notNull(),
+    transactionId: uuid("transaction_id"),
+    eventId: uuid("event_id"),
+    captured: jsonb("captured").$type<CalculationRunMovementInput>().notNull(),
+    valuation: jsonb("valuation").$type<CalculationRunMovementValuation>().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.runId, table.targetId] }),
+    foreignKey({
+      columns: [table.runId, table.principalId],
+      foreignColumns: [calculationRuns.id, calculationRuns.principalId],
+      name: "calculation_movement_inputs_run_owner_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.targetId, table.sourceId, table.principalId],
+      foreignColumns: [
+        movementCorrectionTargets.id,
+        movementCorrectionTargets.sourceId,
+        movementCorrectionTargets.principalId,
+      ],
+      name: "calculation_movement_inputs_target_owner_fk",
+    }).onDelete("restrict"),
+    index("idx_calculation_movement_inputs_transaction").on(table.runId, table.transactionId),
+    index("idx_calculation_movement_inputs_event").on(table.runId, table.eventId),
+    check(
+      "calculation_movement_inputs_capture_links",
+      sql`(
+      jsonb_typeof(${table.captured}) = 'object'
+      and ${table.captured}->>'targetId' = ${table.targetId}::text
+      and ${table.captured}->>'currentOutcome' in ('included', 'withheld', 'absent', 'outside_period')
+      and jsonb_typeof(${table.captured}->'system') = 'object'
+      and jsonb_typeof(${table.captured}->'effective') = 'object'
+      and (${table.captured}->'effective'->'event'->>'id') is not distinct from ${table.eventId}::text
+      and (${table.captured}->'current'->>'transactionId') is not distinct from ${table.transactionId}::text
+      and (${table.captured}->'current' = 'null'::jsonb or (
+        ${table.captured}->'current'->>'targetId' = ${table.targetId}::text
+        and ${table.captured}->'current'->>'sourceId' = ${table.sourceId}::text
+      ))
+    ) is true`
+    ),
+    check(
+      "calculation_movement_inputs_valuation",
+      sql`(
+      jsonb_typeof(${table.valuation}) = 'object'
+      and ${table.valuation}->>'_tag' in ('not_evaluated', 'missing', 'ambiguous', 'selected')
+      and (${table.valuation}->>'_tag' <> 'selected' or (
+        ${table.eventId} is not null
+        and ${table.valuation}->>'kind' in ('user_valuation', 'observed_consideration', 'market_quote')
+        and jsonb_typeof(${table.valuation}->'total'->'amount') = 'string'
+        and jsonb_typeof(${table.valuation}->'total'->'currency') = 'string'
+      ))
+    ) is true`
+    ),
+  ]
+)
 
 /** Custody-unit identity recorded as part of one calculation run's input snapshot. */
 export const calculationRunCustodyUnits = pgTable(

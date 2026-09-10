@@ -1093,6 +1093,7 @@ const persistClaimRaceRun = ({
 }) =>
   Effect.flatMap(CalculationRunRepository, (repository) =>
     repository.persist({
+      movements: new Map(),
       writeMode,
       syncCapture: { requestIds: [] },
       correctionInputs: [],

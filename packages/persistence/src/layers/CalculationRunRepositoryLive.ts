@@ -4,7 +4,7 @@
  * @module CalculationRunRepositoryLive
  */
 
-import { format as formatQuantity, TaxYear } from "@my/core/accounting"
+import { AccountingEventId, format as formatQuantity, TaxYear } from "@my/core/accounting"
 import type { CurrencyCode } from "@my/core/currency"
 import {
   aliasedTable,
@@ -42,6 +42,7 @@ import {
   CalculationRunRepository,
   type CalculationRunRepositoryShape,
   type CalculationRunResult,
+  type CalculationRunMovementValuation,
   type ExposedCalculationRunStatus,
   type FailCalculationRunParams,
   type MaintainCalculationRunsParams,
@@ -73,6 +74,9 @@ const uuidIn = (column: SQLWrapper, ids: ReadonlyArray<string>) =>
   sql`${column} in (select value::uuid from jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb))`
 
 const resultCurrencies = (result: CalculationRunResult): ReadonlyArray<CurrencyCode> => [
+  ...result.eventValuations.flatMap(({ resolution }) =>
+    resolution._tag === "selected" ? [resolution.total.currency] : []
+  ),
   ...result.allocations.flatMap(({ costBasis }) =>
     costBasis === null ? [] : [costBasis.currency]
   ),
@@ -1125,6 +1129,65 @@ const make = Effect.gen(function* () {
       yield* writeCustodyMembership({ tx, runId: params.id, membership: liveMembership })
     })
 
+  const writeMovementInputs = ({ tx, params, result }: WriteContext) =>
+    Effect.gen(function* () {
+      const selections = new Map(
+        result.eventValuations.map((selection) => [selection.eventId, selection.resolution])
+      )
+      const rows: Array<typeof schema.calculationRunMovementInputs.$inferInsert> = []
+      for (const movement of params.movements.values()) {
+        const sourceId = movement.current?.sourceId ?? movement.corrections[0]?.history.sourceId
+        if (sourceId === undefined)
+          return yield* Effect.fail(
+            new PersistenceError({
+              operation: "calculationRunRepository.captureMovement",
+              cause: "Movement has no recorded source link",
+            })
+          )
+        const eventId = movement.effective.event?.id ?? null
+        const selection =
+          eventId === null ? undefined : selections.get(AccountingEventId.make(eventId))
+        if (
+          movement.effective.event !== null &&
+          movement.effective.event._tag !== "custody_movement" &&
+          selection === undefined
+        )
+          return yield* Effect.fail(
+            new PersistenceError({
+              operation: "calculationRunRepository.captureMovement",
+              cause: "Accounting event has no recorded valuation selection",
+            })
+          )
+        const valuation: CalculationRunMovementValuation =
+          selection?._tag === "selected"
+            ? {
+                _tag: "selected",
+                kind: selection.kind,
+                total: { amount: selection.total.format(), currency: selection.total.currency },
+              }
+            : { _tag: selection?._tag ?? "not_evaluated" }
+        rows.push({
+          runId: params.id,
+          principalId: params.principalId,
+          sourceId,
+          targetId: movement.targetId,
+          transactionId: movement.current?.transactionId ?? null,
+          eventId,
+          captured: {
+            targetId: movement.targetId,
+            current: movement.current,
+            currentOutcome: movement.currentOutcome,
+            system: movement.system,
+            effective: movement.effective,
+          },
+          valuation,
+        })
+      }
+      yield* writeBatches(rows, (batch) =>
+        tx.insert(schema.calculationRunMovementInputs).values(batch)
+      )
+    })
+
   const writeAllocations = ({ tx, params, result }: WriteContext) => {
     const rows = result.allocations.map((allocation, sequence) => ({
       runId: params.id,
@@ -1321,6 +1384,7 @@ const make = Effect.gen(function* () {
         yield* verifyCorrectionInputs(context)
         yield* verifySyncCapture(context)
       }
+      yield* writeMovementInputs(context)
       yield* writeAllocations(context)
       yield* writeRealizedResults(context)
       yield* writeIncomeResults(context)

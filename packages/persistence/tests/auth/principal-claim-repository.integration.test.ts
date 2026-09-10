@@ -1,3 +1,12 @@
+import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
+import { JurisdictionCode, TaxYear } from "@my/core/accounting"
+import { CurrencyCode } from "@my/core/currency"
+import * as Layer from "effect/Layer"
+import { CalculationRunRepositoryLive } from "../../src/layers/CalculationRunRepositoryLive.ts"
+import { CalculationRunServiceLive } from "../../src/layers/CalculationRunServiceLive.ts"
+import { FactualLedgerRepositoryLive } from "../../src/layers/FactualLedgerRepositoryLive.ts"
+import { CalculationRunId } from "../../src/services/CalculationRunRepository.ts"
+import { CalculationRunService } from "../../src/services/CalculationRunService.ts"
 import * as DateTime from "effect/DateTime"
 import { asc, eq, inArray, sql } from "drizzle-orm"
 import { PrincipalId } from "@my/core/ownership"
@@ -107,6 +116,102 @@ describe("PrincipalClaimRepositoryLive", () => {
         )
       })
     )
+  )
+
+  it.effect(
+    "claims an anonymously recomputed source and discards its complete movement capture",
+    () =>
+      Effect.gen(function* () {
+        const assetId = "00000000-0000-4000-8000-000000001199"
+        const runId = CalculationRunId.make("00000000-0000-4000-8000-000000001198")
+        yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.insert(schema.assets).values({
+                id: assetId,
+                name: "Synthetic capture asset",
+                symbol: "CAPTURE",
+                type: "fungible",
+              })
+              const [transaction] = yield* db
+                .insert(schema.transactions)
+                .values({
+                  sourceId: SOURCE_ID,
+                  principalId: ANONYMOUS_PRINCIPAL_ID,
+                  externalId: "claim-capture",
+                  timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-02-01T00:00:00Z")),
+                  transactionType: "buy_fiat",
+                  providerFiatAmount: "20",
+                  providerFiatCurrency: "EUR",
+                })
+                .returning({ id: schema.transactions.id })
+              if (transaction === undefined)
+                return yield* Effect.die("Missing synthetic claim transaction")
+              yield* db.insert(schema.transactionLegs).values(
+                yield* prepareMovementLegFixtures([
+                  {
+                    movementIdentity: {
+                      sourceRecordKey: "claim-capture",
+                      componentKey: "principal",
+                    },
+                    sourceId: SOURCE_ID,
+                    principalId: ANONYMOUS_PRINCIPAL_ID,
+                    externalId: "claim-capture-leg",
+                    timestamp: DateTime.toDateUtc(DateTime.makeUnsafe("2025-02-01T00:00:00Z")),
+                    assetId,
+                    amount: "10",
+                    kind: "acquisition",
+                    provenance: "deterministic",
+                    originKind: "none",
+                    transactionId: transaction.id,
+                  },
+                ])
+              )
+            })
+          )
+        )
+        yield* context.runWithLayer({
+          layer: CalculationRunServiceLive.pipe(
+            Layer.provide(Layer.merge(CalculationRunRepositoryLive, FactualLedgerRepositoryLive))
+          ),
+          effect: Effect.flatMap(CalculationRunService, (service) =>
+            service.recompute({
+              id: runId,
+              principalId: ANONYMOUS_PRINCIPAL_ID,
+              jurisdiction: JurisdictionCode.make("DE"),
+              taxYear: TaxYear.make(2025),
+              reportingCurrency: CurrencyCode.make("EUR"),
+              accountingChoices: [],
+            })
+          ),
+        })
+        const readCaptures = () =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({ runId: schema.calculationRunMovementInputs.runId })
+                .from(schema.calculationRunMovementInputs)
+                .where(eq(schema.calculationRunMovementInputs.runId, runId))
+            })
+          )
+        expect(yield* Effect.promise(readCaptures)).toEqual([{ runId }])
+        yield* Effect.promise(() => claimSource("token"))
+        expect(yield* Effect.promise(readCaptures)).toEqual([])
+        const rows = yield* Effect.promise(() =>
+          runPg(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              return yield* db
+                .select({ principalId: schema.sources.principalId })
+                .from(schema.sources)
+                .where(eq(schema.sources.id, SOURCE_ID))
+            })
+          )
+        )
+        expect(rows).toEqual([{ principalId: USER_PRINCIPAL_ID }])
+      })
   )
 
   it.effect("locks the source before either ownership principal", () =>
