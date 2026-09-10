@@ -839,6 +839,51 @@ describe("TransactionsApiLive", () => {
       }).pipe(Effect.provide(HttpLive), Effect.scoped)
   )
 
+  it.effect("rejects impossible date boundaries and accepts leap dates with explicit offsets", () =>
+    Effect.gen(function* () {
+      const fixture = yield* seedQueryFilterFixtures
+      for (const date of [
+        "2025-02-30T00:00:00Z",
+        "2025-02-29T00:00:00Z",
+        "1900-02-29T00:00:00Z",
+        "2024-02-30T00:00:00+01:00",
+        "2025-04-31T00:00:00-05:00",
+        "2025-00-01T00:00:00Z",
+        "2025-13-01T00:00:00Z",
+        "2025-01-00T00:00:00Z",
+        "2025-01-32T00:00:00Z",
+        "2025-03-01T24:00:00Z",
+        "2025-03-01T00:60:00Z",
+        "2025-03-01T00:00:60Z",
+        "2025-03-01T00:00:00+24:00",
+      ]) {
+        for (const key of ["from", "to"]) {
+          expect(
+            yield* getAuthenticatedStatus({
+              path: `/v1/transactions?${key}=${encodeURIComponent(date)}`,
+              userId: fixture.userId,
+            })
+          ).toBe(400)
+        }
+      }
+      for (const date of [
+        "2024-02-29T23:59:59.123Z",
+        "2000-02-29T00:00:00Z",
+        "2024-02-29T00:30:00+01:00",
+        "2024-02-29T23:30:00-05:00",
+      ]) {
+        for (const key of ["from", "to"]) {
+          expect(
+            yield* getAuthenticatedStatus({
+              path: `/v1/transactions?${key}=${encodeURIComponent(date)}`,
+              userId: fixture.userId,
+            })
+          ).toBe(200)
+        }
+      }
+    }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
+
   it.effect("pages 1204 transactions at 500 and hydrates only the selected movement IDs", () => {
     const statements: Array<{ text: string; params: ReadonlyArray<unknown> }> = []
     const capture: Statement.Transformer = (statement) =>

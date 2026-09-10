@@ -6,6 +6,8 @@
 
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import * as Schema from "effect/Schema"
+import * as DateTime from "effect/DateTime"
+import * as Option from "effect/Option"
 import * as SchemaTransformation from "effect/SchemaTransformation"
 import { AssetOverrideCurrentResponse } from "./AssetOverridesApi.ts"
 import {
@@ -24,7 +26,17 @@ export class TransactionBadRequestError extends Schema.TaggedError<TransactionBa
 
 // An explicit UTC offset keeps boundaries independent of the API host timezone.
 const TransactionDateBoundary = Schema.String.check(
-  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/)
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/),
+  Schema.makeFilter(
+    (value) => {
+      // Validate the written calendar/time before applying its offset; Date parsing can roll days forward.
+      const localSecond = value.slice(0, 19)
+      return DateTime.make(`${localSecond}Z`).pipe(
+        Option.exists((date) => DateTime.formatIso(date).slice(0, 19) === localSecond)
+      )
+    },
+    { expected: "a real calendar date and time" }
+  )
 ).pipe(Schema.decodeTo(Schema.Date, SchemaTransformation.dateFromString))
 
 /** Empty source selection means all owned sources; dates form a UTC half-open interval. */

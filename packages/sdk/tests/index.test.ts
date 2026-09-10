@@ -712,6 +712,55 @@ describe("TaxMaxi Promise client", () => {
       })
   )
 
+  it.effect(
+    "rejects impossible calendar boundaries before sending and preserves valid leap instants",
+    () =>
+      Effect.gen(function* () {
+        const capturedRequests: Array<CapturedRequest> = []
+        const taxmaxi = new TaxMaxi({
+          apiKey: "tm_transactions",
+          baseUrl: "https://sdk.example.test",
+          fetch: makeFetch(capturedRequests, encodeJson(transactionListResponse)),
+        })
+        for (const date of [
+          "2025-02-30T00:00:00Z",
+          "2025-02-29T00:00:00Z",
+          "1900-02-29T00:00:00Z",
+          "2024-02-30T00:00:00+01:00",
+          "2025-04-31T00:00:00-05:00",
+          "2025-00-01T00:00:00Z",
+          "2025-13-01T00:00:00Z",
+          "2025-01-00T00:00:00Z",
+          "2025-01-32T00:00:00Z",
+          "2025-03-01T24:00:00Z",
+          "2025-03-01T00:60:00Z",
+          "2025-03-01T00:00:60Z",
+          "2025-03-01T00:00:00+24:00",
+        ]) {
+          yield* Effect.promise(() =>
+            expect(taxmaxi.transactions.list({ from: date })).rejects.toBeDefined()
+          )
+          yield* Effect.promise(() =>
+            expect(taxmaxi.transactions.list({ to: date })).rejects.toBeDefined()
+          )
+        }
+        expect(capturedRequests).toHaveLength(0)
+        for (const [date, utc] of [
+          ["2024-02-29T23:59:59.123Z", "2024-02-29T23:59:59.123Z"],
+          ["2000-02-29T00:00:00Z", "2000-02-29T00:00:00.000Z"],
+          ["2024-02-29T00:30:00+01:00", "2024-02-28T23:30:00.000Z"],
+          ["2024-02-29T23:30:00-05:00", "2024-03-01T04:30:00.000Z"],
+        ] as const) {
+          yield* Effect.promise(() => taxmaxi.transactions.list({ from: date, to: date }))
+          const request = capturedRequests.at(-1)
+          if (request === undefined) return yield* Effect.die("Missing request")
+          const url = new URL(request.url)
+          expect(url.searchParams.get("from")).toBe(utc)
+          expect(url.searchParams.get("to")).toBe(utc)
+        }
+      })
+  )
+
   it.effect("passes an owned source filter and preserves canonical partial rows", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<CapturedRequest> = []
