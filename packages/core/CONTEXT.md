@@ -123,8 +123,8 @@ A person's TaxMaxi membership and data. One account can have multiple login meth
 _Avoid_: Identity, login
 
 **Account email**:
-The lowercase canonical address where TaxMaxi sends security and recovery messages. It does not have to match the address reported by a linked login provider.
-_Avoid_: Provider email, login identity
+The trimmed, lowercased address where TaxMaxi sends security and recovery messages. The writer stores it in that form, and the `users` table rejects a second account whose email differs only in case. It does not have to match the address reported by a linked login provider.
+_Avoid_: Provider email, login identity, canonical email
 
 **Login method**:
 A verified way to access an account, such as Google, Coinbase, or email and password. An account's login methods are peers; none is primary.
@@ -161,6 +161,14 @@ _Avoid_: Profile update
 **Security verification**:
 A short-lived confirmation of account-email access tied to the current authenticated session. One confirmation can authorize login-method changes for ten minutes.
 _Avoid_: Email verification status, login session
+
+**Verification request**:
+One pending proof that a person can read an account email, created by a local sign-up or by an unverified login when no active request exists (`startOrReuse` inserts a fresh one), and answered with an eight-character code. A new request and an explicit resend give the code a fresh ten-minute lifetime; an unverified login that reuses an active request re-sends the same code with its original expiry. A resend replaces the request's code but keeps its lineage; a new sign-up or an unverified login after expiry starts a new request. Each request records its send attempts (ADR 0017).
+_Avoid_: Verification code, security verification, verification cookie
+
+**Send attempt**:
+One hand-off of a verification code to email delivery, recorded on the verification request before delivery runs. Every attempt sets `last_sent_at`. `send_count` is set to 1 by the request's first send and grows by 1 on each explicit resend; an unverified login that reuses an active request leaves it unchanged. A failed delivery still counts. The one-minute cooldown reads `last_sent_at` and the five-send cap reads `send_count` (ADR 0017).
+_Avoid_: Delivered email, successful send
 
 **Source connection**:
 An exchange account or wallet connected so TaxMaxi can import tax data. It is stored separately from login methods even when one Coinbase OAuth flow creates both.
