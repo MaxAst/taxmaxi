@@ -18,6 +18,7 @@ import {
   normalizeBaseUrl,
   toTaxMaxiError,
   type TaxMaxiHeaders,
+  type TransactionFilterChoices,
 } from "../src/index.ts"
 import { TaxMaxiInternal } from "../src/internal.ts"
 
@@ -674,6 +675,71 @@ describe("TaxMaxi Promise client", () => {
     })
   )
 
+  it.effect("serializes true and false attention through both SDK resources", () =>
+    Effect.gen(function* () {
+      const capturedRequests: Array<CapturedRequest> = []
+      const taxmaxi = new TaxMaxi({
+        apiKey: "tm_transactions",
+        baseUrl: "https://sdk.example.test",
+        fetch: makeFetch(capturedRequests, encodeJson(transactionListResponse)),
+      })
+      for (const attention of [true, false]) {
+        yield* taxmaxi.effect.transactions.list({ attention })
+        yield* Effect.promise(() => taxmaxi.transactions.list({ attention }))
+      }
+      expect(
+        capturedRequests.map((request) => new URL(request.url).searchParams.get("attention"))
+      ).toEqual(["true", "true", "false", "false"])
+    })
+  )
+
+  it.effect(
+    "preserves distinct economic asset choices and metadata through both SDK resources",
+    () =>
+      Effect.gen(function* () {
+        const capturedRequests: Array<CapturedRequest> = []
+        const response: TransactionFilterChoices = {
+          assets: [
+            {
+              assetId: "00000000-0000-4000-8000-000000000401",
+              symbol: "TOKEN",
+              name: "Historical token",
+              type: "fungible",
+              coingeckoCoinId: "historical-token",
+              logoUrl: "https://assets.example.test/token.png",
+            },
+            {
+              assetId: "00000000-0000-4000-8000-000000000402",
+              symbol: "TOKEN",
+              name: "Distinct collectible",
+              type: "nft",
+              coingeckoCoinId: null,
+              logoUrl: null,
+            },
+          ],
+        } as const
+        const taxmaxi = new TaxMaxi({
+          apiKey: "tm_transactions",
+          baseUrl: "https://sdk.example.test",
+          fetch: makeFetch(capturedRequests, encodeJson(response)),
+        })
+        expect(yield* taxmaxi.effect.transactions.filterChoices()).toEqual(response)
+        yield* Effect.promise(() =>
+          expect(taxmaxi.transactions.filterChoices()).resolves.toEqual(response)
+        )
+        expect(capturedRequests).toEqual([
+          expect.objectContaining({
+            url: "https://sdk.example.test/v1/transactions/filter-choices",
+            headers: expect.objectContaining({ authorization: "Bearer tm_transactions" }),
+          }),
+          expect.objectContaining({
+            url: "https://sdk.example.test/v1/transactions/filter-choices",
+            headers: expect.objectContaining({ authorization: "Bearer tm_transactions" }),
+          }),
+        ])
+      })
+  )
+
   it.effect(
     "encodes source sets, UTC interval and order through the shared transaction query",
     () =>
@@ -788,6 +854,7 @@ describe("TaxMaxi Promise client", () => {
             fiatCurrency: null,
             calculationState: "partial",
             needsReview: false,
+            attention: false,
           },
         ],
         totalCount: 2,
@@ -855,6 +922,7 @@ describe("TaxMaxi Promise client", () => {
         fiatCurrency: "EUR",
         calculationState: "complete",
         needsReview: false,
+        attention: false,
       } as const
       const response = {
         transactions: [

@@ -12,6 +12,7 @@ import {
   desc,
   eq,
   exists,
+  notExists,
   inArray,
   gt,
   gte,
@@ -92,12 +93,13 @@ interface CapturedMovementProjection {
 const recordedYear = (timestamp: DateTime.Utc) =>
   DateTime.getPart(DateTime.setZoneNamedUnsafe(timestamp, "Europe/Berlin"), "year")
 
-interface TransactionReadScope {
+interface TransactionReadScope extends CalculationReadScope {
   readonly principalId: string
   readonly sourceIds: ReadonlyArray<string>
   readonly from: string | null
   readonly to: string | null
   readonly order: "newest" | "oldest"
+  readonly attention: boolean
 }
 
 interface CursorParts {
@@ -142,12 +144,13 @@ const activeRunScope = (scope: CalculationReadScope) =>
 const matchingEventTaxYear = eq(schema.activeCalculationRuns.taxYear, eventTaxYear)
 
 const TransactionCursorPayload = Schema.Struct({
-  version: Schema.Literal(3),
+  version: Schema.Literal(4),
   principalId: Schema.String.check(Schema.isUUID()),
   sourceIds: Schema.Array(Schema.String.check(Schema.isUUID())),
   from: Schema.NullOr(Schema.String),
   to: Schema.NullOr(Schema.String),
   order: Schema.Literals(["newest", "oldest"]),
+  attention: Schema.Boolean,
   timestamp: Schema.DateFromString,
   id: Schema.String.check(Schema.isUUID()),
 })
@@ -159,7 +162,7 @@ const makeCursor = ({
   id,
   scope,
 }: CursorParts & { readonly scope: TransactionReadScope }): string =>
-  Schema.encodeSync(TransactionCursor)({ version: 3, timestamp, id, ...scope })
+  Schema.encodeSync(TransactionCursor)({ version: 4, timestamp, id, ...scope })
 
 const parseCursor = ({
   cursor,
@@ -177,7 +180,8 @@ const parseCursor = ({
           JSON.stringify(payload.sourceIds) === JSON.stringify(scope.sourceIds) &&
           payload.from === scope.from &&
           payload.to === scope.to &&
-          payload.order === scope.order
+          payload.order === scope.order &&
+          payload.attention === scope.attention
             ? Effect.succeed(Option.some({ id: payload.id, timestamp: payload.timestamp }))
             : Effect.fail(new TransactionListInvalidCursorError({ cursor }))
         )
@@ -214,10 +218,162 @@ const make = Effect.gen(function* () {
       eq(schema.transactionLegs.sourceId, schema.transactions.sourceId)
     )
 
+  const inputs = schema.calculationRunMovementInputs
+  const blockers = schema.calculationRunBlockers
+
+  // Use the occurrence period recorded in the completed projection, never a replayed leg's date.
+  const capturedPeriod = sql<boolean>`(
+    case
+      when ${inputs.captured}->'effective'->'event'->>'id' is not null then
+        extract(year from to_timestamp((${inputs.captured}->'effective'->'event'->'occurredAt'->>'epochMillis')::numeric / 1000) at time zone 'Europe/Berlin') = ${schema.activeCalculationRuns.taxYear}
+      when jsonb_array_length(coalesce(${inputs.captured}->'current'->'custody', '[]'::jsonb)) > 0 then
+        exists (select 1 from jsonb_array_elements(${inputs.captured}->'current'->'custody') as context
+          where extract(year from (context->>'occurredAt')::timestamptz at time zone 'Europe/Berlin') = ${schema.activeCalculationRuns.taxYear})
+      else extract(year from (${inputs.captured}->'current'->>'occurredAt')::timestamptz at time zone 'Europe/Berlin') = ${schema.activeCalculationRuns.taxYear}
+    end
+  )`
+
+  const capturedTarget = (scope: CalculationReadScope) =>
+    and(
+      eq(inputs.principalId, scope.principalId),
+      eq(inputs.targetId, schema.transactionLegs.movementCorrectionTargetId),
+      eq(inputs.sourceId, schema.transactionLegs.sourceId),
+      capturedPeriod
+    )
+
+  const hasNoCapture = (executor: TransactionListExecutor, scope: CalculationReadScope) =>
+    notExists(
+      executor
+        .select({ targetId: inputs.targetId })
+        .from(inputs)
+        .where(
+          and(
+            eq(inputs.runId, schema.activeCalculationRuns.runId),
+            eq(inputs.principalId, scope.principalId),
+            eq(inputs.sourceId, schema.transactionLegs.sourceId),
+            eq(inputs.targetId, schema.transactionLegs.movementCorrectionTargetId)
+          )
+        )
+    )
+
+  const attentionPredicate = (executor: TransactionListExecutor, scope: CalculationReadScope) =>
+    sql<boolean>`(${exists(
+      executor
+        .select({ id: schema.transactionReviews.id })
+        .from(schema.transactionReviews)
+        .where(
+          and(
+            eq(schema.transactionReviews.principalId, scope.principalId),
+            eq(schema.transactionReviews.transactionId, schema.transactions.id),
+            eq(schema.transactionReviews.needsReview, true)
+          )
+        )
+    )} or ${exists(
+      executor
+        .select({ id: schema.transactionLegs.id })
+        .from(schema.transactionLegs)
+        .innerJoin(
+          inputs,
+          and(
+            eq(inputs.principalId, scope.principalId),
+            eq(inputs.targetId, schema.transactionLegs.movementCorrectionTargetId),
+            eq(inputs.sourceId, schema.transactionLegs.sourceId)
+          )
+        )
+        .innerJoin(
+          schema.activeCalculationRuns,
+          and(eq(schema.activeCalculationRuns.runId, inputs.runId), activeRunScope(scope))
+        )
+        .innerJoin(
+          blockers,
+          and(
+            eq(blockers.runId, inputs.runId),
+            eq(blockers.principalId, scope.principalId),
+            or(
+              eq(blockers.eventId, inputs.eventId),
+              sql`${blockers.eventId}::text = ${inputs.captured}->'current'->>'legId'`,
+              sql`${blockers.eventId}::text = ${inputs.captured}->'current'->>'transactionId'`,
+              sql`exists (select 1 from jsonb_array_elements(coalesce(${inputs.captured}->'current'->'custody', '[]'::jsonb)) as context
+              where context->>'reconciliationId' = ${blockers.eventId}::text
+              and extract(year from (context->>'occurredAt')::timestamptz at time zone 'Europe/Berlin') = ${schema.activeCalculationRuns.taxYear})`
+            )
+          )
+        )
+        .where(and(ownedLeg(scope.principalId), capturedPeriod))
+    )} or ${exists(
+      // Old runs have no movement capture. Only their still-recorded exact IDs can link attention.
+      executor
+        .select({ id: schema.transactionLegs.id })
+        .from(schema.transactionLegs)
+        .innerJoin(schema.activeCalculationRuns, and(activeRunScope(scope), matchingEventTaxYear))
+        .innerJoin(
+          blockers,
+          and(
+            eq(blockers.runId, schema.activeCalculationRuns.runId),
+            eq(blockers.principalId, scope.principalId),
+            or(
+              eq(blockers.eventId, schema.transactionLegs.id),
+              eq(blockers.eventId, schema.transactions.id)
+            )
+          )
+        )
+        .where(and(ownedLeg(scope.principalId), hasNoCapture(executor, scope)))
+    )} or ${exists(
+      executor
+        .select({ id: schema.transactionLegs.id })
+        .from(schema.transactionLegs)
+        .innerJoin(
+          schema.transferReconciliations,
+          and(
+            eq(schema.transferReconciliations.principalId, scope.principalId),
+            or(
+              and(
+                eq(schema.transactionLegs.originKind, "canonical_transfer"),
+                eq(
+                  schema.transactionLegs.sourceTransferId,
+                  schema.transferReconciliations.canonicalTransferId
+                )
+              ),
+              and(
+                eq(schema.transactionLegs.originKind, "provider_transfer"),
+                eq(
+                  schema.transactionLegs.providerTransferId,
+                  schema.transferReconciliations.providerTransferId
+                )
+              )
+            )
+          )
+        )
+        .innerJoin(
+          canonicalTransactionTable,
+          and(
+            eq(canonicalTransactionTable.id, schema.transferReconciliations.canonicalTransactionId),
+            eq(canonicalTransactionTable.principalId, scope.principalId)
+          )
+        )
+        .innerJoin(
+          schema.activeCalculationRuns,
+          and(
+            activeRunScope(scope),
+            sql`extract(year from (${canonicalTransactionTable.timestamp} at time zone 'UTC') at time zone 'Europe/Berlin') = ${schema.activeCalculationRuns.taxYear}`
+          )
+        )
+        .innerJoin(
+          blockers,
+          and(
+            eq(blockers.runId, schema.activeCalculationRuns.runId),
+            eq(blockers.principalId, scope.principalId),
+            eq(blockers.eventId, schema.transferReconciliations.id)
+          )
+        )
+        .where(and(ownedLeg(scope.principalId), hasNoCapture(executor, scope)))
+    )})`
+
   const ownedScope = (executor: TransactionListExecutor, scope: TransactionReadScope) =>
     and(
       eq(schema.transactions.principalId, scope.principalId),
       eq(schema.sources.principalId, scope.principalId),
+      scope.attention ? attentionPredicate(executor, scope) : undefined,
       scope.sourceIds.length === 0
         ? undefined
         : inArray(schema.transactions.sourceId, scope.sourceIds),
@@ -274,6 +430,7 @@ const make = Effect.gen(function* () {
 
     return executor
       .select({
+        attention: attentionPredicate(executor, scope),
         transactionId: schema.transactions.id,
         timestamp: schema.transactions.timestamp,
         transactionType: schema.transactions.transactionType,
@@ -1036,6 +1193,9 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const scope: TransactionReadScope = {
         principalId: params.principalId.toLowerCase(),
+        jurisdiction: params.jurisdiction,
+        reportingCurrency: params.reportingCurrency,
+        attention: params.attention ?? false,
         sourceIds: [...new Set(params.sourceIds.map((id) => id.toLowerCase()))].sort(),
         from: params.from?.toISOString() ?? null,
         to: params.to?.toISOString() ?? null,
@@ -1143,6 +1303,7 @@ const make = Effect.gen(function* () {
                     : calculationScope.reportingCurrency,
                 calculationState: isPartial ? "partial" : "complete",
                 needsReview: reviewStates.get(row.transactionId) ?? false,
+                attention: row.attention,
               }
             })
             const hasMore = rows.length > params.limit
@@ -1171,7 +1332,53 @@ const make = Effect.gen(function* () {
         )
     })
 
-  return TransactionListRepository.of({ list })
+  const filterChoices: TransactionListRepositoryService["filterChoices"] = (scope) => {
+    // A scalar completed capture makes the selected identity identical to row projection.
+    // Uncaptured historical legs remain selectable without claiming calculated facts exist.
+    const completedAsset = db
+      .select({
+        assetId: sql<string>`coalesce(
+      ${inputs.captured}->'effective'->'event'->>'assetId',
+      ${inputs.captured}->'current'->>'effectiveAssetId',
+      ${inputs.captured}->'current'->>'storedAssetId'
+    )::uuid`,
+      })
+      .from(inputs)
+      .innerJoin(
+        schema.activeCalculationRuns,
+        and(eq(schema.activeCalculationRuns.runId, inputs.runId), activeRunScope(scope))
+      )
+      .where(capturedTarget(scope))
+    return db
+      .selectDistinct({
+        assetId: schema.assets.id,
+        symbol: schema.assets.symbol,
+        name: schema.assets.name,
+        type: schema.assets.type,
+        coingeckoCoinId: schema.assets.coingeckoCoinId,
+        logoUrl: schema.assets.logoUrl,
+      })
+      .from(schema.transactionLegs)
+      .innerJoin(schema.transactions, ownedLeg(scope.principalId))
+      .innerJoin(
+        schema.sources,
+        and(
+          eq(schema.sources.id, schema.transactions.sourceId),
+          eq(schema.sources.principalId, scope.principalId)
+        )
+      )
+      .innerJoin(
+        schema.assets,
+        eq(schema.assets.id, sql`coalesce((${completedAsset}), ${schema.transactionLegs.assetId})`)
+      )
+      .orderBy(asc(schema.assets.symbol), asc(schema.assets.name), asc(schema.assets.id))
+      .pipe(
+        wrapSqlError("transactionListRepository.filterChoices"),
+        Effect.map((assets) => ({ assets }))
+      )
+  }
+
+  return TransactionListRepository.of({ list, filterChoices })
 })
 
 /** Live PostgreSQL implementation of the canonical transaction list. */
