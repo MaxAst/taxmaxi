@@ -202,6 +202,7 @@ it.each(["en", "de"] as const)(
         ["from=2026-03-02&to=2026-03-01", reversedDates],
         ["from=2026-02-30", invalidFilters],
         ["from=9999-12-31&to=9999-12-31", invalidFilters],
+        ["from=2011-12-30&to=2011-12-30&timezone=Pacific%2FApia", invalidFilters],
         ["sourceIds=%5B%22invalid%22%5D", invalidFilters],
         ["categories=%5B%22invalid%22%5D", invalidFilters],
         ["timezone=invalid", invalidFilters],

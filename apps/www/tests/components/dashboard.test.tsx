@@ -22,7 +22,11 @@ import {
 } from "taxmaxi"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { transactionFilterInput, type TransactionFilters } from "#/lib/transaction-filters"
+import {
+  transactionFilterInput,
+  parseTransactionFilters,
+  type TransactionFilters,
+} from "#/lib/transaction-filters"
 import { Dashboard } from "#/components/dashboard"
 import type { SourceSyncIslandItem } from "#/components/source-sync-island"
 import { queryKeys, queries, refreshTransactionQueries } from "#/integrations/taxmaxi/queries"
@@ -2243,6 +2247,17 @@ describe("Inspector cursor navigation", () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+  })
+
+  it("uses uppercase URL UUIDs as one lowercase source for selection and both readers", async () => {
+    const id = "abcdef01-2345-4678-9abc-def012345678"
+    const filters = parseTransactionFilters({ sourceIds: [id.toUpperCase(), id] })
+    const { client, list } = setup(filters)
+    await screen.findByText("Transaction 25")
+    expect(screen.getByText(id)).toBeTruthy()
+    expect(list).toHaveBeenCalledWith({ sourceIds: [id], cursor: null, limit: 25 })
+    expect(testTaxMaxi.portfolio.listAssets).toHaveBeenCalledWith({ sourceId: id, currency: "eur" })
+    client.clear()
   })
 
   it("shares source scope with portfolio and retains all transaction filters through pages and inspector neighbours", async () => {

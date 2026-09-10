@@ -18,7 +18,7 @@ const category = z.enum([
 ])
 const ids = z
   .array(z.uuid())
-  .transform((values) => [...new Set(values)].sort())
+  .transform((values) => [...new Set(values.map((value) => value.toLowerCase()))].sort())
   .optional()
 const localDate = z.iso.date()
 const timezone = z.string().refine((value) => {
@@ -54,7 +54,13 @@ export const EMPTY_TRANSACTION_FILTERS: TransactionFilters = {}
 /** Route errors display only localized copy, never raw schema issues or URL values. */
 export function parseTransactionFilters(input: unknown): TransactionFilters {
   const result = transactionFilterSearchSchema.safeParse(input)
-  if (result.success) return result.data
+  if (result.success) {
+    const { from, to } = transactionFilterInput(result.data)
+    if (from !== undefined && to !== undefined && Date.parse(from) >= Date.parse(to)) {
+      throw new Error(m["app.transactionFilters.invalidUrl"]())
+    }
+    return result.data
+  }
 
   const reversedDates = result.error.issues.some(
     (issue) => issue.code === "custom" && issue.path.length === 0

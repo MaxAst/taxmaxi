@@ -33,6 +33,31 @@ describe("transaction filter URL state", () => {
     ).toEqual({ from: to })
   })
 
+  it("folds UUID case before deduplicating source and asset selections", () => {
+    const id = "abcdef01-2345-4678-9abc-def012345678"
+    expect(
+      validateTransactionSearch({
+        sourceIds: [id.toUpperCase(), id],
+        assetIds: [id, id.toUpperCase()],
+      })
+    ).toEqual({ sourceIds: [id], assetIds: [id] })
+  })
+
+  it("rejects a skipped local day but preserves ranges with real days around it", () => {
+    expect(() =>
+      validateTransactionSearch({ from: "2011-12-30", to: "2011-12-30", timezone: "Pacific/Apia" })
+    ).toThrow()
+    expect(
+      transactionFilterInput(
+        validateTransactionSearch({
+          from: "2011-12-29",
+          to: "2011-12-31",
+          timezone: "Pacific/Apia",
+        })
+      )
+    ).toEqual({ from: "2011-12-29T10:00:00.000Z", to: "2011-12-31T10:00:00.000Z" })
+  })
+
   it("keeps saved timezone independent of the browser timezone", () => {
     const filters = validateTransactionSearch({
       from: "2026-03-29",
