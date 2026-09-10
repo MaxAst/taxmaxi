@@ -235,7 +235,7 @@ describe("complete movement capture schema", () => {
             const db = yield* drizzle
             yield* db
               .update(schema.calculationRuns)
-              .set({ status: "complete", completedAt: new Date() })
+              .set({ status: "complete", completedAt: yield* DateTime.nowAsDate })
               .where(eq(schema.calculationRuns.id, CALCULATION_RUN_ID))
           })
         )
