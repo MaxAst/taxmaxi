@@ -195,7 +195,7 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
       : passwordErrorId
 
   return (
-    <form aria-busy={pending} className="grid gap-4" onSubmit={handleSubmit}>
+    <form aria-busy={pending} className="grid" onSubmit={handleSubmit}>
       <div className="grid gap-2">
         <label className={labelClassName} htmlFor={emailId}>
           {m["auth.form.email"]()}
@@ -283,7 +283,7 @@ export function EmailPasswordForm({ mode, taxmaxi }: EmailPasswordFormProps) {
         ) : null}
       </div>
 
-      <Button className="mt-2" disabled={pending} size="touch" type="submit" variant="cta">
+      <Button disabled={pending} size="touch" type="submit" variant="cta">
         {pending ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
         {isLogin ? m["auth.form.submitLogin"]() : m["auth.form.submitSignUp"]()}
       </Button>
