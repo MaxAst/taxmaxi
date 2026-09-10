@@ -188,7 +188,7 @@ export function Dashboard({
   } | null>(null)
   const navigationRequest = useRef(0)
   const navigating = useRef(false)
-  const [syncListVersion, setSyncListVersion] = useState<number | null>(null)
+  const [sequenceRefreshVersion, setSequenceRefreshVersion] = useState<number | null>(null)
   const [navigationPending, setNavigationPending] = useState(false)
   const [navigationFailure, setNavigationFailure] = useState<-1 | 1 | null>(null)
   const cancelNavigation = useCallback(() => {
@@ -285,7 +285,7 @@ export function Dashboard({
   const changeTransactionPageSize = (size: TransactionPageSize) => {
     if (size === transactionPageSize) return
     cancelNavigation()
-    setSyncListVersion(null)
+    setSequenceRefreshVersion(null)
     setTransactionPageSize(size)
     setTransactionCursors([null])
     setSelectedTransaction(null)
@@ -296,6 +296,16 @@ export function Dashboard({
       // The current session keeps the chosen size even if saving is blocked.
     }
   }
+
+  const resetTransactionSequence = useCallback(() => {
+    cancelNavigation()
+    setTransactionCursors([null])
+    setSequenceRefreshVersion(
+      queryClient.getQueryState(
+        queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
+      )?.dataUpdateCount ?? 0
+    )
+  }, [cancelNavigation, queryClient, transactionPageSize])
 
   const accountsById = useMemo(
     () => new Map(accounts.map((account) => [account.id, account])),
@@ -372,7 +382,7 @@ export function Dashboard({
       pageShape !== null
     ) {
       setTransactionCursors([null])
-      setSyncListVersion(
+      setSequenceRefreshVersion(
         queryClient.getQueryState(
           queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
         )?.dataUpdateCount ?? 0
@@ -380,12 +390,12 @@ export function Dashboard({
     }
   }
   useEffect(() => {
-    if (syncListVersion !== null && transactionCursor === null)
+    if (sequenceRefreshVersion !== null && transactionCursor === null)
       void queryClient.invalidateQueries({
         queryKey: queryKeys.transactionList({ cursor: null, limit: transactionPageSize }),
         exact: true,
       })
-  }, [queryClient, syncListVersion, transactionCursor, transactionPageSize])
+  }, [queryClient, sequenceRefreshVersion, transactionCursor, transactionPageSize])
 
   const survivingRow = transactionQuery.data?.transactions.find(
     (row) => row.transactionId === selectedTransaction?.transactionId
@@ -414,6 +424,10 @@ export function Dashboard({
     const isFirstResponse = observedRunIds.current.size === 0
     observedRunIds.current.add(runId)
     if (isFirstResponse) return
+    // A new run may follow a remote sync. Equal visible rows/count cannot
+    // establish that the prefix before this cursor stayed unchanged.
+    cancelNavigation()
+    if (transactionCursor !== null) resetTransactionSequence()
     const refreshDependentReads = async () => {
       // Invalidation alone reuses initial pending reads. Cancel their delivery
       // first so a response started before this run cannot replace its results.
@@ -428,7 +442,15 @@ export function Dashboard({
       ])
     }
     void refreshDependentReads()
-  }, [activeRunId, authenticationLost, hasPortfolio, queryClient])
+  }, [
+    activeRunId,
+    authenticationLost,
+    cancelNavigation,
+    hasPortfolio,
+    queryClient,
+    resetTransactionSequence,
+    transactionCursor,
+  ])
 
   // Billing is only needed while the first-sync wizard can show. It is read
   // through the query cache so a billing overlay refresh moves the wizard
@@ -503,11 +525,11 @@ export function Dashboard({
       (row) => row.transactionId === selectedTransaction?.transactionId
     ) ?? -1
   const sequenceReady =
-    syncListVersion === null ||
+    sequenceRefreshVersion === null ||
     (queryClient.getQueryState(
       queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
-    )?.dataUpdateCount ?? 0) > syncListVersion
-  if (syncListVersion !== null && sequenceReady) setSyncListVersion(null)
+    )?.dataUpdateCount ?? 0) > sequenceRefreshVersion
+  if (sequenceRefreshVersion !== null && sequenceReady) setSequenceRefreshVersion(null)
   const position =
     transactionQuery.isError ||
     transactionQuery.isFetching ||
@@ -550,6 +572,10 @@ export function Dashboard({
         userId !== queryClient.getQueryData(queries.account(taxmaxi).queryKey)?.account.id
       )
         return
+      if (page.totalCount !== totalTransactions) {
+        resetTransactionSequence()
+        return
+      }
       const row = direction === 1 ? page.transactions[0] : page.transactions.at(-1)
       if (!row) {
         setNavigationFailure(direction)
@@ -602,7 +628,7 @@ export function Dashboard({
     async (sourceId: AccountId) => {
       cancelNavigation()
       if (selectedTransaction !== null || transactionCursor !== null)
-        setSyncListVersion(
+        setSequenceRefreshVersion(
           queryClient.getQueryState(
             queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
           )?.dataUpdateCount ?? 0

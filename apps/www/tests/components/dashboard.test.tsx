@@ -2283,7 +2283,7 @@ describe("Inspector cursor navigation", () => {
     client.clear()
   })
 
-  it.each(["close", "size", "source", "account", "refetch", "sync"])(
+  it.each(["close", "size", "source", "account", "refetch", "sync", "run"])(
     "ignores a neighbour superseded by %s",
     async (change) => {
       const { client, list } = setup()
@@ -2311,6 +2311,10 @@ describe("Inspector cursor navigation", () => {
         if (change === "refetch")
           await client.invalidateQueries({ queryKey: queryKeys.transactionLists() })
         if (change === "sync") await syncState.onCompleted?.(SOURCE_A)
+        if (change === "run") {
+          vi.mocked(testTaxMaxi.portfolio.listAssets).mockResolvedValue(portfolio(RUN_B))
+          await client.invalidateQueries({ queryKey: queryKeys.portfolioAssets() })
+        }
       })
       await act(async () => finish?.(page(25)))
       expect(screen.queryByText("26 of 1,204")).toBeNull()
@@ -2322,6 +2326,57 @@ describe("Inspector cursor navigation", () => {
       client.clear()
     }
   )
+
+  it("resets instead of reporting a false position when a neighbour reveals a new total", async () => {
+    const { client, list } = setup()
+    await screen.findByText("Transaction 25")
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open transaction · Transaction 25 · row-25" })
+    )
+    list.mockResolvedValueOnce({ ...page(25), totalCount: 1205 }).mockResolvedValueOnce({
+      transactions: [
+        transaction("new-row", "Newly imported transaction"),
+        ...page(0).transactions.slice(0, 24),
+      ],
+      totalCount: 1205,
+      page: { hasMore: true, nextCursor: "page-24" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Next transaction" }))
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(3))
+    expect(screen.queryByText("26 of 1,205")).toBeNull()
+    expect(screen.getByRole("complementary").textContent).toContain("Transaction 25")
+    expect(screen.getByText("1–25 of 1205")).toBeTruthy()
+    expect(screen.getByText("Position unavailable")).toBeTruthy()
+    expect(
+      client.getQueryData(queryKeys.transactionList({ cursor: "page-25", limit: 25 }))
+    ).toBeUndefined()
+    client.clear()
+  })
+
+  it("resets cursor history on a remote run change even if the visible page shape is unchanged", async () => {
+    const { client, list } = setup()
+    await screen.findByText("Transaction 25")
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+    await screen.findByText("Transaction 26")
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open transaction · Transaction 26 · row-26" })
+    )
+    expect(screen.getByText("26 of 1,204")).toBeTruthy()
+    const before = list.mock.calls.length
+    vi.mocked(testTaxMaxi.portfolio.listAssets).mockResolvedValue(portfolio(RUN_B))
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: queryKeys.portfolioAssets() })
+    })
+    await screen.findByText("1–25 of 1204")
+    expect(list.mock.calls.slice(before).some(([input]) => input?.cursor === null)).toBe(true)
+    expect(screen.getByRole("complementary").textContent).toContain("Transaction 26")
+    expect(screen.getByText("Position unavailable")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Next transaction" })).toHaveProperty(
+      "disabled",
+      true
+    )
+    client.clear()
+  })
 
   it("keeps absent-row detail reachable with no invented position or navigation", async () => {
     const { client, list } = setup()
