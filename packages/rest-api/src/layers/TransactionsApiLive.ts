@@ -142,6 +142,7 @@ export const TransactionsApiLive = HttpApiBuilder.group(TaxMaxiApi, "transaction
               TransactionListItem.make({
                 ...item,
                 source: TransactionListSource.make(item.source),
+                // The repository projects display fields and captured values from the same run.
                 movements: item.movements.map((movement) => TransactionListMovement.make(movement)),
               })
             ),

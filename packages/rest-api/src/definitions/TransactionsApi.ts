@@ -42,10 +42,46 @@ export class TransactionListSource extends Schema.Class<TransactionListSource>(
   kind: Schema.Literals(["onchain", "cex", "dex"]),
 }) {}
 
+/** Values and identity captured together by one completed calculation. */
+export const TransactionListMovementCapture = Schema.Struct({
+  runId: Schema.String,
+  eventId: Schema.NullOr(Schema.String),
+  outcome: Schema.Literals(["included", "withheld", "absent", "outside_period"]),
+  quantity: Schema.NullOr(Schema.String),
+  assetId: Schema.NullOr(Schema.String),
+  assetSymbol: Schema.NullOr(Schema.String),
+  eventKind: Schema.NullOr(Schema.Literals(["acquisition", "disposition", "custody_movement"])),
+  cause: Schema.NullOr(Schema.String),
+  valuationState: Schema.Literals(["selected", "not_evaluated", "missing", "ambiguous"]),
+  selectedValue: Schema.NullOr(
+    Schema.Struct({
+      kind: Schema.Literals(["user_valuation", "observed_consideration", "market_quote"]),
+      amount: Schema.String,
+      currency: Schema.String,
+    })
+  ),
+  providerConsiderations: Schema.Array(
+    Schema.Struct({ amount: Schema.String, currency: Schema.String })
+  ),
+  acquisitionCostBasis: Schema.Null,
+  realizedResults: Schema.Array(
+    Schema.Struct({
+      acquisitionEventId: Schema.String,
+      quantity: Schema.String,
+      costBasis: Schema.String,
+      proceeds: Schema.String,
+      gainLoss: Schema.String,
+      currency: Schema.String,
+    })
+  ),
+})
+
 /** Compact movement facts for a transaction row. */
 export class TransactionListMovement extends Schema.Class<TransactionListMovement>(
   "TransactionListMovement"
 )({
+  targetId: Schema.String,
+  capture: Schema.NullOr(TransactionListMovementCapture),
   amount: Schema.String,
   assetSymbol: Schema.String,
   kind: Schema.Literals(["acquisition", "disposal", "income", "fee"]),
@@ -56,6 +92,7 @@ export class TransactionListItem extends Schema.Class<TransactionListItem>("Tran
   transactionId: Schema.String,
   timestamp: Schema.String,
   source: TransactionListSource,
+  /** Imported category; corrected causes belong to the completed movement captures. */
   transactionType: Schema.NullOr(Schema.String),
   description: Schema.NullOr(Schema.String),
   externalId: Schema.NullOr(Schema.String),

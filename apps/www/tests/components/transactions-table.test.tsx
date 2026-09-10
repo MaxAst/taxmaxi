@@ -41,7 +41,15 @@ const transaction: TransactionListItem = {
   transactionType: "sell_fiat",
   description: "Sold Bitcoin",
   externalId: "coinbase-sale-1",
-  movements: [{ amount: "0.4", assetSymbol: "BTC", kind: "disposal" }],
+  movements: [
+    {
+      targetId: "00000000-0000-4000-8000-000000000601",
+      capture: null,
+      amount: "0.4",
+      assetSymbol: "BTC",
+      kind: "disposal",
+    },
+  ],
   income: null,
   realizedGainLoss: "2000",
   fiatCurrency: "EUR",
@@ -248,7 +256,15 @@ describe("TransactionsTable", () => {
               ...transaction,
               transactionType: "staking_reward",
               description: "Staking reward",
-              movements: [{ amount: "0.01", assetSymbol: "ETH", kind: "income" }],
+              movements: [
+                {
+                  targetId: "00000000-0000-4000-8000-000000000602",
+                  capture: null,
+                  amount: "0.01",
+                  assetSymbol: "ETH",
+                  kind: "income",
+                },
+              ],
               realizedGainLoss: null,
               income: "12.34",
               calculationState,
@@ -289,7 +305,15 @@ describe("TransactionsTable", () => {
             ...transaction,
             transactionType: "staking_reward",
             description: null,
-            movements: [{ amount: "0.004", assetSymbol: "ETH", kind: "income" }],
+            movements: [
+              {
+                targetId: "00000000-0000-4000-8000-000000000603",
+                capture: null,
+                amount: "0.004",
+                assetSymbol: "ETH",
+                kind: "income",
+              },
+            ],
             income,
             realizedGainLoss: null,
           },
@@ -309,9 +333,27 @@ describe("TransactionsTable", () => {
           {
             ...transaction,
             movements: [
-              { amount: "0.000000000000000001", assetSymbol: "ETH", kind: "acquisition" },
-              { amount: "20", assetSymbol: "EUR", kind: "disposal" },
-              { amount: "0", assetSymbol: "ETH", kind: "fee" },
+              {
+                targetId: "00000000-0000-4000-8000-000000000604",
+                capture: null,
+                amount: "0.000000000000000001",
+                assetSymbol: "ETH",
+                kind: "acquisition",
+              },
+              {
+                targetId: "00000000-0000-4000-8000-000000000605",
+                capture: null,
+                amount: "20",
+                assetSymbol: "EUR",
+                kind: "disposal",
+              },
+              {
+                targetId: "00000000-0000-4000-8000-000000000606",
+                capture: null,
+                amount: "0",
+                assetSymbol: "ETH",
+                kind: "fee",
+              },
             ],
           },
         ]}
@@ -339,10 +381,30 @@ describe("TransactionsTable", () => {
               movements:
                 transactionType === "internal_transfer"
                   ? [
-                      { amount: "1", assetSymbol: "ETH", kind: "acquisition" },
-                      { amount: "1", assetSymbol: "ETH", kind: "disposal" },
+                      {
+                        targetId: "00000000-0000-4000-8000-000000000607",
+                        capture: null,
+                        amount: "1",
+                        assetSymbol: "ETH",
+                        kind: "acquisition",
+                      },
+                      {
+                        targetId: "00000000-0000-4000-8000-000000000608",
+                        capture: null,
+                        amount: "1",
+                        assetSymbol: "ETH",
+                        kind: "disposal",
+                      },
                     ]
-                  : [{ amount: "1", assetSymbol: "ETH", kind: "acquisition" }],
+                  : [
+                      {
+                        targetId: "00000000-0000-4000-8000-000000000609",
+                        capture: null,
+                        amount: "1",
+                        assetSymbol: "ETH",
+                        kind: "acquisition",
+                      },
+                    ],
             },
           ]}
         />
@@ -364,7 +426,15 @@ describe("TransactionsTable", () => {
               transactionType: "internal_transfer",
               description: null,
               realizedGainLoss: hasFee ? null : "-0.25",
-              movements: [{ amount: "1", assetSymbol: "ETH", kind: hasFee ? "fee" : "disposal" }],
+              movements: [
+                {
+                  targetId: "00000000-0000-4000-8000-000000000610",
+                  capture: null,
+                  amount: "1",
+                  assetSymbol: "ETH",
+                  kind: hasFee ? "fee" : "disposal",
+                },
+              ],
             },
           ]}
         />
@@ -390,8 +460,20 @@ describe("TransactionsTable", () => {
             income: encoded,
             realizedGainLoss: loss,
             movements: [
-              { amount: encoded, assetSymbol: "ETH", kind: "income" },
-              { amount: encoded, assetSymbol: "ETH", kind: "fee" },
+              {
+                targetId: "00000000-0000-4000-8000-000000000611",
+                capture: null,
+                amount: encoded,
+                assetSymbol: "ETH",
+                kind: "income",
+              },
+              {
+                targetId: "00000000-0000-4000-8000-000000000612",
+                capture: null,
+                amount: encoded,
+                assetSymbol: "ETH",
+                kind: "fee",
+              },
             ],
           },
         ]}
@@ -411,7 +493,15 @@ describe("TransactionsTable", () => {
         transactions={[
           {
             ...transaction,
-            movements: [{ amount: "invalid", assetSymbol: "ETH", kind: "acquisition" }],
+            movements: [
+              {
+                targetId: "00000000-0000-4000-8000-000000000613",
+                capture: null,
+                amount: "invalid",
+                assetSymbol: "ETH",
+                kind: "acquisition",
+              },
+            ],
           },
         ]}
       />

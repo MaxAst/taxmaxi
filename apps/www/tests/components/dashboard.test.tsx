@@ -265,7 +265,15 @@ const transaction = (transactionId: string, description: string) => ({
   transactionType: "sell_fiat",
   description,
   externalId: transactionId,
-  movements: [{ amount: "0.1", assetSymbol: "BTC", kind: "disposal" as const }],
+  movements: [
+    {
+      targetId: "00000000-0000-4000-8000-000000000701",
+      capture: null,
+      amount: "0.1",
+      assetSymbol: "BTC",
+      kind: "disposal" as const,
+    },
+  ],
   income: null,
   realizedGainLoss: "100",
   fiatCurrency: "EUR",

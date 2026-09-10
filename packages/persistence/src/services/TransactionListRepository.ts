@@ -43,8 +43,46 @@ export interface TransactionListSource {
   readonly kind: "onchain" | "cex" | "dex"
 }
 
+/** One exact allocation recorded by the displayed calculation, including its consumed quantity. */
+export interface TransactionListRealizedResult {
+  readonly acquisitionEventId: string
+  readonly quantity: string
+  readonly costBasis: string
+  readonly proceeds: string
+  readonly gainLoss: string
+  readonly currency: string
+}
+
+/** Immutable movement facts from the displayed run; never values from remaining inventory. */
+export interface TransactionListMovementCapture {
+  readonly runId: string
+  readonly eventId: string | null
+  readonly outcome: "included" | "withheld" | "absent" | "outside_period"
+  readonly quantity: string | null
+  readonly assetId: string | null
+  readonly assetSymbol: string | null
+  readonly eventKind: "acquisition" | "disposition" | "custody_movement" | null
+  readonly cause: string | null
+  readonly valuationState: "selected" | "not_evaluated" | "missing" | "ambiguous"
+  readonly selectedValue: {
+    readonly kind: "user_valuation" | "observed_consideration" | "market_quote"
+    readonly amount: string
+    readonly currency: string
+  } | null
+  /** Provider amounts explicitly linked to this event by the writer, independently of selection. */
+  readonly providerConsiderations: ReadonlyArray<{
+    readonly amount: string
+    readonly currency: string
+  }>
+  /** Original acquisition basis is not captured. Selected value must not stand in for it. */
+  readonly acquisitionCostBasis: null
+  readonly realizedResults: ReadonlyArray<TransactionListRealizedResult>
+}
+
 /** Compact movement facts displayed with a transaction row. */
 export interface TransactionListMovement {
+  readonly targetId: string
+  readonly capture: TransactionListMovementCapture | null
   readonly amount: string
   readonly assetSymbol: string
   readonly kind: "acquisition" | "disposal" | "income" | "fee"
@@ -55,6 +93,7 @@ export interface TransactionListItem {
   readonly transactionId: string
   readonly timestamp: string
   readonly source: TransactionListSource
+  /** Imported transaction category; completed corrected causes belong to each movement capture. */
   readonly transactionType: string | null
   readonly description: string | null
   readonly externalId: string | null
