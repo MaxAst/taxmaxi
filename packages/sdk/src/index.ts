@@ -260,6 +260,7 @@ export type {
   TransactionDetail,
   TransactionDetailInput,
   TransactionDetailError,
+  TransactionFilterChoices,
   TransactionListInput,
   TransactionListItem,
   Transactions,

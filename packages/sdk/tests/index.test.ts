@@ -18,6 +18,7 @@ import {
   normalizeBaseUrl,
   toTaxMaxiError,
   type TaxMaxiHeaders,
+  type TransactionFilterChoices,
 } from "../src/index.ts"
 import { TaxMaxiInternal } from "../src/internal.ts"
 
@@ -697,7 +698,7 @@ describe("TaxMaxi Promise client", () => {
     () =>
       Effect.gen(function* () {
         const capturedRequests: Array<CapturedRequest> = []
-        const response = {
+        const response: TransactionFilterChoices = {
           assets: [
             {
               assetId: "00000000-0000-4000-8000-000000000401",
