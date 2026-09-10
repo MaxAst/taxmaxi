@@ -572,7 +572,12 @@ export function Dashboard({
         userId !== queryClient.getQueryData(queries.account(taxmaxi).queryKey)?.account.id
       )
         return
-      if (page.totalCount !== totalTransactions) {
+      // Query cache delivery precedes React's run-change effect. Compare the
+      // producer here too so a response cannot slip through that interval.
+      const currentRunId = queryClient.getQueryData(
+        queries.portfolioAssets(taxmaxi, selectedSourceId).queryKey
+      )?.activeRun?.runId
+      if (currentRunId !== activeRunId || page.totalCount !== totalTransactions) {
         resetTransactionSequence()
         return
       }
