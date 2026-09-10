@@ -1301,6 +1301,40 @@ describe("TaxMaxi Promise client", () => {
     })
   )
 
+  it.effect("rejects both portfolio source forms before serializing or sending a request", () =>
+    Effect.gen(function* () {
+      const sourceId = "00000000-0000-4000-8000-000000000001"
+      const capture = vi.fn()
+      const taxmaxi = new TaxMaxi({
+        apiKey: "tm_portfolio",
+        baseUrl: "https://sdk.example.test",
+        fetch: makeSequenceFetch({
+          capture,
+          fallbackBody: portfolioAssetsResponseBody,
+          responseBodies: [],
+        }),
+      })
+      for (const sourceIds of [[], [sourceId]]) {
+        const input = { sourceId, sourceIds }
+        expect(yield* Effect.flip(taxmaxi.effect.portfolio.listAssets(input))).toMatchObject({
+          _tag: "PortfolioBadRequestResponse",
+          code: "conflicting_source_filters",
+        })
+        yield* Effect.promise(() =>
+          expect(taxmaxi.portfolio.listAssets(input)).rejects.toMatchObject({
+            status: 400,
+            code: "PortfolioBadRequestResponse",
+            cause: { code: "conflicting_source_filters" },
+          })
+        )
+      }
+      expect(capture).not.toHaveBeenCalled()
+      yield* taxmaxi.effect.portfolio.listAssets({ sourceIds: [] })
+      yield* Effect.promise(() => taxmaxi.portfolio.listAssets({ sourceIds: [] }))
+      expect(capture).toHaveBeenCalledTimes(2)
+    })
+  )
+
   it.effect("lists combined and source-scoped portfolio assets", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<CapturedRequest> = []

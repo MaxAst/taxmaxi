@@ -1,5 +1,6 @@
 import {
   PortfolioAssetsResponse,
+  PortfolioBadRequestResponse,
   PortfolioCalculationStatusQuery,
   PortfolioCalculationStatusResponse,
 } from "@my/rest-api/contracts"
@@ -65,18 +66,21 @@ export const makePortfolioEffectResource = (
       return encodeCalculationStatus(yield* resolved.portfolio.getCalculationStatus({ query }))
     }),
   listAssets: (input = {}) =>
-    Effect.map(
-      Effect.flatMap(client, (resolved) =>
-        resolved.portfolio.listPortfolioAssets({
+    Effect.gen(function* () {
+      if (input.sourceId !== undefined && input.sourceIds !== undefined) {
+        return yield* new PortfolioBadRequestResponse({ code: "conflicting_source_filters" })
+      }
+      const resolved = yield* client
+      return encodePortfolioAssets(
+        yield* resolved.portfolio.listPortfolioAssets({
           query: {
             sourceId: input.sourceId,
             sourceIds: input.sourceIds,
             currency: input.currency?.toLowerCase(),
           },
         })
-      ),
-      encodePortfolioAssets
-    ),
+      )
+    }),
 })
 
 export const makePortfolioPromiseResource = (
