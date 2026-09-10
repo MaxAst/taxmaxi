@@ -3113,6 +3113,66 @@ const expectMatchingDetails = (page: typeof TransactionListResponse.Type) =>
 describe("writer-produced transaction list captures", () => {
   beforeEach(() => Effect.runPromise(context.recreateTestDatabase()))
 
+  it.effect("retains its own transaction blocker through real replay", () =>
+    Effect.gen(function* () {
+      const fixture = yield* seedCalculation()
+      const db = yield* drizzle
+      const timestamp = DateTime.toDateUtc(DateTime.makeUnsafe("2026-02-01T00:00:00Z"))
+      const [provider] = yield* db
+        .insert(schema.providerAssets)
+        .values({
+          provider: "synthetic",
+          providerAssetId: "unknown-own-transaction",
+          currencyCode: "UNKNOWN",
+          name: "Unresolved own asset",
+          exponent: 8,
+          providerType: "crypto",
+          rawProviderPayload: {},
+          evidenceRevision: 1,
+          discoveredAt: timestamp,
+          retrievedAt: timestamp,
+        })
+        .returning({ id: schema.providerAssets.id })
+      if (provider === undefined) return yield* Effect.die("Missing unknown provider asset")
+      yield* db
+        .insert(schema.providerAssetSourceUses)
+        .values({ providerAssetRowId: provider.id, sourceId: SOURCE_ID })
+      yield* db.insert(schema.providerAssetTransactionUses).values({
+        providerAssetRowId: provider.id,
+        sourceId: SOURCE_ID,
+        transactionId: fixture.purchaseId,
+      })
+      yield* recompute(45)
+      const client = yield* makeAuthenticatedClient({ userId: USER_ID })
+      const before = yield* client.transactions.getTransaction({
+        params: { transactionId: fixture.purchaseId },
+        query: { taxYear: TaxYear.make(2026) },
+      })
+      expect(before.attention).toBe(true)
+      expect(before.calculation.blockers.map((blocker) => blocker.eventId)).toContain(
+        fixture.purchaseId
+      )
+      yield* replaySyntheticSource()
+      const page = yield* client.transactions.listTransactions({
+        query: { limit: 10, attention: true },
+      })
+      const current = page.transactions.find((row) =>
+        row.movements.some((movement) => movement.targetId === fixture.acquisition.targetId)
+      )
+      if (current === undefined) return yield* Effect.die("Replayed owned blocker disappeared")
+      expect(current.transactionId).not.toBe(fixture.purchaseId)
+      const after = yield* client.transactions.getTransaction({
+        params: { transactionId: current.transactionId },
+        query: { taxYear: TaxYear.make(2026) },
+      })
+      expect(after.attention).toBe(true)
+      expect(after.calculation.run?.id).toBe(runId(45))
+      expect(after.calculation.blockers).toEqual(before.calculation.blockers)
+      expect(after.movements[0]?.capture).toEqual(before.movements[0]?.capture)
+      expect(after.movements[0]?.id).not.toBe(before.movements[0]?.id)
+    }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
+
   it.effect("keeps absent capture unavailable when its durable target reappears after replay", () =>
     Effect.gen(function* () {
       const fixture = yield* seedCalculation("10")

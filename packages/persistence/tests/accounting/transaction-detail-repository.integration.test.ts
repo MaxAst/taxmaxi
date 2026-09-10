@@ -1302,7 +1302,12 @@ const expectResult = (
   expect(allocation?.treatmentCodes.length).toBeGreaterThan(0)
 }
 
-for (const parent of ["other_transaction", "no_transaction", "unrelated_only"] as const) {
+for (const parent of [
+  "other_transaction",
+  "no_transaction",
+  "unrelated_only",
+  "transaction_blocker",
+] as const) {
   it.effect(`reads only the exact linked fee capture with ${parent}`, () =>
     Effect.gen(function* () {
       const fixture = yield* run(seedCalculation())
@@ -1323,6 +1328,33 @@ for (const parent of ["other_transaction", "no_transaction", "unrelated_only"] a
             })
             .returning({ id: schema.transactions.id })
           if (other === undefined) return yield* Effect.die("Missing fee parent")
+          if (parent === "transaction_blocker") {
+            const [provider] = yield* db
+              .insert(schema.providerAssets)
+              .values({
+                provider: "synthetic",
+                providerAssetId: "unknown-fee-parent-asset",
+                currencyCode: "UNKNOWN",
+                name: "Unresolved parent asset",
+                exponent: 8,
+                providerType: "crypto",
+                rawProviderPayload: {},
+                evidenceRevision: 1,
+                discoveredAt: time,
+                retrievedAt: time,
+              })
+              .returning({ id: schema.providerAssets.id })
+            if (provider === undefined) return yield* Effect.die("Missing parent provider asset")
+            yield* db
+              .insert(schema.providerAssetSourceUses)
+              .values({ providerAssetRowId: provider.id, sourceId: SOURCE_ID })
+            yield* db.insert(schema.providerAssetTransactionUses).values({
+              providerAssetRowId: provider.id,
+              sourceId: SOURCE_ID,
+              transactionId: other.id,
+            })
+          }
+
           return yield* db
             .insert(schema.transactionLegs)
             .values(
@@ -1350,6 +1382,7 @@ for (const parent of ["other_transaction", "no_transaction", "unrelated_only"] a
               id: schema.transactionLegs.id,
               targetId: schema.transactionLegs.movementCorrectionTargetId,
               feeForTransactionId: schema.transactionLegs.feeForTransactionId,
+              transactionId: schema.transactionLegs.transactionId,
             })
         })
       )
@@ -1360,16 +1393,60 @@ for (const parent of ["other_transaction", "no_transaction", "unrelated_only"] a
       if (unrelated === undefined) return yield* Effect.die("Missing unrelated fee")
       const detail = yield* readCalculation(fixture.saleId)
       const hasLinkedFee = parent !== "unrelated_only"
-      expect(detail.attention).toBe(hasLinkedFee)
+      const hasLinkedBlocker = hasLinkedFee
+      expect(detail.attention).toBe(hasLinkedBlocker)
       expect(detail.movements).toHaveLength(hasLinkedFee ? 2 : 1)
       if (hasLinkedFee) {
         if (linked === undefined) return yield* Effect.die("Missing linked fee")
         expect(detail.movements.find((movement) => movement.id === linked.id)?.capture?.runId).toBe(
           runId(1)
         )
-        expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).toContain(linked.id)
+        if (hasLinkedBlocker && parent !== "transaction_blocker")
+          expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).toContain(linked.id)
       }
-      expectResult(detail.calculation, "20", "10")
+      if (parent === "transaction_blocker") {
+        // The writer withholds both transactions connected by the explicit fee link.
+        expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).toContain(
+          unrelated.transactionId
+        )
+        const writer = yield* run(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const captures = yield* db
+              .select({
+                targetId: schema.calculationRunMovementInputs.targetId,
+                captured: schema.calculationRunMovementInputs.captured,
+              })
+              .from(schema.calculationRunMovementInputs)
+              .where(eq(schema.calculationRunMovementInputs.runId, runId(1)))
+            const allocations = yield* db
+              .select({ eventId: schema.calculationRunAllocations.dispositionEventId })
+              .from(schema.calculationRunAllocations)
+              .where(eq(schema.calculationRunAllocations.runId, runId(1)))
+            return {
+              captures: captures.map((row) => ({
+                ownSale: row.targetId === fixture.disposition.targetId,
+                outcome: row.captured.currentOutcome,
+                event: row.captured.effective.event?._tag,
+              })),
+              allocationCount: allocations.length,
+            }
+          })
+        )
+        expect(writer.allocationCount).toBe(0)
+        expect(writer.captures.find((capture) => capture.ownSale)).toMatchObject({
+          outcome: "withheld",
+          event: undefined,
+        })
+        expect(detail.calculation.allocations).toEqual([])
+        expect(
+          detail.movements.find(
+            (movement) => movement.movementCorrectionTargetId === fixture.disposition.targetId
+          )?.capture
+        ).toMatchObject({ outcome: "withheld", eventId: null })
+      } else {
+        expectResult(detail.calculation, "20", "10")
+      }
       expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).not.toContain(
         unrelated.id
       )
@@ -1390,9 +1467,11 @@ for (const parent of ["other_transaction", "no_transaction", "unrelated_only"] a
           })
         ),
       })
-      expect(filtered.items.some((row) => row.transactionId === fixture.saleId)).toBe(hasLinkedFee)
+      expect(filtered.items.some((row) => row.transactionId === fixture.saleId)).toBe(
+        hasLinkedBlocker
+      )
       expect(filtered.items.every((row) => row.attention)).toBe(true)
-      expect(filtered.totalCount).toBe(hasLinkedFee ? 2 : 1)
+      expect(filtered.totalCount).toBe(hasLinkedBlocker ? 2 : 1)
       const stored = yield* run(
         Effect.gen(function* () {
           const db = yield* drizzle
@@ -1402,7 +1481,9 @@ for (const parent of ["other_transaction", "no_transaction", "unrelated_only"] a
             .where(eq(schema.calculationRunBlockers.runId, runId(1)))
         })
       )
-      expect(stored.map((blocker) => blocker.eventId)).toContain(unrelated.id)
+      expect(stored.map((blocker) => blocker.eventId)).toContain(
+        parent === "transaction_blocker" ? unrelated.transactionId : unrelated.id
+      )
     })
   )
 }
