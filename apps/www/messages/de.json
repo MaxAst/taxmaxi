@@ -1519,5 +1519,13 @@
   "atelier.copy_feedback": "Feedback kopieren",
   "atelier.feedback_copied": "Feedback kopiert.",
   "atelier.feedback_copy_failed": "Zugriff auf die Zwischenablage fehlgeschlagen. Markiere und kopiere den Text oben.",
-  "atelier.feedback_ready": "Das Feedback ist bereit. Du kannst den Text oben kopieren."
+  "atelier.feedback_ready": "Das Feedback ist bereit. Du kannst den Text oben kopieren.",
+  "app.inspector.back": "Zurück zur Übersicht",
+  "app.inspector.position": "{position} von {total}",
+  "app.inspector.positionUnavailable": "Position nicht verfügbar",
+  "app.inspector.previous": "Vorherige Transaktion",
+  "app.inspector.next": "Nächste Transaktion",
+  "app.inspector.navigationLoading": "Benachbarte Transaktion wird geladen…",
+  "app.inspector.navigationError": "Die benachbarte Seite konnte nicht geladen werden. Deine Transaktion bleibt geöffnet.",
+  "app.inspector.details": "Transaktionsdetails ansehen"
 }

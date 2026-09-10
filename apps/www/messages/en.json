@@ -1519,5 +1519,13 @@
   "atelier.copy_feedback": "Copy feedback",
   "atelier.feedback_copied": "Feedback copied.",
   "atelier.feedback_copy_failed": "Clipboard access failed. Select and copy the text above.",
-  "atelier.feedback_ready": "Feedback is ready. You can copy the text above."
+  "atelier.feedback_ready": "Feedback is ready. You can copy the text above.",
+  "app.inspector.back": "Back to overview",
+  "app.inspector.position": "{position} of {total}",
+  "app.inspector.positionUnavailable": "Position unavailable",
+  "app.inspector.previous": "Previous transaction",
+  "app.inspector.next": "Next transaction",
+  "app.inspector.navigationLoading": "Loading neighbouring transaction…",
+  "app.inspector.navigationError": "Could not load the neighbouring page. Your transaction is still open.",
+  "app.inspector.details": "View transaction details"
 }

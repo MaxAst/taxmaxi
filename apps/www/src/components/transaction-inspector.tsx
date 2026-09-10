@@ -6,10 +6,16 @@ import {
   type TaxMaxi,
   type TransactionDetail,
 } from "taxmaxi"
-import { X } from "lucide-react"
+import { ArrowDown, ArrowLeft, ArrowUp, X } from "lucide-react"
+import { animate, motion, useMotionValue, useReducedMotion } from "motion/react"
+import useMeasure from "react-use-measure"
 import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
-import { Dialog, DialogContent, DialogTitle, DialogDescription } from "#/components/ui/dialog"
-import { Drawer, DrawerContent, DrawerTitle, DrawerDescription } from "#/components/ui/drawer"
+import {
+  BottomSheet,
+  BottomSheetContent,
+  BottomSheetTitle,
+  BottomSheetDescription,
+} from "#/components/bottom-sheet"
 import { Button } from "#/components/ui/button"
 import { m } from "#/paraglide/messages"
 import { getLocale } from "#/paraglide/runtime"
@@ -29,6 +35,7 @@ export function TransactionInspector({
   onClose,
   returnFocusRef,
   fallbackFocusRef,
+  navigation,
 }: {
   selection: Selection | null
   taxmaxi: TaxMaxi
@@ -37,8 +44,26 @@ export function TransactionInspector({
   onClose: () => void
   returnFocusRef: RefObject<HTMLElement | null>
   fallbackFocusRef?: RefObject<HTMLElement | null>
+  navigation?: {
+    position: number | null
+    total: number
+    canPrevious: boolean
+    canNext: boolean
+    pending: boolean
+    failed: boolean
+    onNavigate: (direction: -1 | 1) => void
+    onRetry: () => void
+  }
 }) {
-  const [mobile, setMobile] = useState(false)
+  const [mobile, setMobile] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches
+  )
+  const [detailView, setDetailView] = useState(false)
+  const [viewTransaction, setViewTransaction] = useState(selection?.transactionId)
+  if (viewTransaction !== selection?.transactionId) {
+    setViewTransaction(selection?.transactionId)
+    setDetailView(false)
+  }
   const refreshAllowed = useRef(!disabled)
   useEffect(() => {
     refreshAllowed.current = !disabled
@@ -47,97 +72,222 @@ export function TransactionInspector({
     }
   }, [disabled])
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 767px)")
+    const media = window.matchMedia("(max-width: 1023px)")
     const update = () => setMobile(media.matches)
     update()
     media.addEventListener("change", update)
     return () => media.removeEventListener("change", update)
   }, [])
+  const viewFocusRef = useRef<HTMLButtonElement>(null)
+  const previousView = useRef(detailView)
+  useEffect(() => {
+    if (previousView.current !== detailView) viewFocusRef.current?.focus({ preventScroll: true })
+    previousView.current = detailView
+  }, [detailView])
   const closeRef = useRef<HTMLButtonElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
   const open = selection !== null && !disabled
-  const restoreFocus = (event: Event) => {
-    event.preventDefault()
+  const wasOpen = useRef(false)
+  const restoreFocus = () => {
+    const opener = returnFocusRef.current
+    const target = opener?.isConnected ? opener : fallbackFocusRef?.current
+    target?.focus({ preventScroll: true })
+  }
+  useEffect(() => {
+    if (open && !wasOpen.current && !mobile) closeRef.current?.focus({ preventScroll: true })
+    if (!open && wasOpen.current && !mobile) restoreFocus()
+    wasOpen.current = open
+  })
+  useEffect(() => {
+    scrollRef.current?.scrollTo?.({ top: 0 })
+  }, [selection?.transactionId, detailView])
+
+  const [measureRef, bounds] = useMeasure()
+  const height = useMotionValue(0)
+  const measured = useRef(false)
+  const reduceMotion = useReducedMotion()
+  useEffect(() => {
     if (!open) {
-      const opener = returnFocusRef.current
-      const target = opener?.isConnected ? opener : fallbackFocusRef?.current
-      target?.focus()
+      measured.current = false
+      height.set(0)
+      return
+    }
+    if (!bounds.height) return
+    if (!measured.current || reduceMotion) {
+      height.set(bounds.height)
+      measured.current = true
+      return
+    }
+    const controls = animate(height, bounds.height, { duration: 0.24, ease: [0.25, 1, 0.5, 1] })
+    return () => controls.stop()
+  }, [bounds.height, height, open, reduceMotion])
+
+  const header = (
+    <header className="sticky top-0 z-20 flex min-h-14 items-center justify-between gap-2 bg-popover/95 pb-2 backdrop-blur">
+      {detailView ? (
+        <Button
+          ref={viewFocusRef}
+          variant="ghost"
+          className="min-h-11"
+          onClick={() => setDetailView(false)}
+        >
+          <ArrowLeft aria-hidden="true" />
+          {m["app.inspector.back"]()}
+        </Button>
+      ) : (
+        <span className="text-xs font-medium tabular-nums text-muted-foreground" aria-live="polite">
+          {navigation?.position != null
+            ? m["app.inspector.position"]({
+                position: new Intl.NumberFormat(getLocale()).format(navigation.position),
+                total: new Intl.NumberFormat(getLocale()).format(navigation.total),
+              })
+            : m["app.inspector.positionUnavailable"]()}
+        </span>
+      )}
+      <div className="flex items-center gap-1">
+        {!detailView && (
+          <>
+            <Button
+              aria-label={m["app.inspector.previous"]()}
+              variant="ghost"
+              size="icon-lg"
+              className="min-h-11 min-w-11"
+              disabled={!navigation?.canPrevious || navigation.pending}
+              onClick={() => navigation?.onNavigate(-1)}
+            >
+              <ArrowUp aria-hidden="true" />
+            </Button>
+            <Button
+              aria-label={m["app.inspector.next"]()}
+              variant="ghost"
+              size="icon-lg"
+              className="min-h-11 min-w-11"
+              disabled={!navigation?.canNext || navigation.pending}
+              onClick={() => navigation?.onNavigate(1)}
+            >
+              <ArrowDown aria-hidden="true" />
+            </Button>
+          </>
+        )}
+        <Button
+          ref={closeRef}
+          aria-label={m["app.inspector.close"]()}
+          onClick={onClose}
+          variant="ghost"
+          size="icon-lg"
+          className="min-h-11 min-w-11"
+        >
+          <X aria-hidden="true" />
+        </Button>
+      </div>
+    </header>
+  )
+  const content = (
+    <>
+      {header}
+      <h2 className="mb-2 text-lg font-semibold">{selection?.description}</h2>
+      {navigation?.pending && <p role="status">{m["app.inspector.navigationLoading"]()}</p>}
+      {navigation?.failed && (
+        <div role="status" className="mb-3 flex flex-col gap-2">
+          <p>{m["app.inspector.navigationError"]()}</p>
+          <Button variant="outline" onClick={navigation.onRetry}>
+            {m["app.treatment.retry"]()}
+          </Button>
+        </div>
+      )}
+      {selection && !disabled && (
+        <InspectorRequest
+          key={`${selection.transactionId}:${selection.taxYear}`}
+          selection={selection}
+          refreshAllowed={refreshAllowed}
+          taxmaxi={taxmaxi}
+          onUnauthorized={onUnauthorized}
+          viewFocusRef={viewFocusRef}
+          showDetails={!mobile || detailView}
+          onShowDetails={() => setDetailView(true)}
+        />
+      )}
+    </>
+  )
+  const keyboard = (event: React.KeyboardEvent) => {
+    if (event.key === "Escape" && !mobile) {
+      event.preventDefault()
+      onClose()
+      return
+    }
+    if (
+      event.target instanceof HTMLElement &&
+      event.target.closest("input, textarea, select, [contenteditable=true]")
+    )
+      return
+    if (detailView || navigation?.pending || event.altKey || event.metaKey || event.ctrlKey) return
+    if (event.key === "ArrowUp" && navigation?.canPrevious) {
+      event.preventDefault()
+      navigation.onNavigate(-1)
+    }
+    if (event.key === "ArrowDown" && navigation?.canNext) {
+      event.preventDefault()
+      navigation.onNavigate(1)
     }
   }
-  const focusClose = (event: Event) => {
-    event.preventDefault()
-    closeRef.current?.focus()
-  }
-  const close = (
-    <Button
-      ref={closeRef}
-      onClick={onClose}
-      variant="outline"
-      className="min-h-11 shrink-0"
-      aria-label={m["app.inspector.close"]()}
-    >
-      <X aria-hidden="true" data-icon="inline-start" />
-      {m["app.inspector.close"]()}
-    </Button>
-  )
-  const content =
-    selection && !disabled ? (
-      <InspectorRequest
-        key={`${selection.transactionId}:${selection.taxYear}`}
-        selection={selection}
-        refreshAllowed={refreshAllowed}
-        taxmaxi={taxmaxi}
-        onUnauthorized={onUnauthorized}
-      />
+  if (!mobile)
+    return open ? (
+      <aside
+        aria-label={m["app.inspector.title"]()}
+        onKeyDown={keyboard}
+        className="sticky top-28 min-w-0 shrink-0 self-start rounded-xl border bg-popover p-4 text-foreground lg:w-96 xl:w-[28rem]"
+      >
+        <div
+          ref={scrollRef}
+          className="max-h-[calc(100dvh-9rem)] overflow-y-auto overscroll-contain"
+        >
+          {content}
+        </div>
+      </aside>
     ) : null
-  return mobile ? (
-    <Drawer
+  return (
+    <BottomSheet
       open={open}
       onOpenChange={(value) => {
         if (!value) onClose()
       }}
+      shouldScaleBackground={false}
     >
-      <DrawerContent
-        onOpenAutoFocus={focusClose}
-        onCloseAutoFocus={restoreFocus}
-        className="data-[vaul-drawer-direction=bottom]:max-h-[92dvh]"
+      <BottomSheetContent
+        data-transaction-mobile-sheet=""
+        onKeyDown={keyboard}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          closeRef.current?.focus()
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          restoreFocus()
+        }}
+        className="inset-x-2 bottom-2 max-w-xl border-border bg-popover text-foreground shadow-2xl [&>[data-slot=bottom-sheet-handle]]:mt-2 [&>[data-slot=bottom-sheet-handle]]:mb-2"
+        style={{
+          backgroundImage: "none",
+          animation: reduceMotion ? "none" : undefined,
+          transition: reduceMotion ? "none" : undefined,
+        }}
       >
-        <header className="flex shrink-0 items-start justify-between gap-3 px-4 py-3">
-          <div className="min-w-0">
-            <DrawerTitle>{m["app.inspector.title"]()}</DrawerTitle>
-            <DrawerDescription className="mt-1 break-words">
-              {selection?.description}
-            </DrawerDescription>
+        <BottomSheetTitle className="sr-only">{m["app.inspector.title"]()}</BottomSheetTitle>
+        <BottomSheetDescription className="sr-only">
+          {selection?.description}
+        </BottomSheetDescription>
+        <motion.div style={{ height: measured.current ? height : "auto" }}>
+          <div
+            ref={(element) => {
+              measureRef(element)
+              scrollRef.current = element
+            }}
+            className="max-h-[calc(88dvh-3.25rem)] overflow-y-auto overscroll-contain px-5 pb-[max(1rem,env(safe-area-inset-bottom))]"
+          >
+            {content}
           </div>
-          {close}
-        </header>
-        <div className="min-h-0 overflow-y-auto overscroll-contain px-4 pb-6">{content}</div>
-      </DrawerContent>
-    </Drawer>
-  ) : (
-    <Dialog
-      open={open}
-      onOpenChange={(value) => {
-        if (!value) onClose()
-      }}
-    >
-      <DialogContent
-        onOpenAutoFocus={focusClose}
-        onCloseAutoFocus={restoreFocus}
-        showCloseButton={false}
-        className="flex max-h-[90dvh] flex-col gap-4 sm:max-w-3xl"
-      >
-        <header className="flex shrink-0 items-start justify-between gap-4">
-          <div className="min-w-0">
-            <DialogTitle>{m["app.inspector.title"]()}</DialogTitle>
-            <DialogDescription className="mt-2 break-words">
-              {selection?.description}
-            </DialogDescription>
-          </div>
-          {close}
-        </header>
-        <div className="min-h-0 overflow-y-auto overscroll-contain pr-2">{content}</div>
-      </DialogContent>
-    </Dialog>
+        </motion.div>
+      </BottomSheetContent>
+    </BottomSheet>
   )
 }
 
@@ -146,7 +296,13 @@ function InspectorRequest({
   refreshAllowed,
   taxmaxi,
   onUnauthorized,
+  showDetails,
+  viewFocusRef,
+  onShowDetails,
 }: {
+  viewFocusRef: RefObject<HTMLButtonElement | null>
+  showDetails: boolean
+  onShowDetails: () => void
   selection: Selection
   refreshAllowed: RefObject<boolean>
   taxmaxi: TaxMaxi
@@ -304,8 +460,12 @@ function InspectorRequest({
             {m["app.treatment.retry"]()}
           </Button>
         </div>
-      ) : (
+      ) : showDetails ? (
         <InspectorFacts detail={detail.data} />
+      ) : (
+        <Button ref={viewFocusRef} variant="outline" onClick={onShowDetails}>
+          {m["app.inspector.details"]()}
+        </Button>
       )}
     </section>
   )
