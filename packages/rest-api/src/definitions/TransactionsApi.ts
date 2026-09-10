@@ -6,6 +6,7 @@
 
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import * as Schema from "effect/Schema"
+import * as SchemaTransformation from "effect/SchemaTransformation"
 import { AssetOverrideCurrentResponse } from "./AssetOverridesApi.ts"
 import {
   TransactionOverrideCurrentResponse,
@@ -21,8 +22,18 @@ export class TransactionBadRequestError extends Schema.TaggedError<TransactionBa
   { httpApiStatus: 400 }
 ) {}
 
+// An explicit UTC offset keeps boundaries independent of the API host timezone.
+const TransactionDateBoundary = Schema.String.check(
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/)
+).pipe(Schema.decodeTo(Schema.Date, SchemaTransformation.dateFromString))
+
+/** Empty source selection means all owned sources; dates form a UTC half-open interval. */
 export const TransactionListQuery = Schema.Struct({
   sourceId: Schema.optional(Schema.String.check(Schema.isUUID())),
+  sourceIds: Schema.optional(Schema.Array(Schema.String.check(Schema.isUUID()))),
+  from: Schema.optional(TransactionDateBoundary),
+  to: Schema.optional(TransactionDateBoundary),
+  order: Schema.optional(Schema.Literals(["newest", "oldest"])),
   cursor: Schema.optional(Schema.String),
   limit: Schema.optional(
     Schema.FiniteFromString.check(
@@ -300,7 +311,7 @@ const listTransactions = HttpApiEndpoint.get("listTransactions", "/transactions"
   OpenApi.annotations({
     summary: "List transactions",
     description:
-      "Returns a stable cursor page of compact accounting transactions owned by the authenticated principal, optionally restricted to one owned source. Rows and totalCount exclude provider activity without accounting movements.",
+      "Returns a stable cursor page of compact accounting transactions owned by the authenticated principal. Select exact owned sources with repeated sourceIds parameters or the sourceId shorthand, never both. Omitted or empty sourceIds selects all owned sources. Optional from/to timestamps require explicit UTC offsets and form an inclusive-start, exclusive-end interval. Order is newest (default) or oldest, with transaction IDs breaking timestamp ties. Cursors are bound to the source set, dates and order. Rows and totalCount share these filters and exclude provider activity without accounting movements.",
   })
 )
 

@@ -118,7 +118,11 @@ export interface TransactionListParams {
   readonly principalId: string
   readonly jurisdiction: JurisdictionCode
   readonly reportingCurrency: CurrencyCode
-  readonly sourceId: string | null
+  readonly sourceIds: ReadonlyArray<string>
+  /** UTC half-open occurrence interval. */
+  readonly from: Date | null
+  readonly to: Date | null
+  readonly order: "newest" | "oldest"
   readonly cursor: string | null
   readonly limit: number
 }

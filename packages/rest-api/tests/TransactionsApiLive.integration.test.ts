@@ -577,10 +577,267 @@ const seedSourceFilterFixtures = Effect.gen(function* () {
   return fixture
 })
 
+// Source records and movements cross the same writer used by sync before API reads.
+const seedQueryFilterFixtures = Effect.gen(function* () {
+  const fixture = yield* seedSyncEngineRepositoryFixture({
+    principalId: fixtureIds.principalId,
+    userId: fixtureIds.userId,
+    sourceId: fixtureIds.sourceId,
+  })
+  yield* seedSyncEngineAssets(fixture)
+  const db = yield* drizzle
+  for (const sourceId of [fixtureIds.canonicalSourceId, fixtureIds.emptySourceId]) {
+    const [address] = yield* db
+      .insert(schema.addresses)
+      .values({
+        principalId: fixture.principalId,
+        address: `bc1qquery${sourceId}`,
+        type: "bitcoin",
+        name: "Query fixture",
+      })
+      .returning({ id: schema.addresses.id })
+    if (address === undefined) return yield* Effect.die("Missing fixture address")
+    yield* db.insert(schema.sources).values({
+      id: sourceId,
+      principalId: fixture.principalId,
+      name: "Query source",
+      providerKey: "bitcoin-rpc",
+      sourceableType: "onchain",
+      addressId: address.id,
+    })
+  }
+  yield* seedSyncEngineRepositoryFixture({
+    principalId: fixtureIds.otherPrincipalId,
+    userId: fixtureIds.otherUserId,
+    sourceId: fixtureIds.otherSourceId,
+  })
+  const writer = yield* SourceNormalizationRepository
+  const ids: Array<string> = []
+  for (const [index, sourceId] of [
+    fixture.sourceId,
+    fixture.sourceId,
+    fixtureIds.canonicalSourceId,
+    fixtureIds.emptySourceId,
+  ].entries()) {
+    const timestamp = DateTime.toDateUtc(
+      DateTime.makeUnsafe(index === 0 ? "2025-03-01T00:00:00Z" : "2025-03-02T00:00:00Z")
+    )
+    const externalId = `query-${index}`
+    const persisted = yield* writer.persistNormalizedArtifacts({
+      transaction: {
+        sourceId,
+        principalId: fixture.principalId,
+        sourceRawRecordId: null,
+        externalId,
+        externalGroupId: null,
+        timestamp,
+        transactionType: "buy_fiat",
+        providerTransactionType: "buy",
+        providerStatus: "completed",
+        providerResourcePath: null,
+        providerDescription: null,
+        providerCreatedAt: timestamp,
+        providerUpdatedAt: timestamp,
+        metadata: null,
+        providerFiatAmount: null,
+        providerFiatCurrency: null,
+      },
+      venueContext: {
+        venueType: "cex",
+        cexAccountId: null,
+        externalAccountId: null,
+        externalOrderId: null,
+        externalFillId: null,
+        side: null,
+        instrument: null,
+        fillPrice: null,
+        commissionAmount: null,
+        commissionCurrency: null,
+        metadata: null,
+      },
+      providerTransfers: [],
+      canonicalTransfers: [],
+      providerAssetRowIds: [],
+      transactionReview: null,
+      resolvedTransactionType: {
+        providerTransactionType: "buy",
+        transactionType: "buy_fiat",
+        inventoryEffect: "acquisition",
+        taxTreatment: "requires_additional_rule_logic",
+        resolutionStrategy: "static",
+        pairedRecordRequired: false,
+        mappingStatus: "approved",
+      },
+      deriveLegs: ({ transaction }) =>
+        Effect.succeed([
+          {
+            movementIdentity: {
+              _tag: "identified" as const,
+              sourceRecordKey: externalId,
+              componentKey: "acquisition",
+            },
+            sourceId,
+            principalId: fixture.principalId,
+            sourceRawRecordId: null,
+            externalId: `${externalId}:leg`,
+            txHash: null,
+            timestamp,
+            addressId: null,
+            assetId: TEST_BTC_ASSET_ID,
+            amount: "1",
+            kind: "acquisition",
+            provenance: "deterministic",
+            originKind: "none" as const,
+            derivationRule: "query-fixture",
+            metadata: null,
+            transactionId: transaction.id,
+            sourceTransferId: null,
+            fiatAmount: null,
+            fiatCurrency: null,
+            feeForTransactionId: null,
+          },
+        ]),
+    })
+    ids.push(persisted.transaction.id)
+  }
+  return { ...fixture, ids }
+})
+
 await Effect.runPromise(context.recreateTestDatabase())
 
 describe("TransactionsApiLive", () => {
   beforeEach(() => Effect.runPromise(Effect.asVoid(context.recreateTestDatabase())))
+
+  it.effect(
+    "filters writer-produced rows by owned source sets and UTC dates with query-bound ordering",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* seedQueryFilterFixtures
+        const client = yield* makeAuthenticatedClient({ userId: fixture.userId })
+        const sourceIds = [fixture.sourceId, fixtureIds.canonicalSourceId]
+        const all = yield* client.transactions.listTransactions({ query: { sourceIds: [] } })
+        expect(all.totalCount).toBe(4)
+        for (const selected of [sourceIds, [fixture.sourceId, ...sourceIds]]) {
+          const response = yield* client.transactions.listTransactions({
+            query: { sourceIds: selected },
+          })
+          expect(response.totalCount).toBe(3)
+          expect(response.transactions.map((row) => row.transactionId).sort()).toEqual(
+            fixture.ids.slice(0, 3).sort()
+          )
+        }
+        for (const sourceId of [
+          fixture.sourceId,
+          fixtureIds.canonicalSourceId,
+          fixtureIds.emptySourceId,
+        ]) {
+          const response = yield* client.transactions.listTransactions({
+            query: { sourceIds: [sourceId] },
+          })
+          expect(response.totalCount).toBe(sourceId === fixture.sourceId ? 2 : 1)
+        }
+        const foreign = yield* client.transactions
+          .listTransactions({ query: { sourceIds: [...sourceIds, fixtureIds.otherSourceId] } })
+          .pipe(Effect.flip)
+        expect(foreign).toMatchObject({ _tag: "SourceNotFoundError" })
+        const both = yield* client.transactions
+          .listTransactions({ query: { sourceId: fixture.sourceId, sourceIds } })
+          .pipe(Effect.flip)
+        expect(both).toMatchObject({ _tag: "TransactionBadRequestError" })
+        const from = DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-01T00:00:00Z"))
+        const to = DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-02T00:00:00Z"))
+        const interval = yield* client.transactions.listTransactions({
+          query: { sourceIds, from, to },
+        })
+        expect(interval.totalCount).toBe(1)
+        expect(interval.transactions.map((row) => row.transactionId)).toEqual(
+          fixture.ids.slice(0, 1)
+        )
+        for (const order of ["newest", "oldest"] as const) {
+          const readIds: Array<string> = []
+          let cursor: string | undefined
+          for (let page = 0; page < 3; page++) {
+            const response = yield* client.transactions.listTransactions({
+              query: {
+                sourceIds: [
+                  fixtureIds.canonicalSourceId.toUpperCase(),
+                  fixture.sourceId,
+                  fixture.sourceId,
+                ],
+                from,
+                order,
+                limit: 1,
+                cursor,
+              },
+            })
+            expect(response.totalCount).toBe(3)
+            readIds.push(...response.transactions.map((row) => row.transactionId))
+            cursor = response.page.nextCursor ?? undefined
+          }
+          const ties = fixture.ids.slice(1, 3).sort()
+          expect(readIds).toEqual(
+            order === "oldest"
+              ? [...fixture.ids.slice(0, 1), ...ties]
+              : [...ties.reverse(), ...fixture.ids.slice(0, 1)]
+          )
+          expect(cursor).toBeUndefined()
+        }
+        const first = yield* client.transactions.listTransactions({
+          query: { sourceIds, from, limit: 1 },
+        })
+        const cursor = first.page.nextCursor
+        if (cursor === null) return yield* Effect.die("Expected query cursor")
+        for (const change of [
+          { sourceIds: [fixture.sourceId] },
+          { from: to },
+          { to: DateTime.toDateUtc(DateTime.makeUnsafe("2025-03-03T00:00:00Z")) },
+          { order: "oldest" as const },
+        ]) {
+          const error = yield* client.transactions
+            .listTransactions({ query: { sourceIds, from, cursor, ...change } })
+            .pipe(Effect.flip)
+          expect(error).toMatchObject({ _tag: "TransactionBadRequestError" })
+        }
+        const equivalent = yield* client.transactions.listTransactions({
+          query: {
+            sourceIds: [
+              fixtureIds.canonicalSourceId.toUpperCase(),
+              fixture.sourceId,
+              fixture.sourceId,
+            ],
+            from,
+            cursor,
+            order: "newest",
+            limit: 1,
+          },
+        })
+        expect(equivalent.transactions).toHaveLength(1)
+        const shorthand = yield* client.transactions.listTransactions({
+          query: { sourceId: fixture.sourceId, limit: 1 },
+        })
+        if (shorthand.page.nextCursor === null)
+          return yield* Effect.die("Expected shorthand cursor")
+        const setPage = yield* client.transactions.listTransactions({
+          query: { sourceIds: [fixture.sourceId], cursor: shorthand.page.nextCursor },
+        })
+        expect(setPage.transactions).toHaveLength(1)
+        for (const path of [
+          "?from=invalid",
+          "?from=2025-03-01T00:00:00",
+          "?from=2025-03-02T00:00:00Z&to=2025-03-01T00:00:00Z",
+          "?from=2025-03-01T00:00:00Z&to=2025-03-01T00:00:00Z",
+          "?sourceIds=invalid",
+          "?order=sideways",
+        ]) {
+          expect(
+            yield* getAuthenticatedStatus({
+              path: `/v1/transactions${path}`,
+              userId: fixture.userId,
+            })
+          ).toBe(400)
+        }
+      }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
 
   it.effect("pages 1204 transactions at 500 and hydrates only the selected movement IDs", () => {
     const statements: Array<{ text: string; params: ReadonlyArray<unknown> }> = []

@@ -674,6 +674,44 @@ describe("TaxMaxi Promise client", () => {
     })
   )
 
+  it.effect(
+    "encodes source sets, UTC interval and order through the shared transaction query",
+    () =>
+      Effect.gen(function* () {
+        const capturedRequests: Array<CapturedRequest> = []
+        const taxmaxi = new TaxMaxi({
+          apiKey: "tm_transactions",
+          baseUrl: "https://sdk.example.test",
+          fetch: makeFetch(capturedRequests, encodeJson(transactionListResponse)),
+        })
+        const sourceIds = [
+          "00000000-0000-4000-8000-000000000001",
+          "00000000-0000-4000-8000-000000000002",
+        ]
+        yield* Effect.promise(() =>
+          taxmaxi.transactions.list({
+            sourceIds,
+            from: "2025-03-01T00:00:00Z",
+            to: "2025-03-02T00:00:00Z",
+            order: "oldest",
+            limit: 1,
+          })
+        )
+        const request = capturedRequests[0]
+        expect(request).toBeDefined()
+        if (request === undefined) return yield* Effect.die("Missing request")
+        const url = new URL(request.url)
+        expect(url.searchParams.getAll("sourceIds")).toEqual(sourceIds)
+        expect(url.searchParams.get("from")).toBe("2025-03-01T00:00:00.000Z")
+        expect(url.searchParams.get("to")).toBe("2025-03-02T00:00:00.000Z")
+        expect(url.searchParams.get("order")).toBe("oldest")
+        yield* Effect.promise(() =>
+          expect(taxmaxi.transactions.list({ from: "invalid" })).rejects.toBeDefined()
+        )
+        expect(capturedRequests).toHaveLength(1)
+      })
+  )
+
   it.effect("passes an owned source filter and preserves canonical partial rows", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<CapturedRequest> = []

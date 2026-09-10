@@ -115,6 +115,16 @@ export const TransactionsApiLive = HttpApiBuilder.group(TaxMaxiApi, "transaction
       )
       .handle("listTransactions", ({ query }) =>
         Effect.gen(function* () {
+          if (query.sourceId !== undefined && query.sourceIds !== undefined) {
+            return yield* new TransactionBadRequestError({
+              message: "Specify sourceId or sourceIds, not both.",
+            })
+          }
+          if (query.from !== undefined && query.to !== undefined && query.from >= query.to) {
+            return yield* new TransactionBadRequestError({
+              message: "The date interval must have from before to.",
+            })
+          }
           const { principal } = yield* principalResolutionService.resolveCurrentUserPrincipal.pipe(
             Effect.mapError(() => internalError("Failed to resolve the current user."))
           )
@@ -123,7 +133,10 @@ export const TransactionsApiLive = HttpApiBuilder.group(TaxMaxiApi, "transaction
               principalId: principal.id,
               jurisdiction: GERMAN_JURISDICTION,
               reportingCurrency: EUR,
-              sourceId: query.sourceId ?? null,
+              sourceIds: query.sourceIds ?? (query.sourceId === undefined ? [] : [query.sourceId]),
+              from: query.from ?? null,
+              to: query.to ?? null,
+              order: query.order ?? "newest",
               cursor: query.cursor ?? null,
               limit: query.limit ?? defaultPageLimit,
             })
