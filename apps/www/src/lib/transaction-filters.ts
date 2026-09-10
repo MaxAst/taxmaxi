@@ -40,7 +40,8 @@ const transactionFilterSearchSchema = z
       .transform((values) => [...new Set(values)].sort())
       .optional(),
     from: localDate.optional(),
-    to: localDate.optional(),
+    // The inclusive end needs a following day inside the four-digit ISO range.
+    to: localDate.refine((date) => date !== "9999-12-31").optional(),
     timezone: timezone.optional(),
     order: z.enum(["newest", "oldest"]).optional(),
     attention: z.boolean().optional(),

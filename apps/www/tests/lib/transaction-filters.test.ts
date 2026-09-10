@@ -19,6 +19,20 @@ describe("transaction filter URL state", () => {
     })
   })
 
+  it.each([
+    ["UTC", "9999-12-30T00:00:00.000Z", "9999-12-31T00:00:00.000Z"],
+    ["America/New_York", "9999-12-30T05:00:00.000Z", "9999-12-31T05:00:00.000Z"],
+  ])("preserves the last supported end and final-day start in %s", (timezone, from, to) => {
+    expect(
+      transactionFilterInput(
+        validateTransactionSearch({ from: "9999-12-30", to: "9999-12-30", timezone })
+      )
+    ).toEqual({ from, to })
+    expect(
+      transactionFilterInput(validateTransactionSearch({ from: "9999-12-31", timezone }))
+    ).toEqual({ from: to })
+  })
+
   it("keeps saved timezone independent of the browser timezone", () => {
     const filters = validateTransactionSearch({
       from: "2026-03-29",
@@ -66,6 +80,8 @@ describe("transaction filter URL state", () => {
     { categories: ["made-up"] },
     { attention: "true" },
     { from: "2026-02-30" },
+    { from: "9999-12-31", to: "9999-12-31" },
+    { to: "9999-12-31" },
     { from: "2026-03-02", to: "2026-03-01" },
     { timezone: "not-a-timezone" },
   ])("rejects invalid external filter state %j", (search) => {
