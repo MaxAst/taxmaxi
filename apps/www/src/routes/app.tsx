@@ -1,7 +1,7 @@
 import {
   validateTransactionSearch,
   updateTransactionSearch,
-  transactionFilterSearchSchema,
+  parseTransactionFilters,
   type TransactionFilters,
 } from "#/lib/transaction-filters"
 import { Outlet, createFileRoute, redirect } from "@tanstack/react-router"
@@ -153,7 +153,7 @@ function RouteComponent() {
 
   const navigate = Route.useNavigate()
   const search = Route.useSearch()
-  const filters = useMemo(() => transactionFilterSearchSchema.parse(search), [search])
+  const filters = useMemo(() => parseTransactionFilters(search), [search])
   const onFiltersChange = useCallback(
     (next: TransactionFilters) => {
       void navigate({ search: (previous) => updateTransactionSearch(previous, next) })

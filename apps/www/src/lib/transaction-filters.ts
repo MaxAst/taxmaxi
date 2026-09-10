@@ -1,5 +1,6 @@
 import { z } from "zod"
 import type { TransactionListInput } from "taxmaxi"
+import { m } from "#/paraglide/messages"
 
 const category = z.enum([
   "purchase",
@@ -30,7 +31,7 @@ const timezone = z.string().refine((value) => {
 })
 
 /** URL dates are inclusive calendar dates in the saved timezone, never browser-local instants. */
-export const transactionFilterSearchSchema = z
+const transactionFilterSearchSchema = z
   .object({
     sourceIds: ids,
     assetIds: ids,
@@ -44,16 +45,29 @@ export const transactionFilterSearchSchema = z
     order: z.enum(["newest", "oldest"]).optional(),
     attention: z.boolean().optional(),
   })
-  .refine((value) => !value.from || !value.to || value.from <= value.to, {
-    message: "Date range ends before it starts",
-  })
+  .refine((value) => !value.from || !value.to || value.from <= value.to)
 
 export type TransactionFilters = z.output<typeof transactionFilterSearchSchema>
 export const EMPTY_TRANSACTION_FILTERS: TransactionFilters = {}
 
+/** Route errors display only localized copy, never raw schema issues or URL values. */
+export function parseTransactionFilters(input: unknown): TransactionFilters {
+  const result = transactionFilterSearchSchema.safeParse(input)
+  if (result.success) return result.data
+
+  const reversedDates = result.error.issues.some(
+    (issue) => issue.code === "custom" && issue.path.length === 0
+  )
+  throw new Error(
+    reversedDates
+      ? m["app.transactionFilters.reversedDates"]()
+      : m["app.transactionFilters.invalidUrl"]()
+  )
+}
+
 /** Keep other /app and child-route search keys while validating the filter boundary. */
 export function validateTransactionSearch(search: Record<string, unknown>) {
-  return { ...search, ...transactionFilterSearchSchema.parse(search) }
+  return { ...search, ...parseTransactionFilters(search) }
 }
 
 export function updateTransactionSearch(
@@ -73,7 +87,7 @@ export function updateTransactionSearch(
   ]) {
     delete rest[key]
   }
-  return { ...rest, ...transactionFilterSearchSchema.parse(filters) }
+  return { ...rest, ...parseTransactionFilters(filters) }
 }
 
 function dayStart(date: string, timeZone: string): string {

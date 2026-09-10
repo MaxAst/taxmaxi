@@ -16,6 +16,7 @@ import { afterEach, expect, it, vi } from "vitest"
 
 import { queries, queryKeys } from "#/integrations/taxmaxi/queries"
 import { Route } from "#/routes/app"
+import { setLocale } from "#/paraglide/runtime"
 
 const dashboard = vi.hoisted<{
   onSourceSyncCompleted: ((sourceId: string) => Promise<void>) | undefined
@@ -181,3 +182,54 @@ it("restores filter sets and timezone through real router Back while retaining u
   expect(router.state.location.search).toMatchObject({ unrelated: "keep", ...original })
   queryClient.clear()
 })
+
+it.each(["en", "de"] as const)(
+  "shows localized filter validation errors through the router boundary in %s",
+  async (locale) => {
+    const originalUrl = window.location.href
+    window.history.replaceState(null, "", "/app")
+    await setLocale(locale, { reload: false })
+    try {
+      const invalidFilters =
+        locale === "de"
+          ? "Die Transaktionsfilter in diesem Link sind ungültig. Prüfe die Filter und versuche es erneut."
+          : "The transaction filters in this link are invalid. Check the filters and try again."
+      const reversedDates =
+        locale === "de"
+          ? "Das Enddatum muss am oder nach dem Startdatum liegen."
+          : "The end date must be on or after the start date."
+      for (const [search, expected] of [
+        ["from=2026-03-02&to=2026-03-01", reversedDates],
+        ["from=2026-02-30", invalidFilters],
+        ["sourceIds=%5B%22invalid%22%5D", invalidFilters],
+        ["categories=%5B%22invalid%22%5D", invalidFilters],
+        ["timezone=invalid", invalidFilters],
+      ]) {
+        const root = createRootRouteWithContext<{
+          queryClient: QueryClient
+          taxmaxi: () => TaxMaxi
+        }>()()
+        const route = createRoute({
+          getParentRoute: () => root,
+          path: "/app",
+          validateSearch: Route.options.validateSearch,
+          errorComponent: ({ error }) => <p>{error.message}</p>,
+        })
+        const queryClient = new QueryClient()
+        const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://route.example.test" })
+        const router = createRouter({
+          routeTree: root.addChildren([route]),
+          history: createMemoryHistory({ initialEntries: [`/app?${search}`] }),
+          context: { queryClient, taxmaxi: () => taxmaxi },
+        })
+        const view = render(<RouterProvider router={router} />)
+        await waitFor(() => expect(view.container.textContent).toBe(expected))
+        view.unmount()
+        queryClient.clear()
+      }
+    } finally {
+      await setLocale("en", { reload: false })
+      window.history.replaceState(null, "", originalUrl)
+    }
+  }
+)
