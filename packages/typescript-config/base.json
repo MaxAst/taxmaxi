@@ -45,5 +45,8 @@
         }
       }
     ]
+  },
+  "watchOptions": {
+    "excludeDirectories": ["**/node_modules", "**/.claude", "**/dist", "**/.turbo"]
   }
 }
