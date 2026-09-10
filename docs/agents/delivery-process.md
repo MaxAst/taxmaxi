@@ -303,12 +303,21 @@ still apply. Merge only after required CI and review approve the exact final
 commit, subject to the `AGENTS.md` exception for carrying automated Codex
 approval across an unaffected rebase. Rerun checks when subsequent changes invalidate their evidence.
 
+Install dependencies with the repository lifecycle enabled before validation.
+If installation used `--ignore-scripts`, run `mise x -- pnpm run prepare` before
+checking code. This installs the Effect compiler and linter patches used by CI;
+unpatched local tools can silently miss failing diagnostics. After correcting
+the tool setup, clear compiler build-info files and bypass task caches for the
+checks whose earlier results used unpatched tools.
+
 Finish code generation before capturing browser screenshots or other browser
 proof, so generated-file changes cannot race the rendered app.
 
 For tests that open local listeners, default to OS-assigned ports (port 0)
 and read the actual bound address, unless the behavior under test requires a
-known port. Scope resources to the test, including independent
+known port. Bind to the same loopback address the client uses; do not replace
+an IPv6 wildcard listener address with an IPv4 client address. Scope resources
+to the test, including independent
 concurrent instances. Fixtures crossing a real boundary must contain realistic,
 valid typed facts; do not bypass a schema to make the fixture pass.
 

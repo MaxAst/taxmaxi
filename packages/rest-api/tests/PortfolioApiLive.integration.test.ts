@@ -3,7 +3,7 @@ import { SourceSyncQueueUnexpectedTestLive } from "./support/SourceSyncQueueUnex
 import { prepareMovementLegFixtures } from "../../persistence/tests/support/movement-leg-fixtures.ts"
 import * as DateTime from "effect/DateTime"
 import { HttpClient, HttpClientRequest, HttpRouter, HttpServer } from "effect/unstable/http"
-import { NodeHttpServer } from "@effect/platform-node"
+import { HttpServerTestLive } from "./support/http-server.ts"
 import { JurisdictionCode, TaxYear } from "@my/core/accounting"
 import {
   AuthService,
@@ -143,7 +143,7 @@ const HttpLive = HttpRouter.serve(
     Layer.provide(X402PaymentValidatorTestLive),
     Layer.provide(SimpleTokenValidatorLive)
   )
-).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(NodeHttpServer.layerTest))
+).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(HttpServerTestLive))
 
 const fixtureIds = {
   userId: "00000000-0000-4000-8000-000000000481",

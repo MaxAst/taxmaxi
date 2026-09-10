@@ -18,7 +18,7 @@ import * as DateTime from "effect/DateTime"
 import * as Statement from "effect/unstable/sql/Statement"
 import { HttpClient, HttpClientRequest, HttpRouter, HttpServer } from "effect/unstable/http"
 import { HttpApiClient } from "effect/unstable/httpapi"
-import { NodeHttpServer } from "@effect/platform-node"
+import { HttpServerTestLive } from "./support/http-server.ts"
 import {
   AuthService,
   HashedPassword,
@@ -138,7 +138,7 @@ const HttpLive = HttpRouter.serve(
     Layer.provide(X402PaymentValidatorTestLive),
     Layer.provide(SimpleTokenValidatorLive)
   )
-).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(NodeHttpServer.layerTest))
+).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(HttpServerTestLive))
 
 const makeAuthenticatedClient = ({ userId }: { readonly userId: string }) =>
   Effect.gen(function* () {
