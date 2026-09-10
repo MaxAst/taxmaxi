@@ -119,7 +119,10 @@ const decodeDecimal = ({
 
 const ownedLeg = (principalId: string) =>
   and(
-    eq(schema.transactionLegs.transactionId, schema.transactions.id),
+    or(
+      eq(schema.transactionLegs.transactionId, schema.transactions.id),
+      eq(schema.transactionLegs.feeForTransactionId, schema.transactions.id)
+    ),
     eq(schema.transactionLegs.principalId, principalId),
     eq(schema.transactions.principalId, principalId),
     eq(schema.transactionLegs.sourceId, schema.transactions.sourceId)

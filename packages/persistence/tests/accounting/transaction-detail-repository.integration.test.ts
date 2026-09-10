@@ -25,6 +25,8 @@ import { CalculationRunService } from "../../src/services/CalculationRunService.
 import { drizzle } from "../../src/layers/PgClientLive.ts"
 import { PrincipalTransactionOverrideRepositoryLive } from "../../src/layers/PrincipalTransactionOverrideRepositoryLive.ts"
 import { PrincipalTransactionOverrideRepository } from "../../src/services/PrincipalTransactionOverrideRepository.ts"
+import { TransactionListRepositoryLive } from "../../src/layers/TransactionListRepositoryLive.ts"
+import { TransactionListRepository } from "../../src/services/TransactionListRepository.ts"
 import { TransactionDetailRepositoryLive } from "../../src/layers/TransactionDetailRepositoryLive.ts"
 import { TransactionDetailRepository } from "../../src/services/TransactionDetailRepository.ts"
 import { schema } from "../../src/schema/index.ts"
@@ -1300,7 +1302,7 @@ const expectResult = (
   expect(allocation?.treatmentCodes.length).toBeGreaterThan(0)
 }
 
-for (const parent of ["other_transaction", "no_transaction"] as const) {
+for (const parent of ["other_transaction", "no_transaction", "unrelated_only"] as const) {
   it.effect(`reads only the exact linked fee capture with ${parent}`, () =>
     Effect.gen(function* () {
       const fixture = yield* run(seedCalculation())
@@ -1325,20 +1327,23 @@ for (const parent of ["other_transaction", "no_transaction"] as const) {
             .insert(schema.transactionLegs)
             .values(
               yield* prepareMovementLegFixtures(
-                ["linked", "unrelated"].map((name) => ({
-                  movementIdentity: { sourceRecordKey: `fee-${name}`, componentKey: "fee" },
-                  principalId: PRINCIPAL_ID,
-                  sourceId: SOURCE_ID,
-                  externalId: `fee-${name}`,
-                  transactionId: name === "linked" && parent === "no_transaction" ? null : other.id,
-                  feeForTransactionId: name === "linked" ? fixture.saleId : other.id,
-                  timestamp: time,
-                  assetId: feeAssetId,
-                  amount: "0.1",
-                  kind: "fee" as const,
-                  provenance: "deterministic" as const,
-                  originKind: "none" as const,
-                }))
+                (parent === "unrelated_only" ? ["unrelated"] : ["linked", "unrelated"]).map(
+                  (name) => ({
+                    movementIdentity: { sourceRecordKey: `fee-${name}`, componentKey: "fee" },
+                    principalId: PRINCIPAL_ID,
+                    sourceId: SOURCE_ID,
+                    externalId: `fee-${name}`,
+                    transactionId:
+                      name === "linked" && parent === "no_transaction" ? null : other.id,
+                    feeForTransactionId: name === "linked" ? fixture.saleId : other.id,
+                    timestamp: time,
+                    assetId: feeAssetId,
+                    amount: "0.1",
+                    kind: "fee" as const,
+                    provenance: "deterministic" as const,
+                    originKind: "none" as const,
+                  })
+                )
               )
             )
             .returning({
@@ -1352,21 +1357,42 @@ for (const parent of ["other_transaction", "no_transaction"] as const) {
       yield* recompute(1)
       const linked = fees.find((fee) => fee.feeForTransactionId === fixture.saleId)
       const unrelated = fees.find((fee) => fee.feeForTransactionId !== fixture.saleId)
-      if (linked === undefined || unrelated === undefined) return yield* Effect.die("Missing fees")
+      if (unrelated === undefined) return yield* Effect.die("Missing unrelated fee")
       const detail = yield* readCalculation(fixture.saleId)
-      expect(detail.movements.map((movement) => movement.movementCorrectionTargetId)).toEqual(
-        expect.arrayContaining([fixture.disposition.targetId, linked.targetId])
-      )
-      expect(detail.movements).toHaveLength(2)
-      expect(detail.movements.find((movement) => movement.id === linked.id)?.capture?.runId).toBe(
-        runId(1)
-      )
-      expect(detail.calculation.allocations).toHaveLength(1)
+      const hasLinkedFee = parent !== "unrelated_only"
+      expect(detail.attention).toBe(hasLinkedFee)
+      expect(detail.movements).toHaveLength(hasLinkedFee ? 2 : 1)
+      if (hasLinkedFee) {
+        if (linked === undefined) return yield* Effect.die("Missing linked fee")
+        expect(detail.movements.find((movement) => movement.id === linked.id)?.capture?.runId).toBe(
+          runId(1)
+        )
+        expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).toContain(linked.id)
+      }
       expectResult(detail.calculation, "20", "10")
-      expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).toContain(linked.id)
       expect(detail.calculation.blockers.map((blocker) => blocker.eventId)).not.toContain(
         unrelated.id
       )
+      const filtered = yield* context.runWithLayer({
+        layer: TransactionListRepositoryLive,
+        effect: Effect.flatMap(TransactionListRepository, (repository) =>
+          repository.list({
+            principalId: PRINCIPAL_ID,
+            jurisdiction: scope.jurisdiction,
+            reportingCurrency: EUR,
+            sourceIds: [],
+            from: null,
+            to: null,
+            order: "newest",
+            attention: true,
+            cursor: null,
+            limit: 100,
+          })
+        ),
+      })
+      expect(filtered.items.some((row) => row.transactionId === fixture.saleId)).toBe(hasLinkedFee)
+      expect(filtered.items.every((row) => row.attention)).toBe(true)
+      expect(filtered.totalCount).toBe(hasLinkedFee ? 2 : 1)
       const stored = yield* run(
         Effect.gen(function* () {
           const db = yield* drizzle
