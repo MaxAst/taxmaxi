@@ -4,7 +4,21 @@
  * @module TransactionListRepositoryLive
  */
 
-import { aliasedTable, and, asc, count, desc, eq, exists, inArray, lt, or, sql } from "drizzle-orm"
+import {
+  aliasedTable,
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  exists,
+  inArray,
+  gt,
+  gte,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm"
 import { AccountingEvent, ValuationFact, type JurisdictionCode } from "@my/core/accounting"
 import { CurrencyCode } from "@my/core/currency"
 import * as BigDecimal from "effect/BigDecimal"
@@ -80,7 +94,10 @@ const recordedYear = (timestamp: DateTime.Utc) =>
 
 interface TransactionReadScope {
   readonly principalId: string
-  readonly sourceId: string | null
+  readonly sourceIds: ReadonlyArray<string>
+  readonly from: string | null
+  readonly to: string | null
+  readonly order: "newest" | "oldest"
 }
 
 interface CursorParts {
@@ -125,9 +142,12 @@ const activeRunScope = (scope: CalculationReadScope) =>
 const matchingEventTaxYear = eq(schema.activeCalculationRuns.taxYear, eventTaxYear)
 
 const TransactionCursorPayload = Schema.Struct({
-  version: Schema.Literal(2),
+  version: Schema.Literal(3),
   principalId: Schema.String.check(Schema.isUUID()),
-  sourceId: Schema.NullOr(Schema.String.check(Schema.isUUID())),
+  sourceIds: Schema.Array(Schema.String.check(Schema.isUUID())),
+  from: Schema.NullOr(Schema.String),
+  to: Schema.NullOr(Schema.String),
+  order: Schema.Literals(["newest", "oldest"]),
   timestamp: Schema.DateFromString,
   id: Schema.String.check(Schema.isUUID()),
 })
@@ -139,7 +159,7 @@ const makeCursor = ({
   id,
   scope,
 }: CursorParts & { readonly scope: TransactionReadScope }): string =>
-  Schema.encodeSync(TransactionCursor)({ version: 2, timestamp, id, ...scope })
+  Schema.encodeSync(TransactionCursor)({ version: 3, timestamp, id, ...scope })
 
 const parseCursor = ({
   cursor,
@@ -154,7 +174,10 @@ const parseCursor = ({
         Effect.mapError(() => new TransactionListInvalidCursorError({ cursor })),
         Effect.flatMap((payload) =>
           payload.principalId.toLowerCase() === scope.principalId &&
-          (payload.sourceId?.toLowerCase() ?? null) === scope.sourceId
+          JSON.stringify(payload.sourceIds) === JSON.stringify(scope.sourceIds) &&
+          payload.from === scope.from &&
+          payload.to === scope.to &&
+          payload.order === scope.order
             ? Effect.succeed(Option.some({ id: payload.id, timestamp: payload.timestamp }))
             : Effect.fail(new TransactionListInvalidCursorError({ cursor }))
         )
@@ -195,7 +218,15 @@ const make = Effect.gen(function* () {
     and(
       eq(schema.transactions.principalId, scope.principalId),
       eq(schema.sources.principalId, scope.principalId),
-      scope.sourceId === null ? undefined : eq(schema.transactions.sourceId, scope.sourceId),
+      scope.sourceIds.length === 0
+        ? undefined
+        : inArray(schema.transactions.sourceId, scope.sourceIds),
+      scope.from === null
+        ? undefined
+        : gte(schema.transactions.timestamp, DateTime.toDateUtc(DateTime.makeUnsafe(scope.from))),
+      scope.to === null
+        ? undefined
+        : lt(schema.transactions.timestamp, DateTime.toDateUtc(DateTime.makeUnsafe(scope.to))),
       exists(
         executor
           .select({ id: schema.transactionLegs.id })
@@ -226,14 +257,16 @@ const make = Effect.gen(function* () {
     readonly limit: number
     readonly scope: TransactionReadScope
   }) => {
+    const compare = scope.order === "oldest" ? gt : lt
+    const ordering = scope.order === "oldest" ? asc : desc
     const cursorPredicate = Option.match(cursor, {
       onNone: () => undefined,
       onSome: (value) =>
         or(
-          lt(schema.transactions.timestamp, value.timestamp),
+          compare(schema.transactions.timestamp, value.timestamp),
           and(
             eq(schema.transactions.timestamp, value.timestamp),
-            lt(schema.transactions.id, value.id)
+            compare(schema.transactions.id, value.id)
           )
         ),
     })
@@ -253,7 +286,7 @@ const make = Effect.gen(function* () {
       .from(schema.transactions)
       .innerJoin(schema.sources, eq(schema.transactions.sourceId, schema.sources.id))
       .where(cursorPredicate === undefined ? predicate : and(predicate, cursorPredicate))
-      .orderBy(desc(schema.transactions.timestamp), desc(schema.transactions.id))
+      .orderBy(ordering(schema.transactions.timestamp), ordering(schema.transactions.id))
       .limit(limit + 1)
       .pipe(wrapSqlError("transactionListRepository.list.transactions"))
   }
@@ -1001,29 +1034,33 @@ const make = Effect.gen(function* () {
 
   const list: TransactionListRepositoryService["list"] = (params) =>
     Effect.gen(function* () {
-      const scope = {
+      const scope: TransactionReadScope = {
         principalId: params.principalId.toLowerCase(),
-        sourceId: params.sourceId?.toLowerCase() ?? null,
+        sourceIds: [...new Set(params.sourceIds.map((id) => id.toLowerCase()))].sort(),
+        from: params.from?.toISOString() ?? null,
+        to: params.to?.toISOString() ?? null,
+        order: params.order ?? "newest",
       }
       const cursor = yield* parseCursor({ cursor: params.cursor, scope })
       return yield* db
         .transaction((tx) =>
           Effect.gen(function* () {
             yield* tx.execute(sql`set transaction isolation level repeatable read`)
-            if (scope.sourceId !== null) {
+            if (scope.sourceIds.length > 0) {
               const sources = yield* tx
                 .select({ id: schema.sources.id })
                 .from(schema.sources)
                 .where(
                   and(
-                    eq(schema.sources.id, scope.sourceId),
+                    inArray(schema.sources.id, scope.sourceIds),
                     eq(schema.sources.principalId, scope.principalId)
                   )
                 )
-                .limit(1)
                 .pipe(wrapSqlError("transactionListRepository.list.source"))
-              if (sources.length === 0) {
-                return yield* new TransactionListSourceNotFoundError({ sourceId: scope.sourceId })
+              const ownedIds = new Set(sources.map((source) => source.id))
+              const missingId = scope.sourceIds.find((id) => !ownedIds.has(id))
+              if (missingId !== undefined) {
+                return yield* new TransactionListSourceNotFoundError({ sourceId: missingId })
               }
             }
             const totalCount = yield* loadTotalCount(tx, scope)
