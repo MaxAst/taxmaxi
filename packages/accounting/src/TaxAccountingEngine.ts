@@ -160,8 +160,16 @@ export interface ExplanationEntry {
   readonly matches: ReadonlyArray<ExplanationMatch>
 }
 
+/** Original movement quantity and the valuation selected before inventory consumption or tax eligibility. */
+export interface EventValuation {
+  readonly eventId: AccountingEventId
+  readonly quantity: AccountingQuantity
+  readonly resolution: ValuationResolution
+}
+
 /** Complete structural output of one pure engine invocation. */
 export interface TaxAccountingResult {
+  readonly eventValuations: ReadonlyArray<EventValuation>
   readonly status: "complete" | "partial"
   readonly jurisdiction: JurisdictionCode
   readonly taxYear: TaxYear
@@ -949,6 +957,8 @@ export const calculate = ({
       blockedInventoryKeys: new Set(),
     }
 
+    const eventValuations: EventValuation[] = []
+
     for (const event of orderedLedger) {
       if (event._tag === "custody_movement") {
         yield* processCustodyMovement({ event, inventoryScope, state })
@@ -962,6 +972,11 @@ export const calculate = ({
         inventoryScope,
       })
       const valuationResolution = selectValuation({ event, valuationFacts })
+      eventValuations.push({
+        eventId: event.id,
+        quantity: event.quantity,
+        resolution: valuationResolution,
+      })
       const valuation = valuationResolution._tag === "selected" ? valuationResolution : null
 
       if (event.cause === "unknown") {
@@ -1054,6 +1069,7 @@ export const calculate = ({
         `engine.inventory.${inventoryScope}`,
         ...GERMAN_APPLIED_RULES,
       ],
+      eventValuations,
       processedEventIds: orderedLedger.map((event) => event.id),
       allocations: allocationEntries.map(({ allocation }) => allocation),
       realizedResults: state.realizedResults

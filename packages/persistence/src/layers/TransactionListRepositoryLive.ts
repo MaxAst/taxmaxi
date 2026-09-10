@@ -4,11 +4,26 @@
  * @module TransactionListRepositoryLive
  */
 
-import { aliasedTable, and, asc, count, desc, eq, exists, inArray, lt, or, sql } from "drizzle-orm"
-import type { JurisdictionCode } from "@my/core/accounting"
-import type { CurrencyCode } from "@my/core/currency"
+import {
+  aliasedTable,
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  exists,
+  inArray,
+  gt,
+  gte,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm"
+import { AccountingEvent, ValuationFact, type JurisdictionCode } from "@my/core/accounting"
+import { CurrencyCode } from "@my/core/currency"
 import * as BigDecimal from "effect/BigDecimal"
 import * as Effect from "effect/Effect"
+import * as DateTime from "effect/DateTime"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
@@ -20,13 +35,69 @@ import {
   TransactionListSourceNotFoundError,
   type TransactionListItem,
   type TransactionListMovement,
+  type TransactionListMovementCapture,
   type TransactionListRepositoryService,
 } from "../services/TransactionListRepository.ts"
 import { drizzle } from "./PgClientLive.ts"
 
+const CapturedMovement = Schema.Struct({
+  targetId: Schema.String.check(Schema.isUUID()),
+  currentOutcome: Schema.Literals(["included", "withheld", "absent", "outside_period"]),
+  current: Schema.NullOr(
+    Schema.Struct({
+      quantity: Schema.toEncoded(Schema.BigDecimalFromString),
+      occurredAt: Schema.DateTimeUtcFromString,
+      legKind: Schema.Literals(["acquisition", "disposal", "income", "fee"]),
+      effectiveAssetId: Schema.NullOr(Schema.String.check(Schema.isUUID())),
+      storedAssetId: Schema.String.check(Schema.isUUID()),
+      custody: Schema.Array(
+        Schema.Struct({
+          reconciliationId: Schema.String.check(Schema.isUUID()),
+          occurredAt: Schema.DateTimeUtcFromString,
+        })
+      ),
+    })
+  ),
+  effective: Schema.Struct({
+    event: Schema.NullOr(Schema.toEncoded(AccountingEvent)),
+    valuationFacts: Schema.Array(Schema.toEncoded(ValuationFact)),
+  }),
+})
+
+const CapturedValuation = Schema.Union([
+  Schema.Struct({ _tag: Schema.Literals(["not_evaluated", "missing", "ambiguous"]) }),
+  Schema.TaggedStruct("selected", {
+    kind: Schema.Literals(["user_valuation", "observed_consideration", "market_quote"]),
+    total: Schema.Struct({
+      amount: Schema.toEncoded(Schema.BigDecimalFromString),
+      currency: CurrencyCode,
+    }),
+  }),
+])
+
+const INCOME_CAUSES = new Set([
+  "airdrop",
+  "mining_reward",
+  "staking_reward",
+  "passive_staking_reward",
+  "reward",
+  "payment",
+])
+
+interface CapturedMovementProjection {
+  readonly movement: TransactionListMovement & { readonly capture: TransactionListMovementCapture }
+  readonly income: BigDecimal.BigDecimal | null
+}
+
+const recordedYear = (timestamp: DateTime.Utc) =>
+  DateTime.getPart(DateTime.setZoneNamedUnsafe(timestamp, "Europe/Berlin"), "year")
+
 interface TransactionReadScope {
   readonly principalId: string
-  readonly sourceId: string | null
+  readonly sourceIds: ReadonlyArray<string>
+  readonly from: string | null
+  readonly to: string | null
+  readonly order: "newest" | "oldest"
 }
 
 interface CursorParts {
@@ -71,9 +142,12 @@ const activeRunScope = (scope: CalculationReadScope) =>
 const matchingEventTaxYear = eq(schema.activeCalculationRuns.taxYear, eventTaxYear)
 
 const TransactionCursorPayload = Schema.Struct({
-  version: Schema.Literal(2),
+  version: Schema.Literal(3),
   principalId: Schema.String.check(Schema.isUUID()),
-  sourceId: Schema.NullOr(Schema.String.check(Schema.isUUID())),
+  sourceIds: Schema.Array(Schema.String.check(Schema.isUUID())),
+  from: Schema.NullOr(Schema.String),
+  to: Schema.NullOr(Schema.String),
+  order: Schema.Literals(["newest", "oldest"]),
   timestamp: Schema.DateFromString,
   id: Schema.String.check(Schema.isUUID()),
 })
@@ -85,7 +159,7 @@ const makeCursor = ({
   id,
   scope,
 }: CursorParts & { readonly scope: TransactionReadScope }): string =>
-  Schema.encodeSync(TransactionCursor)({ version: 2, timestamp, id, ...scope })
+  Schema.encodeSync(TransactionCursor)({ version: 3, timestamp, id, ...scope })
 
 const parseCursor = ({
   cursor,
@@ -100,7 +174,10 @@ const parseCursor = ({
         Effect.mapError(() => new TransactionListInvalidCursorError({ cursor })),
         Effect.flatMap((payload) =>
           payload.principalId.toLowerCase() === scope.principalId &&
-          (payload.sourceId?.toLowerCase() ?? null) === scope.sourceId
+          JSON.stringify(payload.sourceIds) === JSON.stringify(scope.sourceIds) &&
+          payload.from === scope.from &&
+          payload.to === scope.to &&
+          payload.order === scope.order
             ? Effect.succeed(Option.some({ id: payload.id, timestamp: payload.timestamp }))
             : Effect.fail(new TransactionListInvalidCursorError({ cursor }))
         )
@@ -141,7 +218,15 @@ const make = Effect.gen(function* () {
     and(
       eq(schema.transactions.principalId, scope.principalId),
       eq(schema.sources.principalId, scope.principalId),
-      scope.sourceId === null ? undefined : eq(schema.transactions.sourceId, scope.sourceId),
+      scope.sourceIds.length === 0
+        ? undefined
+        : inArray(schema.transactions.sourceId, scope.sourceIds),
+      scope.from === null
+        ? undefined
+        : gte(schema.transactions.timestamp, DateTime.toDateUtc(DateTime.makeUnsafe(scope.from))),
+      scope.to === null
+        ? undefined
+        : lt(schema.transactions.timestamp, DateTime.toDateUtc(DateTime.makeUnsafe(scope.to))),
       exists(
         executor
           .select({ id: schema.transactionLegs.id })
@@ -172,14 +257,16 @@ const make = Effect.gen(function* () {
     readonly limit: number
     readonly scope: TransactionReadScope
   }) => {
+    const compare = scope.order === "oldest" ? gt : lt
+    const ordering = scope.order === "oldest" ? asc : desc
     const cursorPredicate = Option.match(cursor, {
       onNone: () => undefined,
       onSome: (value) =>
         or(
-          lt(schema.transactions.timestamp, value.timestamp),
+          compare(schema.transactions.timestamp, value.timestamp),
           and(
             eq(schema.transactions.timestamp, value.timestamp),
-            lt(schema.transactions.id, value.id)
+            compare(schema.transactions.id, value.id)
           )
         ),
     })
@@ -199,7 +286,7 @@ const make = Effect.gen(function* () {
       .from(schema.transactions)
       .innerJoin(schema.sources, eq(schema.transactions.sourceId, schema.sources.id))
       .where(cursorPredicate === undefined ? predicate : and(predicate, cursorPredicate))
-      .orderBy(desc(schema.transactions.timestamp), desc(schema.transactions.id))
+      .orderBy(ordering(schema.transactions.timestamp), ordering(schema.transactions.id))
       .limit(limit + 1)
       .pipe(wrapSqlError("transactionListRepository.list.transactions"))
   }
@@ -221,6 +308,7 @@ const make = Effect.gen(function* () {
       const rows = yield* executor
         .select({
           transactionId: schema.transactionLegs.transactionId,
+          targetId: schema.transactionLegs.movementCorrectionTargetId,
           amount: schema.transactionLegs.amount,
           assetSymbol: schema.assets.symbol,
           kind: schema.transactionLegs.kind,
@@ -240,6 +328,8 @@ const make = Effect.gen(function* () {
           Effect.map((amount): readonly [string | null, TransactionListMovement] => [
             row.transactionId,
             {
+              targetId: row.targetId,
+              capture: null,
               amount: BigDecimal.format(amount),
               assetSymbol: row.assetSymbol,
               kind: row.kind,
@@ -255,6 +345,242 @@ const make = Effect.gen(function* () {
         byTransaction.set(transactionId, movements)
       }
       return byTransaction
+    })
+
+  const loadCaptures = ({
+    executor,
+    scope,
+    transactionIds,
+  }: {
+    readonly executor: TransactionListExecutor
+    readonly scope: CalculationReadScope
+    readonly transactionIds: ReadonlyArray<string>
+  }) =>
+    Effect.gen(function* () {
+      const byTarget = new Map<string, CapturedMovementProjection>()
+      if (transactionIds.length === 0) return byTarget
+      const inputs = schema.calculationRunMovementInputs
+      // Replays can replace transaction/leg IDs. The owned durable target connects the
+      // current page to historical captures without rewriting their original transaction link.
+      const currentTarget = and(
+        eq(schema.transactionLegs.movementCorrectionTargetId, inputs.targetId),
+        eq(schema.transactionLegs.sourceId, inputs.sourceId),
+        eq(schema.transactionLegs.principalId, inputs.principalId)
+      )
+      const selectedPage = and(
+        eq(inputs.principalId, scope.principalId),
+        inArray(schema.transactionLegs.transactionId, transactionIds)
+      )
+      const rows = yield* executor
+        .select({
+          targetId: inputs.targetId,
+          runId: inputs.runId,
+          taxYear: schema.activeCalculationRuns.taxYear,
+          eventId: inputs.eventId,
+          captured: inputs.captured,
+          valuation: inputs.valuation,
+        })
+        .from(inputs)
+        .innerJoin(
+          schema.activeCalculationRuns,
+          and(eq(schema.activeCalculationRuns.runId, inputs.runId), activeRunScope(scope))
+        )
+        .innerJoin(schema.transactionLegs, currentTarget)
+        .where(selectedPage)
+        .pipe(wrapSqlError("transactionListRepository.list.captures"))
+      const candidates = yield* Effect.forEach(rows, (row) =>
+        Effect.gen(function* () {
+          const captured = yield* Schema.decodeEffect(CapturedMovement)(row.captured)
+          const valuation = yield* Schema.decodeEffect(CapturedValuation)(row.valuation)
+          const event = captured.effective.event
+          const current = captured.current
+          // An absent target has no completed movement facts or event year to project.
+          if (current === null) return null
+          const timestamps =
+            event !== null
+              ? [
+                  yield* Schema.decodeEffect(Schema.DateTimeUtcFromMillis)(
+                    event.occurredAt.epochMillis
+                  ),
+                ]
+              : current.custody.length > 0
+                ? current.custody.map((context) => context.occurredAt)
+                : [current.occurredAt]
+          return timestamps.some((timestamp) => recordedYear(timestamp) === row.taxYear)
+            ? { ...row, captured: { ...captured, current }, valuation }
+            : null
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new PersistenceError({
+                operation: "transactionListRepository.list.decodeCapture",
+                cause,
+              })
+          )
+        )
+      )
+      const decoded = candidates.filter((row) => row !== null)
+      const assetIds = [
+        ...new Set(
+          decoded.map(
+            ({ captured }) =>
+              captured.effective.event?.assetId ??
+              captured.current.effectiveAssetId ??
+              captured.current.storedAssetId
+          )
+        ),
+      ]
+      const assets =
+        assetIds.length === 0
+          ? []
+          : yield* executor
+              .select({ id: schema.assets.id, symbol: schema.assets.symbol })
+              .from(schema.assets)
+              .where(inArray(schema.assets.id, assetIds))
+              .pipe(wrapSqlError("transactionListRepository.list.capturedAssets"))
+      const symbols = new Map(assets.map((asset) => [asset.id, asset.symbol]))
+      const results = schema.calculationRunRealizedResults
+      const allocations = yield* executor
+        .select({
+          targetId: inputs.targetId,
+          runId: inputs.runId,
+          acquisitionEventId: results.acquisitionEventId,
+          quantity: results.quantity,
+          costBasis: results.costBasis,
+          proceeds: results.proceeds,
+          gainLoss: results.gainLoss,
+        })
+        .from(inputs)
+        .innerJoin(
+          schema.activeCalculationRuns,
+          and(eq(schema.activeCalculationRuns.runId, inputs.runId), activeRunScope(scope))
+        )
+        .innerJoin(
+          results,
+          and(
+            eq(results.runId, inputs.runId),
+            eq(results.dispositionEventId, inputs.eventId),
+            eq(results.sourceId, inputs.sourceId)
+          )
+        )
+        .innerJoin(schema.transactionLegs, currentTarget)
+        .where(selectedPage)
+        .orderBy(asc(results.sequence))
+        .pipe(wrapSqlError("transactionListRepository.list.capturedResults"))
+      const incomeResults = schema.calculationRunIncomeResults
+      const incomeRows = yield* executor
+        .select({ targetId: inputs.targetId, runId: inputs.runId, value: incomeResults.value })
+        .from(inputs)
+        .innerJoin(
+          schema.activeCalculationRuns,
+          and(eq(schema.activeCalculationRuns.runId, inputs.runId), activeRunScope(scope))
+        )
+        .innerJoin(
+          incomeResults,
+          and(
+            eq(incomeResults.runId, inputs.runId),
+            eq(incomeResults.eventId, inputs.eventId),
+            eq(incomeResults.sourceId, inputs.sourceId)
+          )
+        )
+        .innerJoin(schema.transactionLegs, currentTarget)
+        .where(selectedPage)
+        .pipe(wrapSqlError("transactionListRepository.list.capturedIncome"))
+      for (const { targetId, runId, eventId, captured, valuation } of decoded) {
+        if (byTarget.has(targetId))
+          return yield* new PersistenceError({
+            operation: "transactionListRepository.list.captureScope",
+            cause: "Multiple active captures describe the same movement period",
+          })
+        const event = captured.effective.event
+        const assetId =
+          event?.assetId ?? captured.current.effectiveAssetId ?? captured.current.storedAssetId
+        const assetSymbol = symbols.get(assetId)
+        if (assetSymbol === undefined)
+          return yield* new PersistenceError({
+            operation: "transactionListRepository.list.capturedAsset",
+            cause: "Captured movement references missing asset metadata",
+          })
+        const realizedResults = yield* Effect.forEach(
+          allocations.filter((row) => row.targetId === targetId && row.runId === runId),
+          (row) =>
+            Effect.gen(function* () {
+              const amount = (value: string) =>
+                decodeDecimal({
+                  operation: "transactionListRepository.list.capturedResultAmount",
+                  value,
+                }).pipe(Effect.map(BigDecimal.format))
+              const amounts = yield* Effect.all({
+                quantity: amount(row.quantity),
+                costBasis: amount(row.costBasis),
+                proceeds: amount(row.proceeds),
+                gainLoss: amount(row.gainLoss),
+              })
+              return {
+                acquisitionEventId: row.acquisitionEventId,
+                ...amounts,
+                currency: scope.reportingCurrency,
+              }
+            })
+        )
+        const quantity = yield* decodeDecimal({
+          operation: "transactionListRepository.list.capturedQuantity",
+          value: event?.quantity ?? captured.current.quantity,
+        }).pipe(Effect.map(BigDecimal.format))
+        const money = ({
+          amount,
+          currency,
+        }: {
+          readonly amount: string
+          readonly currency: string
+        }) =>
+          decodeDecimal({
+            operation: "transactionListRepository.list.capturedMoney",
+            value: amount,
+          }).pipe(Effect.map((value) => ({ amount: BigDecimal.format(value), currency })))
+        const selectedValue =
+          valuation._tag === "selected"
+            ? { kind: valuation.kind, ...(yield* money(valuation.total)) }
+            : null
+        const providerConsiderations = yield* Effect.forEach(
+          captured.effective.valuationFacts.flatMap((fact) =>
+            fact._tag === "observed_consideration" && fact.eventId === eventId ? [fact.amount] : []
+          ),
+          money
+        )
+        const capture: TransactionListMovementCapture = {
+          runId,
+          eventId,
+          outcome: captured.currentOutcome,
+          quantity,
+          assetId,
+          assetSymbol,
+          eventKind: event?._tag ?? null,
+          cause: event === null || event._tag === "custody_movement" ? null : event.cause,
+          valuationState: valuation._tag,
+          selectedValue,
+          providerConsiderations,
+          acquisitionCostBasis: null,
+          realizedResults,
+        }
+        let kind = captured.current.legKind
+        if (event?._tag === "disposition") kind = event.cause === "fee" ? "fee" : "disposal"
+        if (event?._tag === "acquisition")
+          kind = INCOME_CAUSES.has(event.cause) ? "income" : "acquisition"
+        const incomeAmounts = yield* Effect.forEach(
+          incomeRows.filter((row) => row.targetId === targetId && row.runId === runId),
+          (row) =>
+            decodeDecimal({
+              operation: "transactionListRepository.list.capturedIncomeAmount",
+              value: row.value,
+            })
+        )
+        byTarget.set(targetId, {
+          movement: { targetId, amount: quantity, assetSymbol, kind, capture },
+          income: incomeAmounts.length === 0 ? null : BigDecimal.sumAll(incomeAmounts),
+        })
+      }
+      return byTarget
     })
 
   const loadGainLoss = ({
@@ -708,29 +1034,33 @@ const make = Effect.gen(function* () {
 
   const list: TransactionListRepositoryService["list"] = (params) =>
     Effect.gen(function* () {
-      const scope = {
+      const scope: TransactionReadScope = {
         principalId: params.principalId.toLowerCase(),
-        sourceId: params.sourceId?.toLowerCase() ?? null,
+        sourceIds: [...new Set(params.sourceIds.map((id) => id.toLowerCase()))].sort(),
+        from: params.from?.toISOString() ?? null,
+        to: params.to?.toISOString() ?? null,
+        order: params.order ?? "newest",
       }
       const cursor = yield* parseCursor({ cursor: params.cursor, scope })
       return yield* db
         .transaction((tx) =>
           Effect.gen(function* () {
             yield* tx.execute(sql`set transaction isolation level repeatable read`)
-            if (scope.sourceId !== null) {
+            if (scope.sourceIds.length > 0) {
               const sources = yield* tx
                 .select({ id: schema.sources.id })
                 .from(schema.sources)
                 .where(
                   and(
-                    eq(schema.sources.id, scope.sourceId),
+                    inArray(schema.sources.id, scope.sourceIds),
                     eq(schema.sources.principalId, scope.principalId)
                   )
                 )
-                .limit(1)
                 .pipe(wrapSqlError("transactionListRepository.list.source"))
-              if (sources.length === 0) {
-                return yield* new TransactionListSourceNotFoundError({ sourceId: scope.sourceId })
+              const ownedIds = new Set(sources.map((source) => source.id))
+              const missingId = scope.sourceIds.find((id) => !ownedIds.has(id))
+              if (missingId !== undefined) {
+                return yield* new TransactionListSourceNotFoundError({ sourceId: missingId })
               }
             }
             const totalCount = yield* loadTotalCount(tx, scope)
@@ -747,11 +1077,12 @@ const make = Effect.gen(function* () {
               jurisdiction: params.jurisdiction,
               reportingCurrency: params.reportingCurrency,
             } satisfies CalculationReadScope
-            const [movements, gainLoss, reviewStates] = yield* Effect.all(
+            const [movements, gainLoss, reviewStates, captures] = yield* Effect.all(
               [
                 loadMovements({ executor: tx, principalId: scope.principalId, transactionIds }),
                 loadGainLoss({ executor: tx, scope: calculationScope, transactionIds }),
                 loadReviewStates({ executor: tx, principalId: scope.principalId, transactionIds }),
+                loadCaptures({ executor: tx, scope: calculationScope, transactionIds }),
               ],
               { concurrency: 1 }
             )
@@ -766,6 +1097,30 @@ const make = Effect.gen(function* () {
               const totals = gainLoss.byTransactionId.get(row.transactionId)
               const isPartial =
                 partialTransactionIds.has(row.transactionId) || totals?.isPartial === true
+              const capturedMovements = (movements.get(row.transactionId) ?? []).flatMap(
+                (movement) => {
+                  const projection = captures.get(movement.targetId)
+                  return projection === undefined ? [] : [projection]
+                }
+              )
+              const captureResults = capturedMovements.flatMap(
+                (projection) => projection.movement.capture.realizedResults
+              )
+              const capturedGain =
+                captureResults.length === 0
+                  ? null
+                  : BigDecimal.format(
+                      BigDecimal.sumAll(
+                        captureResults.map((result) => BigDecimal.fromStringUnsafe(result.gainLoss))
+                      )
+                    )
+              const incomeAmounts = capturedMovements.flatMap((projection) =>
+                projection.income === null ? [] : [projection.income]
+              )
+              const incomeAmount =
+                incomeAmounts.length === 0
+                  ? null
+                  : BigDecimal.format(BigDecimal.sumAll(incomeAmounts))
               return {
                 transactionId: row.transactionId,
                 timestamp: row.timestamp.toISOString(),
@@ -777,9 +1132,15 @@ const make = Effect.gen(function* () {
                 transactionType: row.transactionType,
                 description: row.description,
                 externalId: row.externalId,
-                movements: movements.get(row.transactionId) ?? [],
-                realizedGainLoss: isPartial ? null : (totals?.realizedGainLoss ?? null),
-                fiatCurrency: isPartial ? null : (totals?.fiatCurrency ?? null),
+                movements: (movements.get(row.transactionId) ?? []).map(
+                  (movement) => captures.get(movement.targetId)?.movement ?? movement
+                ),
+                income: incomeAmount,
+                realizedGainLoss: capturedGain,
+                fiatCurrency:
+                  capturedGain === null && incomeAmount === null
+                    ? null
+                    : calculationScope.reportingCurrency,
                 calculationState: isPartial ? "partial" : "complete",
                 needsReview: reviewStates.get(row.transactionId) ?? false,
               }

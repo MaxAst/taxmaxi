@@ -294,6 +294,7 @@ const make = Effect.gen(function* () {
             inputLedgerRevision: snapshot.inputLedgerRevision,
             valuationRevision: snapshot.valuationRevision,
             result: combinedResult,
+            movements: snapshot.factualLedger.movements,
             correctionInputs: snapshot.factualLedger.correctionInputs,
             syncCapture: snapshot.syncCapture,
           })

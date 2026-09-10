@@ -1,11 +1,15 @@
 import { prepareMovementLegFixtures } from "../support/movement-leg-fixtures.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
+import { AuthUserId } from "@my/core/authentication"
 import { CurrencyCode } from "@my/core/currency"
 import { PrincipalId } from "@my/core/ownership"
 import { and, eq, sql } from "drizzle-orm"
 import * as BigDecimal from "effect/BigDecimal"
 import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
+import * as Option from "effect/Option"
+import { PrincipalTransactionOverrideRepositoryLive } from "../../src/layers/PrincipalTransactionOverrideRepositoryLive.ts"
+import { PrincipalTransactionOverrideRepository } from "../../src/services/PrincipalTransactionOverrideRepository.ts"
 import { makeFactualLedgerSnapshotReader } from "../../src/layers/FactualLedgerSnapshotReader.ts"
 import { FactualLedgerRepositoryLive } from "../../src/layers/FactualLedgerRepositoryLive.ts"
 import { drizzle } from "../../src/layers/PgClientLive.ts"
@@ -14,12 +18,12 @@ import { FactualLedgerRepository } from "../../src/services/FactualLedgerReposit
 import {
   TEST_BTC_ASSET_ID,
   TEST_BTC_REPRESENTATION_ID,
-  TEST_USER_ID,
   makeIntegrationTestDatabaseContext,
   seedSyncEngineAssets,
   seedSyncEngineRepositoryFixture,
 } from "../support/integration-test-kit.ts"
 
+const TEST_USER_ID = AuthUserId.make("00000000-0000-4000-8000-000000000181")
 const TEST_CUSTODY_SOURCE_ID = "00000000-0000-4000-8000-000000000281"
 const TEST_CUSTODY_SOURCE_USE_ID = "00000000-0000-4000-8000-000000000291"
 const TEST_DESTINATION_SOURCE_ID = "00000000-0000-4000-8000-000000000282"
@@ -546,6 +550,7 @@ describe("FactualLedgerRepositoryLive", () => {
         const fixture = yield* Effect.promise(() =>
           runPg(
             seedSyncEngineRepositoryFixture({
+              userId: TEST_USER_ID,
               principalId: TEST_PRINCIPAL_ID,
               sourceId: TEST_CUSTODY_SOURCE_ID,
             })
@@ -570,6 +575,139 @@ describe("FactualLedgerRepositoryLive", () => {
         )
       })
     )
+  )
+
+  it.effect("captures one good and one withheld movement with an explicit absent event", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            for (const [providerAssetRowId, providerAssetId, excluded] of [
+              [MIXED_PROVIDER_ASSET_ROW_ID, "capture-withheld", true],
+              [MIXED_OTHER_PROVIDER_ASSET_ROW_ID, "capture-good", false],
+            ] as const) {
+              yield* seedProviderBoundaryAsset({
+                providerAssetRowId,
+                providerAssetId,
+                canonicalAssetId: TEST_BTC_ASSET_ID,
+              })
+              if (excluded)
+                yield* createProviderOverride({
+                  providerAssetRowId,
+                  kind: "inclusion",
+                  replacementInclusion: "excluded",
+                })
+              yield* seedProviderBoundaryTransaction({
+                externalId: providerAssetId,
+                legs: [
+                  {
+                    externalId: `${providerAssetId}-leg`,
+                    assetId: TEST_BTC_ASSET_ID,
+                    kind: "acquisition",
+                    providerAssetRowId,
+                  },
+                ],
+              })
+            }
+          })
+        )
+      )
+      const ledger = yield* Effect.promise(loadFactualLedger)
+      const movements = [...ledger.movements.values()]
+      expect(movements).toHaveLength(2)
+      expect(movements.filter((movement) => movement.effective.event !== null)).toHaveLength(1)
+      const withheld = movements.find((movement) => movement.currentOutcome === "withheld")
+      expect(withheld?.current).not.toBeNull()
+      expect(withheld?.effective).toEqual({ event: null, valuationFacts: [] })
+      expect(withheld?.corrections).toEqual([])
+      expect(ledger.events).toHaveLength(1)
+    })
+  )
+
+  it.effect("captures combined price and category facts alongside an uncorrected movement", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() =>
+        runPg(
+          Effect.gen(function* () {
+            yield* seedProviderBoundaryAsset({
+              providerAssetRowId: PROVIDER_ASSET_ROW_ID,
+              providerAssetId: "combined-capture",
+              canonicalAssetId: TEST_BTC_ASSET_ID,
+            })
+            for (const externalId of ["corrected-capture", "uncorrected-capture"]) {
+              yield* seedProviderBoundaryTransaction({
+                externalId,
+                legs: [
+                  {
+                    externalId: `${externalId}-leg`,
+                    assetId: TEST_BTC_ASSET_ID,
+                    kind: "acquisition",
+                    providerAssetRowId: PROVIDER_ASSET_ROW_ID,
+                  },
+                ],
+              })
+            }
+          })
+        )
+      )
+      const initial = yield* Effect.promise(loadFactualLedger)
+      const movement = [...initial.movements.values()].find(
+        (entry) => entry.effective.event?.transactionReference === "corrected-capture"
+      )
+      if (movement === undefined) return yield* Effect.die("Missing synthetic movement")
+      const reportingCurrency = CurrencyCode.make("EUR")
+      yield* context.runWithLayer({
+        layer: PrincipalTransactionOverrideRepositoryLive,
+        effect: Effect.flatMap(PrincipalTransactionOverrideRepository, (repository) =>
+          Effect.gen(function* () {
+            const inputs = [
+              {
+                _tag: "price",
+                input: { _tag: "total_value", amount: "20", currency: reportingCurrency },
+              },
+              { _tag: "classification", input: { _tag: "inbound", cause: "gift" } },
+            ] as const
+            for (const input of inputs) {
+              const found = yield* repository.findContext({
+                principalId: TEST_PRINCIPAL_ID,
+                targetId: movement.targetId,
+                reportingCurrency,
+              })
+              if (Option.isNone(found) || found.value.current === null)
+                return yield* Effect.die("Missing synthetic correction context")
+              yield* repository.create({
+                principalId: TEST_PRINCIPAL_ID,
+                actorUserId: TEST_USER_ID,
+                targetId: movement.targetId,
+                reportingCurrency,
+                expectedLeafId: null,
+                expectedSystemRevision: found.value.current.facts.systemRevision,
+                reason: "Synthetic combined capture proof",
+                input,
+              })
+            }
+          })
+        ),
+      })
+      const ledger = yield* Effect.promise(loadFactualLedger)
+      expect(ledger.movements.size).toBe(2)
+      const captured = ledger.movements.get(movement.targetId)
+      expect(captured?.effective.event).toMatchObject({
+        cause: "gift",
+        id: movement.effective.event?.id,
+      })
+      expect(captured?.effective.valuationFacts).toContainEqual(
+        expect.objectContaining({
+          _tag: "user_valuation",
+          amount: { amount: "20", currency: "EUR" },
+        })
+      )
+      expect(captured?.effective.classificationEvidence?._tag).toBe("user_assertion")
+      expect(captured?.corrections).toHaveLength(2)
+      expect(
+        [...ledger.movements.values()].filter((entry) => entry.corrections.length === 0)
+      ).toHaveLength(1)
+    })
   )
 
   it.effect("loads stored legs as a deterministically ordered factual ledger", () =>
@@ -695,7 +833,7 @@ describe("FactualLedgerRepositoryLive", () => {
           )
         )
       )
-      expect(snapshot.ledger).toEqual(result)
+      expect({ ...snapshot.ledger, movements: snapshot.movements }).toEqual(result)
       expect(snapshot.movements.size).toBe(4)
       expect(
         [...snapshot.movements.values()].every(
@@ -1661,6 +1799,12 @@ describe("FactualLedgerRepositoryLive", () => {
       expect(ledger.events[0]?._tag).toBe("acquisition")
       expect(ledger.events[0]?.assetId).toBe(TEST_BTC_ASSET_ID)
       expect(ledger.events[0]?.transactionReference).toBe("provider-boundary-unrelated")
+      expect(ledger.movements.size).toBe(3)
+      const captured = [...ledger.movements.values()]
+      expect(captured.filter((movement) => movement.effective.event !== null)).toHaveLength(1)
+      expect(captured.filter((movement) => movement.effective.event === null)).toHaveLength(2)
+      expect(captured.every((movement) => movement.current !== null)).toBe(true)
+      expect(captured.every((movement) => movement.corrections.length === 0)).toBe(true)
     })
   )
 
@@ -2288,7 +2432,7 @@ describe("FactualLedgerRepositoryLive", () => {
           })
         )
       )
-      expect(shared.ledger).toEqual(result)
+      expect({ ...shared.ledger, movements: shared.movements }).toEqual(result)
       expect(
         [...shared.movements.values()].flatMap((value) => value.system.valuationFacts)
       ).toHaveLength(2)

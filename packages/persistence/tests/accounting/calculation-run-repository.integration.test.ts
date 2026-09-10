@@ -196,6 +196,7 @@ const completeResult = ({
   readonly jurisdiction?: string
   readonly taxYear?: number
 } = {}): TaxAccountingResult => ({
+  eventValuations: [],
   status: "complete",
   jurisdiction: JurisdictionCode.make(jurisdiction),
   taxYear: TaxYear.make(taxYear),
@@ -284,6 +285,7 @@ const persistResult = ({
     const sequence = inputSequence ?? (id.slice(-12).replace(/^0+/, "") || "0")
 
     return repository.persist({
+      movements: new Map(),
       writeMode: "atomic",
       syncCapture: { requestIds: [] },
       correctionInputs: [],
@@ -631,6 +633,7 @@ describe("CalculationRunRepositoryLive", () => {
       const changed = yield* runRepository(
         Effect.flatMap(CalculationRunRepository, (repository) =>
           repository.persist({
+            movements: new Map(),
             writeMode: "finalize_started",
             ...params,
             result,
@@ -645,7 +648,12 @@ describe("CalculationRunRepositoryLive", () => {
       expect((yield* readRunSettlement(RUN_ID)).run).toMatchObject({ status: "running" })
       yield* runRepository(
         Effect.flatMap(CalculationRunRepository, (repository) =>
-          repository.persist({ writeMode: "finalize_started", ...params, result })
+          repository.persist({
+            movements: new Map(),
+            writeMode: "finalize_started",
+            ...params,
+            result,
+          })
         )
       )
       expect((yield* readRunSettlement(RUN_ID)).run).toMatchObject({ status: "complete" })
@@ -695,6 +703,7 @@ describe("CalculationRunRepositoryLive", () => {
         const rejected = yield* runRepository(
           Effect.flatMap(CalculationRunRepository, (repository) =>
             repository.persist({
+              movements: new Map(),
               writeMode: "finalize_started",
               ...params,
               correctionInputs: [],
@@ -712,7 +721,12 @@ describe("CalculationRunRepositoryLive", () => {
         })
         yield* runRepository(
           Effect.flatMap(CalculationRunRepository, (repository) =>
-            repository.persist({ writeMode: "finalize_started", ...params, result })
+            repository.persist({
+              movements: new Map(),
+              writeMode: "finalize_started",
+              ...params,
+              result,
+            })
           )
         )
         expect((yield* readRunSettlement(RUN_ID)).run).toEqual({
@@ -871,6 +885,7 @@ describe("CalculationRunRepositoryLive", () => {
         yield* runRepository(
           Effect.flatMap(CalculationRunRepository, (repository) =>
             repository.persist({
+              movements: new Map(),
               writeMode: "atomic",
               id: RUN_ID,
               principalId: TEST_PRINCIPAL_ID,
@@ -2117,6 +2132,7 @@ describe("CalculationRunRepositoryLive", () => {
           const write = () =>
             Effect.match(
               repository.persist({
+                movements: new Map(),
                 writeMode: "atomic",
                 syncCapture: { requestIds: [] },
                 correctionInputs: [],
@@ -2539,6 +2555,59 @@ describe("CalculationRunRepositoryLive", () => {
         live: { custodyUnitId: GROUPED_CUSTODY_UNIT_ID },
         snapshot: { custodyUnitId: TEST_SOURCE_ID, sourceId: TEST_SOURCE_ID },
       })
+    })
+  )
+
+  it.effect("rolls back movement captures and results when finalization fails", () =>
+    Effect.gen(function* () {
+      yield* runPgEffect(seedCalculationRunFixture())
+      yield* runPgEffect(
+        seedAcquisitionFact({
+          eventId: ACQUISITION_EVENT_ID,
+          externalId: "capture-rollback",
+          providerFiatAmount: "20",
+        })
+      )
+      yield* runPgEffect(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db.execute(
+            sql.raw(`
+          create or replace function reject_capture_finalization() returns trigger as $$
+          begin raise exception 'forced capture finalization failure'; end;
+          $$ language plpgsql;
+          create trigger reject_capture_finalization before insert or update on active_calculation_runs
+          for each row execute function reject_capture_finalization();
+        `)
+          )
+        })
+      )
+      yield* runCalculationService(Effect.flip(recomputeResult({ id: FOURTH_RUN_ID })))
+      const stored = yield* runPgEffect(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const captures = yield* db
+            .select({ runId: schema.calculationRunMovementInputs.runId })
+            .from(schema.calculationRunMovementInputs)
+          const lots = yield* db
+            .select({ runId: schema.calculationRunDerivedLots.runId })
+            .from(schema.calculationRunDerivedLots)
+          const results = yield* db
+            .select({ runId: schema.calculationRunRealizedResults.runId })
+            .from(schema.calculationRunRealizedResults)
+          return { captures, lots, results }
+        })
+      )
+      expect(stored).toEqual({ captures: [], lots: [], results: [] })
+      expect((yield* readRunSettlement(FOURTH_RUN_ID)).run?.status).toBe("failed")
+      yield* runPgEffect(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          yield* db.execute(
+            sql`drop trigger reject_capture_finalization on active_calculation_runs`
+          )
+        })
+      )
     })
   )
 

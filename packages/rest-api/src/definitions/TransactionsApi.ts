@@ -6,6 +6,9 @@
 
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import * as Schema from "effect/Schema"
+import * as DateTime from "effect/DateTime"
+import * as Option from "effect/Option"
+import * as SchemaTransformation from "effect/SchemaTransformation"
 import { AssetOverrideCurrentResponse } from "./AssetOverridesApi.ts"
 import {
   TransactionOverrideCurrentResponse,
@@ -21,14 +24,34 @@ export class TransactionBadRequestError extends Schema.TaggedError<TransactionBa
   { httpApiStatus: 400 }
 ) {}
 
+// An explicit UTC offset keeps boundaries independent of the API host timezone.
+const TransactionDateBoundary = Schema.String.check(
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/),
+  Schema.makeFilter(
+    (value) => {
+      // Validate the written calendar/time before applying its offset; Date parsing can roll days forward.
+      const localSecond = value.slice(0, 19)
+      return DateTime.make(`${localSecond}Z`).pipe(
+        Option.exists((date) => DateTime.formatIso(date).slice(0, 19) === localSecond)
+      )
+    },
+    { expected: "a real calendar date and time" }
+  )
+).pipe(Schema.decodeTo(Schema.Date, SchemaTransformation.dateFromString))
+
+/** Empty source selection means all owned sources; dates form a UTC half-open interval. */
 export const TransactionListQuery = Schema.Struct({
   sourceId: Schema.optional(Schema.String.check(Schema.isUUID())),
+  sourceIds: Schema.optional(Schema.Array(Schema.String.check(Schema.isUUID()))),
+  from: Schema.optional(TransactionDateBoundary),
+  to: Schema.optional(TransactionDateBoundary),
+  order: Schema.optional(Schema.Literals(["newest", "oldest"])),
   cursor: Schema.optional(Schema.String),
   limit: Schema.optional(
     Schema.FiniteFromString.check(
       Schema.isInt(),
       Schema.isGreaterThanOrEqualTo(1),
-      Schema.isLessThanOrEqualTo(100)
+      Schema.isLessThanOrEqualTo(500)
     )
   ),
 })
@@ -42,10 +65,46 @@ export class TransactionListSource extends Schema.Class<TransactionListSource>(
   kind: Schema.Literals(["onchain", "cex", "dex"]),
 }) {}
 
+/** Values and identity captured together by one completed calculation. */
+export const TransactionListMovementCapture = Schema.Struct({
+  runId: Schema.String,
+  eventId: Schema.NullOr(Schema.String),
+  outcome: Schema.Literals(["included", "withheld", "absent", "outside_period"]),
+  quantity: Schema.NullOr(Schema.String),
+  assetId: Schema.NullOr(Schema.String),
+  assetSymbol: Schema.NullOr(Schema.String),
+  eventKind: Schema.NullOr(Schema.Literals(["acquisition", "disposition", "custody_movement"])),
+  cause: Schema.NullOr(Schema.String),
+  valuationState: Schema.Literals(["selected", "not_evaluated", "missing", "ambiguous"]),
+  selectedValue: Schema.NullOr(
+    Schema.Struct({
+      kind: Schema.Literals(["user_valuation", "observed_consideration", "market_quote"]),
+      amount: Schema.String,
+      currency: Schema.String,
+    })
+  ),
+  providerConsiderations: Schema.Array(
+    Schema.Struct({ amount: Schema.String, currency: Schema.String })
+  ),
+  acquisitionCostBasis: Schema.Null,
+  realizedResults: Schema.Array(
+    Schema.Struct({
+      acquisitionEventId: Schema.String,
+      quantity: Schema.String,
+      costBasis: Schema.String,
+      proceeds: Schema.String,
+      gainLoss: Schema.String,
+      currency: Schema.String,
+    })
+  ),
+})
+
 /** Compact movement facts for a transaction row. */
 export class TransactionListMovement extends Schema.Class<TransactionListMovement>(
   "TransactionListMovement"
 )({
+  targetId: Schema.String,
+  capture: Schema.NullOr(TransactionListMovementCapture),
   amount: Schema.String,
   assetSymbol: Schema.String,
   kind: Schema.Literals(["acquisition", "disposal", "income", "fee"]),
@@ -56,10 +115,13 @@ export class TransactionListItem extends Schema.Class<TransactionListItem>("Tran
   transactionId: Schema.String,
   timestamp: Schema.String,
   source: TransactionListSource,
+  /** Imported category; corrected causes belong to the completed movement captures. */
   transactionType: Schema.NullOr(Schema.String),
   description: Schema.NullOr(Schema.String),
   externalId: Schema.NullOr(Schema.String),
   movements: Schema.Array(TransactionListMovement),
+  /** Income value in fiatCurrency from the active calculation. */
+  income: Schema.NullOr(Schema.String),
   realizedGainLoss: Schema.NullOr(Schema.String),
   fiatCurrency: Schema.NullOr(Schema.String),
   calculationState: Schema.Literals(["complete", "partial"]),
@@ -261,7 +323,7 @@ const listTransactions = HttpApiEndpoint.get("listTransactions", "/transactions"
   OpenApi.annotations({
     summary: "List transactions",
     description:
-      "Returns a stable cursor page of compact accounting transactions owned by the authenticated principal, optionally restricted to one owned source. Rows and totalCount exclude provider activity without accounting movements.",
+      "Returns a stable cursor page of compact accounting transactions owned by the authenticated principal. Select exact owned sources with repeated sourceIds parameters or the sourceId shorthand, never both. Omitted or empty sourceIds selects all owned sources. Optional from/to timestamps require explicit UTC offsets and form an inclusive-start, exclusive-end interval. Order is newest (default) or oldest, with transaction IDs breaking timestamp ties. Cursors are bound to the source set, dates and order. Rows and totalCount share these filters and exclude provider activity without accounting movements.",
   })
 )
 

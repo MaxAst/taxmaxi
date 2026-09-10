@@ -3,7 +3,7 @@ import { nextTestUuid } from "./support/TestUuid.ts"
 import * as DateTime from "effect/DateTime"
 import { HttpApiClient } from "effect/unstable/httpapi"
 import { Headers, HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
-import { NodeHttpServer } from "@effect/platform-node"
+import { HttpServerTestLive } from "./support/http-server.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import {
   AuthService,
@@ -120,7 +120,7 @@ const HttpLive = HttpRouter.serve(
     Layer.provide(SimpleTokenValidatorLive)
   ),
   { middleware: invalidSessionCookieCleanup }
-).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(NodeHttpServer.layerTest))
+).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(HttpServerTestLive))
 
 const makeClient = ({
   role,

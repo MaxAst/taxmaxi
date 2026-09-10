@@ -212,6 +212,8 @@ export interface CalculationRunCorrectionInput {
 
 /** Stored accounting facts ready for the pure tax-accounting engine. */
 export interface FactualLedger {
+  /** Every recorded movement and its final combined inputs, including withheld movements. */
+  readonly movements: ReadonlyMap<string, MovementFactualProjection>
   readonly events: ReadonlyArray<AccountingEvent>
   readonly inputBlockers: ReadonlyArray<FactualLedgerInputBlocker>
   readonly valuationFacts: ReadonlyArray<ValuationFact>
@@ -230,9 +232,9 @@ export interface MovementFactualProjection {
   readonly corrections: ReadonlyArray<CalculationRunCorrectionInput>
 }
 
-/** Shared snapshot result; the calculation-facing ledger remains unchanged. */
+/** Shared snapshot result with complete movement inputs for calculation capture. */
 export interface FactualLedgerSnapshot {
-  readonly ledger: FactualLedger
+  readonly ledger: Omit<FactualLedger, "movements">
   readonly movements: ReadonlyMap<string, MovementFactualProjection>
 }
 

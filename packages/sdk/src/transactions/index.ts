@@ -2,6 +2,7 @@ import {
   TransactionDetailResponse,
   TransactionDetailQuery,
   TransactionListResponse,
+  TransactionListQuery,
 } from "@my/rest-api/contracts"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
@@ -12,6 +13,12 @@ export type TransactionListItem = Transactions["transactions"][number]
 
 export type TransactionListInput = {
   readonly sourceId?: string
+  readonly sourceIds?: ReadonlyArray<string>
+  /** Inclusive ISO timestamp. */
+  readonly from?: string
+  /** Exclusive ISO timestamp. */
+  readonly to?: string
+  readonly order?: "newest" | "oldest"
   readonly cursor?: string | null
   readonly limit?: number
 }
@@ -55,18 +62,15 @@ export const makeTransactionsEffectResource = (
       )
     }),
   list: (input = {}) =>
-    Effect.map(
-      Effect.flatMap(client, (resolved) =>
-        resolved.transactions.listTransactions({
-          query: {
-            sourceId: input.sourceId,
-            cursor: input.cursor ?? undefined,
-            limit: input.limit,
-          },
-        })
-      ),
-      encodeTransactions
-    ),
+    Effect.gen(function* () {
+      const query = yield* Schema.decodeEffect(TransactionListQuery)({
+        ...input,
+        cursor: input.cursor ?? undefined,
+        limit: input.limit === undefined ? undefined : String(input.limit),
+      })
+      const resolved = yield* client
+      return encodeTransactions(yield* resolved.transactions.listTransactions({ query }))
+    }),
 })
 
 export const makeTransactionsPromiseResource = (

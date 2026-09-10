@@ -12,6 +12,26 @@ _Avoid_: Fiat asset, canonical asset
 A fiat currency description received from a provider's dedicated fiat catalog. An exact supported currency code resolves without provider asset review; unknown or conflicting evidence fails closed.
 _Avoid_: Provider asset
 
+**Provider consideration**:
+The fiat amount a provider records for an accounting event, including an exchange amount paid or received and a provider-reported reward value. The factual loader supplies eligible evidence as an `observed_consideration` valuation fact linked to the accounting event by `eventId`. Valuation facts are supplied to the engine separately from the factual ledger; they are not fields on its events. The linked event need not be an exchange. A reward value does not prove that fiat was paid or received, so use those labels only when the provider evidence establishes an executed exchange. Fees are separate when the provider records them separately.
+_Avoid_: Price paid (for a provider-reported reward value), cost basis
+
+**Market valuation**:
+An estimate of an asset movement’s fiat value at a stated time, derived from market price evidence. It is not proof of the amount actually paid or received.
+_Avoid_: Purchase price (unless actual provider consideration is meant)
+
+**Cost basis** (also called **tax basis**):
+The amount assigned to an acquisition or lot under the accounting rules and used to calculate gain or loss on disposal. It may differ from provider consideration or market valuation. Cost basis is the preferred term, matching the existing engine and API field `costBasis`; tax basis is an alias for the same value, not a separate fact or a new `taxBasis` field.
+_Avoid_: Price paid, tax basis as a separate value
+
+**Proceeds**:
+The disposal amount used by the accounting calculation before subtracting cost basis to determine gain or loss. Its valuation and fee treatment follow the applicable accounting rules; it is not itself the gain.
+_Avoid_: Profit, gain
+
+**Income**:
+The fiat value in an `IncomeResult` produced by the accounting calculation from a qualifying acquisition, such as a reward receipt. The input remains an `AcquisitionEvent`, not a separate income-event kind; a reward receipt carries its reward cause on that acquisition. The engine emits a separate income result with the selected valuation and treatment codes. The income value is distinct from realized disposal gain; its treatment codes describe the jurisdiction’s treatment.
+_Avoid_: Realized gain, proceeds
+
 ## Tax accounting language
 
 **Accounting event**:
@@ -103,8 +123,8 @@ A person's TaxMaxi membership and data. One account can have multiple login meth
 _Avoid_: Identity, login
 
 **Account email**:
-The lowercase canonical address where TaxMaxi sends security and recovery messages. It does not have to match the address reported by a linked login provider.
-_Avoid_: Provider email, login identity
+The trimmed, lowercased address where TaxMaxi sends security and recovery messages. The writer stores it in that form, and the `users` table rejects a second account whose email differs only in case. It does not have to match the address reported by a linked login provider.
+_Avoid_: Provider email, login identity, canonical email
 
 **Login method**:
 A verified way to access an account, such as Google, Coinbase, or email and password. An account's login methods are peers; none is primary.
@@ -141,6 +161,14 @@ _Avoid_: Profile update
 **Security verification**:
 A short-lived confirmation of account-email access tied to the current authenticated session. One confirmation can authorize login-method changes for ten minutes.
 _Avoid_: Email verification status, login session
+
+**Verification request**:
+One pending proof that a person can read an account email, created by a local sign-up or by an unverified login when no active request exists (`startOrReuse` inserts a fresh one), and answered with an eight-character code. A new request and an explicit resend give the code a fresh ten-minute lifetime; an unverified login that reuses an active request re-sends the same code with its original expiry. A resend replaces the request's code but keeps its lineage; a new sign-up or an unverified login after expiry starts a new request. Each request records its send attempts (ADR 0017).
+_Avoid_: Verification code, security verification, verification cookie
+
+**Send attempt**:
+One hand-off of a verification code to email delivery, recorded on the verification request before delivery runs. Every attempt sets `last_sent_at`. `send_count` is set to 1 by the request's first send and grows by 1 on each explicit resend; an unverified login that reuses an active request leaves it unchanged. A failed delivery still counts. The one-minute cooldown reads `last_sent_at` and the five-send cap reads `send_count` (ADR 0017).
+_Avoid_: Delivered email, successful send
 
 **Source connection**:
 An exchange account or wallet connected so TaxMaxi can import tax data. It is stored separately from login methods even when one Coinbase OAuth flow creates both.

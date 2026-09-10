@@ -674,6 +674,93 @@ describe("TaxMaxi Promise client", () => {
     })
   )
 
+  it.effect(
+    "encodes source sets, UTC interval and order through the shared transaction query",
+    () =>
+      Effect.gen(function* () {
+        const capturedRequests: Array<CapturedRequest> = []
+        const taxmaxi = new TaxMaxi({
+          apiKey: "tm_transactions",
+          baseUrl: "https://sdk.example.test",
+          fetch: makeFetch(capturedRequests, encodeJson(transactionListResponse)),
+        })
+        const sourceIds = [
+          "00000000-0000-4000-8000-000000000001",
+          "00000000-0000-4000-8000-000000000002",
+        ]
+        yield* Effect.promise(() =>
+          taxmaxi.transactions.list({
+            sourceIds,
+            from: "2025-03-01T00:00:00Z",
+            to: "2025-03-02T00:00:00Z",
+            order: "oldest",
+            limit: 1,
+          })
+        )
+        const request = capturedRequests[0]
+        expect(request).toBeDefined()
+        if (request === undefined) return yield* Effect.die("Missing request")
+        const url = new URL(request.url)
+        expect(url.searchParams.getAll("sourceIds")).toEqual(sourceIds)
+        expect(url.searchParams.get("from")).toBe("2025-03-01T00:00:00.000Z")
+        expect(url.searchParams.get("to")).toBe("2025-03-02T00:00:00.000Z")
+        expect(url.searchParams.get("order")).toBe("oldest")
+        yield* Effect.promise(() =>
+          expect(taxmaxi.transactions.list({ from: "invalid" })).rejects.toBeDefined()
+        )
+        expect(capturedRequests).toHaveLength(1)
+      })
+  )
+
+  it.effect(
+    "rejects impossible calendar boundaries before sending and preserves valid leap instants",
+    () =>
+      Effect.gen(function* () {
+        const capturedRequests: Array<CapturedRequest> = []
+        const taxmaxi = new TaxMaxi({
+          apiKey: "tm_transactions",
+          baseUrl: "https://sdk.example.test",
+          fetch: makeFetch(capturedRequests, encodeJson(transactionListResponse)),
+        })
+        for (const date of [
+          "2025-02-30T00:00:00Z",
+          "2025-02-29T00:00:00Z",
+          "1900-02-29T00:00:00Z",
+          "2024-02-30T00:00:00+01:00",
+          "2025-04-31T00:00:00-05:00",
+          "2025-00-01T00:00:00Z",
+          "2025-13-01T00:00:00Z",
+          "2025-01-00T00:00:00Z",
+          "2025-01-32T00:00:00Z",
+          "2025-03-01T24:00:00Z",
+          "2025-03-01T00:60:00Z",
+          "2025-03-01T00:00:60Z",
+          "2025-03-01T00:00:00+24:00",
+        ]) {
+          yield* Effect.promise(() =>
+            expect(taxmaxi.transactions.list({ from: date })).rejects.toBeDefined()
+          )
+          yield* Effect.promise(() =>
+            expect(taxmaxi.transactions.list({ to: date })).rejects.toBeDefined()
+          )
+        }
+        expect(capturedRequests).toHaveLength(0)
+        for (const [date, utc] of [
+          ["2024-02-29T23:59:59.123Z", "2024-02-29T23:59:59.123Z"],
+          ["2000-02-29T00:00:00Z", "2000-02-29T00:00:00.000Z"],
+          ["2024-02-29T00:30:00+01:00", "2024-02-28T23:30:00.000Z"],
+          ["2024-02-29T23:30:00-05:00", "2024-03-01T04:30:00.000Z"],
+        ] as const) {
+          yield* Effect.promise(() => taxmaxi.transactions.list({ from: date, to: date }))
+          const request = capturedRequests.at(-1)
+          if (request === undefined) return yield* Effect.die("Missing request")
+          const url = new URL(request.url)
+          expect(url.searchParams.get("from")).toBe(utc)
+          expect(url.searchParams.get("to")).toBe(utc)
+        }
+      })
+  )
+
   it.effect("passes an owned source filter and preserves canonical partial rows", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<CapturedRequest> = []
@@ -687,7 +774,16 @@ describe("TaxMaxi Promise client", () => {
             transactionType: "buy_fiat",
             description: null,
             externalId: null,
-            movements: [{ amount: "0.1", assetSymbol: "BTC", kind: "acquisition" }],
+            movements: [
+              {
+                targetId: "00000000-0000-4000-8000-000000000301",
+                capture: null,
+                amount: "0.1",
+                assetSymbol: "BTC",
+                kind: "acquisition",
+              },
+            ],
+            income: null,
             realizedGainLoss: null,
             fiatCurrency: null,
             calculationState: "partial",
@@ -712,6 +808,100 @@ describe("TaxMaxi Promise client", () => {
           url: `https://sdk.example.test/v1/transactions?sourceId=${sourceId}&cursor=source-cursor&limit=1`,
         }),
       ])
+    })
+  )
+
+  it.effect("decodes original purchase value and exact sale allocations after full disposal", () =>
+    Effect.gen(function* () {
+      const capturedRequests: Array<CapturedRequest> = []
+      const source = {
+        sourceId: "00000000-0000-4000-8000-000000000302",
+        name: "Synthetic wallet",
+        kind: "onchain",
+      } as const
+      const capture = {
+        runId: "00000000-0000-4000-8000-000000000303",
+        eventId: "00000000-0000-4000-8000-000000000304",
+        outcome: "included",
+        quantity: "10",
+        assetId: "00000000-0000-4000-8000-000000000305",
+        assetSymbol: "TOKEN",
+        eventKind: "acquisition",
+        cause: "purchase",
+        valuationState: "selected",
+        selectedValue: { kind: "user_valuation", amount: "20", currency: "EUR" },
+        providerConsiderations: [],
+        acquisitionCostBasis: null,
+        realizedResults: [],
+      } as const
+      const row = {
+        transactionId: "00000000-0000-4000-8000-000000000306",
+        timestamp: "2025-03-05T12:00:00.000Z",
+        source,
+        transactionType: "buy_fiat",
+        description: null,
+        externalId: null,
+        movements: [
+          {
+            targetId: "00000000-0000-4000-8000-000000000307",
+            capture,
+            amount: "10",
+            assetSymbol: "TOKEN",
+            kind: "acquisition",
+          },
+        ],
+        income: null,
+        realizedGainLoss: null,
+        fiatCurrency: "EUR",
+        calculationState: "complete",
+        needsReview: false,
+      } as const
+      const response = {
+        transactions: [
+          row,
+          {
+            ...row,
+            transactionId: "00000000-0000-4000-8000-000000000308",
+            timestamp: "2025-04-05T12:00:00.000Z",
+            transactionType: "sell_fiat",
+            realizedGainLoss: "10",
+            movements: [
+              {
+                targetId: "00000000-0000-4000-8000-000000000309",
+                amount: "10",
+                assetSymbol: "TOKEN",
+                kind: "disposal",
+                capture: {
+                  ...capture,
+                  eventId: "00000000-0000-4000-8000-000000000310",
+                  eventKind: "disposition",
+                  cause: "sale",
+                  selectedValue: { kind: "observed_consideration", amount: "30", currency: "EUR" },
+                  providerConsiderations: [{ amount: "30", currency: "EUR" }],
+                  realizedResults: [
+                    {
+                      acquisitionEventId: "00000000-0000-4000-8000-000000000304",
+                      quantity: "10",
+                      costBasis: "20",
+                      proceeds: "30",
+                      gainLoss: "10",
+                      currency: "EUR",
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+        totalCount: 2,
+        page: { nextCursor: null, hasMore: false },
+      } as const
+      const taxmaxi = new TaxMaxi({
+        apiKey: "00000000-0000-4000-8000-000000000305",
+        baseUrl: "https://sdk.example.test",
+        fetch: makeFetch(capturedRequests, encodeJson(response)),
+      })
+      yield* Effect.promise(() => expect(taxmaxi.transactions.list()).resolves.toEqual(response))
     })
   )
 

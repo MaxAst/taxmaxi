@@ -25,8 +25,17 @@ const row: TransactionListItem = {
   transactionType: "trade",
   description: "Ready trade",
   externalId: "canonical-external-id",
-  movements: [{ amount: "2.50000000", assetSymbol: "SOL", kind: "disposal" }],
+  movements: [
+    {
+      targetId: "00000000-0000-4000-8000-000000000801",
+      capture: null,
+      amount: "2.50000000",
+      assetSymbol: "SOL",
+      kind: "disposal",
+    },
+  ],
   calculationState: "complete",
+  income: null,
   realizedGainLoss: "12.34",
   fiatCurrency: "EUR",
   needsReview: false,
@@ -61,9 +70,27 @@ const firstRows: ReadonlyArray<TransactionListItem> = (() => {
       description: `Trade ${index}`,
       movements: [
         ...row.movements,
-        { amount: "1", assetSymbol: "BTC", kind: "acquisition" },
-        { amount: "0.5", assetSymbol: "ETH", kind: "income" },
-        { amount: "0.01", assetSymbol: "SOL", kind: "fee" },
+        {
+          targetId: "00000000-0000-4000-8000-000000000802",
+          capture: null,
+          amount: "1",
+          assetSymbol: "BTC",
+          kind: "acquisition",
+        },
+        {
+          targetId: "00000000-0000-4000-8000-000000000803",
+          capture: null,
+          amount: "0.5",
+          assetSymbol: "ETH",
+          kind: "income",
+        },
+        {
+          targetId: "00000000-0000-4000-8000-000000000804",
+          capture: null,
+          amount: "0.01",
+          assetSymbol: "SOL",
+          kind: "fee",
+        },
       ],
     }))
   }

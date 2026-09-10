@@ -2,7 +2,7 @@ import { prepareMovementLegFixtures } from "../../persistence/tests/support/move
 import { nextTestUuid } from "./support/TestUuid.ts"
 import { HttpApiClient } from "effect/unstable/httpapi"
 import { Cookies, Headers, HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
-import { NodeHttpServer } from "@effect/platform-node"
+import { HttpServerTestLive } from "./support/http-server.ts"
 import { beforeEach, describe, expect, it } from "@effect/vitest"
 import type { TaxAccountingResult } from "../../accounting/src/index.ts"
 import { AccountingMethodId, CustodyUnitId, JurisdictionCode, TaxYear } from "@my/core/accounting"
@@ -282,7 +282,7 @@ const makeHttpLive = <R = never>(
         calculationRecomputeQueueLayer
       )
     ),
-    Layer.provideMerge(NodeHttpServer.layerTest),
+    Layer.provideMerge(HttpServerTestLive),
     Layer.provide(ConfigProvider.layer(ClaimTokenConfigProvider))
   )
 
@@ -953,6 +953,7 @@ const seedClaimCalculationResultRows = ({
 const CLAIM_REPORTING_CURRENCY = CurrencyCode.make("EUR")
 
 const makeClaimRaceResult = (taxYear: number): TaxAccountingResult => ({
+  eventValuations: [],
   status: "complete",
   jurisdiction: JurisdictionCode.make("DE"),
   taxYear: TaxYear.make(taxYear),
@@ -1092,6 +1093,7 @@ const persistClaimRaceRun = ({
 }) =>
   Effect.flatMap(CalculationRunRepository, (repository) =>
     repository.persist({
+      movements: new Map(),
       writeMode,
       syncCapture: { requestIds: [] },
       correctionInputs: [],

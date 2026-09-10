@@ -18,7 +18,7 @@ import * as BigDecimal from "effect/BigDecimal"
 import * as DateTime from "effect/DateTime"
 import { HttpClient, HttpClientRequest, HttpRouter, HttpServer } from "effect/unstable/http"
 import { HttpApiClient } from "effect/unstable/httpapi"
-import { NodeHttpServer } from "@effect/platform-node"
+import { HttpServerTestLive } from "./support/http-server.ts"
 import {
   AuthService,
   HashedPassword,
@@ -175,7 +175,7 @@ const HttpLive = HttpRouter.serve(
     Layer.provide(X402PaymentValidatorTestLive),
     Layer.provide(SimpleTokenValidatorLive)
   )
-).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(NodeHttpServer.layerTest))
+).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(HttpServerTestLive))
 
 const USER_ID = "00000000-0000-4000-8000-000000009101"
 

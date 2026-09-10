@@ -1,12 +1,28 @@
 import { ChevronLeft, ChevronRight, CircleAlert, Landmark, WalletCards } from "lucide-react"
 import type { TransactionListItem } from "taxmaxi"
+import { z } from "zod"
 
 import { Badge } from "#/components/ui/badge"
 import { Button } from "#/components/ui/button"
 import { m } from "#/paraglide/messages"
 import { getLocale } from "#/paraglide/runtime"
+import {
+  transactionMovements,
+  transactionResults,
+  transactionTypeLabel,
+} from "#/lib/transaction-display"
 
-export const TRANSACTION_PAGE_SIZE = 7
+export const TRANSACTION_PAGE_SIZE = 25
+export const TRANSACTION_PAGE_SIZES = [25, 50, 100, 500] as const
+export type TransactionPageSize = (typeof TRANSACTION_PAGE_SIZES)[number]
+const pageSizeSchema = z.coerce
+  .number()
+  .pipe(z.union([z.literal(25), z.literal(50), z.literal(100), z.literal(500)]))
+
+export function parseTransactionPageSize(value: unknown): TransactionPageSize {
+  const parsed = pageSizeSchema.safeParse(value)
+  return parsed.success ? parsed.data : TRANSACTION_PAGE_SIZE
+}
 
 const formatDate = (timestamp: string): string =>
   new Intl.DateTimeFormat(getLocale(), {
@@ -21,58 +37,6 @@ const formatTime = (timestamp: string): string =>
     minute: "2-digit",
   }).format(new Date(timestamp))
 
-const gainLossFormatter = (currency: string) =>
-  new Intl.NumberFormat(getLocale(), {
-    currency,
-    maximumFractionDigits: 2,
-    style: "currency",
-  })
-
-const isDecimalString = (value: string): value is `${number}` =>
-  /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)
-
-const isZeroDecimal = (value: `${number}`): boolean => /^-?0(?:\.0+)?$/.test(value)
-
-const typeLabel = (value: string | null): string => {
-  if (value === null) return m["app.dashboard.transactions.unclassified"]()
-  const words = value.replaceAll("_", " ").replaceAll("-", " ")
-  return words.charAt(0).toUpperCase() + words.slice(1)
-}
-
-const movementLabel = (transaction: TransactionListItem): string => {
-  if (transaction.movements.length === 0) {
-    return m["app.dashboard.transactions.movementsPending"]()
-  }
-
-  const visible = transaction.movements
-    .slice(0, 2)
-    .map((movement) => `${movement.amount} ${movement.assetSymbol}`)
-    .join(" · ")
-  const remaining = transaction.movements.length - 2
-  return remaining > 0
-    ? `${visible} · ${m["app.dashboard.transactions.movementsMore"]({ count: remaining })}`
-    : visible
-}
-
-const realizedGainLossLabel = (transaction: TransactionListItem): string => {
-  if (transaction.calculationState === "partial") {
-    return m["app.dashboard.transactions.gainLossPending"]()
-  }
-  if (transaction.realizedGainLoss === null || transaction.fiatCurrency === null) {
-    return m["app.dashboard.transactions.gainLossNotApplicable"]()
-  }
-
-  const value = transaction.realizedGainLoss
-  if (!isDecimalString(value)) return m["app.dashboard.transactions.gainLossPending"]()
-
-  const absoluteValue = value.startsWith("-") ? value.slice(1) : value
-  if (!isDecimalString(absoluteValue)) return m["app.dashboard.transactions.gainLossPending"]()
-
-  const formatted = gainLossFormatter(transaction.fiatCurrency).format(absoluteValue)
-  const sign = isZeroDecimal(value) ? "" : value.startsWith("-") ? "−" : "+"
-  return `${sign}${formatted}`
-}
-
 export function TransactionsTable({
   disabled,
   onSelect,
@@ -84,6 +48,8 @@ export function TransactionsTable({
   onPreviousPage,
   onRetry,
   pageIndex,
+  pageSize,
+  onPageSizeChange,
   totalCount,
   transactions,
 }: {
@@ -97,11 +63,13 @@ export function TransactionsTable({
   readonly onPreviousPage: () => void
   readonly onRetry: () => void
   readonly pageIndex: number
+  readonly pageSize: TransactionPageSize
+  readonly onPageSizeChange: (size: TransactionPageSize) => void
   readonly totalCount: number
   readonly transactions: ReadonlyArray<TransactionListItem>
 }) {
-  const visibleStart = transactions.length === 0 ? 0 : pageIndex * TRANSACTION_PAGE_SIZE + 1
-  const visibleEnd = Math.min(pageIndex * TRANSACTION_PAGE_SIZE + transactions.length, totalCount)
+  const visibleStart = transactions.length === 0 ? 0 : pageIndex * pageSize + 1
+  const visibleEnd = Math.min(pageIndex * pageSize + transactions.length, totalCount)
   const totalLabel =
     totalCount === 1
       ? m["app.dashboard.transactions.totalOne"]({ count: totalCount })
@@ -129,9 +97,28 @@ export function TransactionsTable({
             {m["app.dashboard.transactions.description"]()}
           </p>
         </div>
-        <Badge className="w-fit" variant="secondary">
-          {totalLabel}
-        </Badge>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-sm text-muted-foreground">
+            {m["app.dashboard.transactions.pageSize"]()}
+            <select
+              className="min-h-11 rounded-md border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+              value={pageSize}
+              disabled={disabled}
+              onChange={(event) =>
+                onPageSizeChange(parseTransactionPageSize(event.currentTarget.value))
+              }
+            >
+              {TRANSACTION_PAGE_SIZES.map((size) => (
+                <option key={size} value={size}>
+                  {m["app.dashboard.transactions.pageSizeOption"]({ count: size })}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Badge className="w-fit" variant="secondary">
+            {totalLabel}
+          </Badge>
+        </div>
       </header>
 
       <div className="overflow-hidden rounded-xl border bg-background shadow-sm">
@@ -189,11 +176,8 @@ export function TransactionsTable({
 
                 <div className="min-w-0">
                   <div className="flex min-w-0 items-center gap-2">
-                    <Badge className="shrink-0" variant="outline">
-                      {typeLabel(transaction.transactionType)}
-                    </Badge>
                     <span className="truncate font-medium">
-                      {transaction.description ?? typeLabel(transaction.transactionType)}
+                      {transactionTypeLabel(transaction.transactionType)}
                     </span>
                     {transaction.needsReview ? (
                       <CircleAlert
@@ -202,9 +186,22 @@ export function TransactionsTable({
                       />
                     ) : null}
                   </div>
-                  <p className="mt-1 truncate text-xs text-muted-foreground">
-                    {movementLabel(transaction)}
-                  </p>
+                  {transaction.description !== null &&
+                  transaction.description.toLocaleLowerCase() !==
+                    transactionTypeLabel(transaction.transactionType).toLocaleLowerCase() ? (
+                    <p className="mt-1 truncate text-xs text-muted-foreground">
+                      {transaction.description}
+                    </p>
+                  ) : null}
+                  <div className="mt-1 flex flex-col gap-0.5 text-xs tabular-nums text-muted-foreground">
+                    {transaction.movements.length === 0 ? (
+                      <p>{m["app.dashboard.transactions.movementsPending"]()}</p>
+                    ) : (
+                      transactionMovements(transaction).map((movement, index) => (
+                        <p key={index}>{movement}</p>
+                      ))
+                    )}
+                  </div>
                   <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-muted-foreground">
                     {transaction.source.kind === "cex" ? (
                       <Landmark className="size-3.5 shrink-0" />
@@ -213,19 +210,24 @@ export function TransactionsTable({
                     )}
                     {transaction.source.name}
                   </p>
-                  <p className="mt-2 text-sm font-semibold tabular-nums sm:hidden">
-                    <span className="sr-only">
-                      {m["app.dashboard.transactions.realizedGainLoss"]()}:{" "}
-                    </span>
-                    {realizedGainLossLabel(transaction)}
-                  </p>
+                  {transactionResults(transaction).map((result) => (
+                    <p
+                      key={result.label}
+                      className="mt-2 text-sm font-semibold tabular-nums sm:hidden"
+                    >
+                      <span className="text-muted-foreground">{result.label}: </span>
+                      {result.amount}
+                    </p>
+                  ))}
                 </div>
 
                 <div className="hidden text-right sm:block">
-                  <p className="font-semibold tabular-nums">{realizedGainLossLabel(transaction)}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {m["app.dashboard.transactions.realizedGainLoss"]()}
-                  </p>
+                  {transactionResults(transaction).map((result) => (
+                    <div key={result.label}>
+                      <p className="font-semibold tabular-nums">{result.amount}</p>
+                      <p className="text-xs text-muted-foreground">{result.label}</p>
+                    </div>
+                  ))}
                 </div>
               </article>
             ))}
