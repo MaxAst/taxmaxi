@@ -1,6 +1,6 @@
 import { SourceSyncQueueUnexpectedTestLive } from "./support/SourceSyncQueueUnexpectedTestLive.ts"
 import { HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
-import { NodeHttpServer } from "@effect/platform-node"
+import { HttpServerTestLive } from "./support/http-server.ts"
 import {
   AuthService,
   HashedPassword,
@@ -120,7 +120,7 @@ const HttpLive = HttpRouter.serve(
     Layer.provide(X402PaymentValidatorTestLive),
     Layer.provide(SimpleTokenValidatorLive)
   )
-).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(NodeHttpServer.layerTest))
+).pipe(Layer.provideMerge(PersistenceLayer), Layer.provideMerge(HttpServerTestLive))
 
 const postJson = <Response, Requirements>({
   path,
