@@ -40,8 +40,7 @@ const transactionFilterSearchSchema = z
       .transform((values) => [...new Set(values)].sort())
       .optional(),
     from: localDate.optional(),
-    // The inclusive end needs a following day inside the four-digit ISO range.
-    to: localDate.refine((date) => date !== "9999-12-31").optional(),
+    to: localDate.optional(),
     timezone: timezone.optional(),
     order: z.enum(["newest", "oldest"]).optional(),
     attention: z.boolean().optional(),
@@ -56,7 +55,13 @@ export function parseTransactionFilters(input: unknown): TransactionFilters {
   const result = transactionFilterSearchSchema.safeParse(input)
   if (result.success) {
     const { from, to } = transactionFilterInput(result.data)
-    if (from !== undefined && to !== undefined && Date.parse(from) >= Date.parse(to)) {
+    const outsideApiYears = [from, to].some(
+      (boundary) => boundary !== undefined && !/^\d{4}-/.test(boundary)
+    )
+    if (
+      outsideApiYears ||
+      (from !== undefined && to !== undefined && Date.parse(from) >= Date.parse(to))
+    ) {
       throw new Error(m["app.transactionFilters.invalidUrl"]())
     }
     return result.data
@@ -100,24 +105,32 @@ export function updateTransactionSearch(
 function dayStart(date: string, timeZone: string): string {
   const format = new Intl.DateTimeFormat("en-CA", {
     timeZone,
+    calendar: "gregory",
+    numberingSystem: "latn",
+    era: "short",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   })
   const dayAt = (instant: number) => {
     const parts = format.formatToParts(instant)
-    return ["year", "month", "day"]
-      .map((type) => parts.find((part) => part.type === type)?.value)
-      .join("-")
+    const part = (type: Intl.DateTimeFormatPartTypes) =>
+      parts.find((part) => part.type === type)?.value
+    const eraYear = Number(part("year"))
+    // Gregorian 1 BC is ISO year 0000. Numeric keys also preserve ordering
+    // when search probes cross a digit-width boundary or reach a signed year.
+    const year = part("era") === "BC" ? 1 - eraYear : eraYear
+    return year * 10_000 + Number(part("month")) * 100 + Number(part("day"))
   }
   // Find the first instant belonging to this local day. This also handles
   // zones whose clock jumps at midnight and days skipped by offset changes.
+  const targetDay = Number(date.replaceAll("-", ""))
   const center = Date.parse(`${date}T00:00:00Z`)
   let low = center - 48 * 60 * 60 * 1000
   let high = center + 48 * 60 * 60 * 1000
   while (low < high) {
     const middle = Math.floor((low + high) / 2)
-    if (dayAt(middle) < date) low = middle + 1
+    if (dayAt(middle) < targetDay) low = middle + 1
     else high = middle
   }
   return new Date(low).toISOString()
@@ -130,7 +143,8 @@ export function transactionFilterInput(filters: TransactionFilters): Transaction
   if (filters.to) {
     const nextDay = new Date(`${filters.to}T00:00:00Z`)
     nextDay.setUTCDate(nextDay.getUTCDate() + 1)
-    end = dayStart(nextDay.toISOString().slice(0, 10), timeZone)
+    const nextDate = nextDay.toISOString()
+    end = dayStart(nextDate.slice(0, nextDate.indexOf("T")), timeZone)
   }
   return {
     ...(filters.sourceIds?.length ? { sourceIds: filters.sourceIds } : {}),

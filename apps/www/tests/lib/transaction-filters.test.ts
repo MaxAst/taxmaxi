@@ -20,6 +20,45 @@ describe("transaction filter URL state", () => {
   })
 
   it.each([
+    ["0000-01-01", "0000-01-02"],
+    ["0000-02-29", "0000-03-01"],
+    ["0000-12-31", "0001-01-01"],
+    ["0001-01-01", "0001-01-02"],
+    ["0009-12-31", "0010-01-01"],
+    ["0010-01-01", "0010-01-02"],
+    ["0099-12-31", "0100-01-01"],
+    ["0100-01-01", "0100-01-02"],
+    ["0999-01-01", "0999-01-02"],
+    ["0999-12-31", "1000-01-01"],
+    ["1000-01-01", "1000-01-02"],
+  ])("keeps exact UTC boundaries across Gregorian year/era widths: %s", (from, next) => {
+    expect(
+      transactionFilterInput(validateTransactionSearch({ from, to: from, timezone: "UTC" }))
+    ).toEqual({ from: `${from}T00:00:00.000Z`, to: `${next}T00:00:00.000Z` })
+  })
+
+  it.each([
+    ["0000-01-01", "0000-01-02"],
+    ["0001-01-01", "0001-01-02"],
+  ])("handles era-crossing search probes west of UTC for %s", (from, next) => {
+    expect(
+      transactionFilterInput(validateTransactionSearch({ from, to: from, timezone: "Etc/GMT+1" }))
+    ).toEqual({ from: `${from}T01:00:00.000Z`, to: `${next}T01:00:00.000Z` })
+  })
+
+  it("rejects only unrepresentable converted endpoints, preserving earliest to-only dates", () => {
+    expect(() => validateTransactionSearch({ from: "0000-01-01", timezone: "Etc/GMT-1" })).toThrow()
+    expect(
+      transactionFilterInput(
+        validateTransactionSearch({ from: "0000-01-02", timezone: "Etc/GMT-1" })
+      )
+    ).toEqual({ from: "0000-01-01T23:00:00.000Z" })
+    expect(
+      transactionFilterInput(validateTransactionSearch({ to: "0000-01-01", timezone: "Etc/GMT-1" }))
+    ).toEqual({ to: "0000-01-01T23:00:00.000Z" })
+  })
+
+  it.each([
     ["UTC", "9999-12-30T00:00:00.000Z", "9999-12-31T00:00:00.000Z"],
     ["America/New_York", "9999-12-30T05:00:00.000Z", "9999-12-31T05:00:00.000Z"],
   ])("preserves the last supported end and final-day start in %s", (timezone, from, to) => {
@@ -32,6 +71,24 @@ describe("transaction filter URL state", () => {
       transactionFilterInput(validateTransactionSearch({ from: "9999-12-31", timezone }))
     ).toEqual({ from: to })
   })
+
+  it("preserves the maximum local end when the next local year emits a supported UTC endpoint", () => {
+    expect(
+      transactionFilterInput(
+        validateTransactionSearch({ from: "9999-12-31", to: "9999-12-31", timezone: "Etc/GMT-1" })
+      )
+    ).toEqual({ from: "9999-12-30T23:00:00.000Z", to: "9999-12-31T23:00:00.000Z" })
+    expect(
+      transactionFilterInput(validateTransactionSearch({ to: "9999-12-31", timezone: "Etc/GMT-1" }))
+    ).toEqual({ to: "9999-12-31T23:00:00.000Z" })
+  })
+
+  it.each(["UTC", "Etc/GMT+1"])(
+    "rejects the maximum local end only when its UTC endpoint exceeds the API year range in %s",
+    (timezone) => {
+      expect(() => validateTransactionSearch({ to: "9999-12-31", timezone })).toThrow()
+    }
+  )
 
   it("folds UUID case before deduplicating source and asset selections", () => {
     const id = "abcdef01-2345-4678-9abc-def012345678"
@@ -105,8 +162,8 @@ describe("transaction filter URL state", () => {
     { categories: ["made-up"] },
     { attention: "true" },
     { from: "2026-02-30" },
-    { from: "9999-12-31", to: "9999-12-31" },
-    { to: "9999-12-31" },
+    { from: "9999-12-31", to: "9999-12-31", timezone: "UTC" },
+    { to: "9999-12-31", timezone: "UTC" },
     { from: "2026-03-02", to: "2026-03-01" },
     { timezone: "not-a-timezone" },
   ])("rejects invalid external filter state %j", (search) => {
