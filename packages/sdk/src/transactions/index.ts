@@ -1,5 +1,6 @@
 import {
   TransactionDetailResponse,
+  TransactionFilterChoicesResponse,
   TransactionDetailQuery,
   TransactionListResponse,
   TransactionListQuery,
@@ -19,9 +20,14 @@ export type TransactionListInput = {
   /** Exclusive ISO timestamp. */
   readonly to?: string
   readonly order?: "newest" | "oldest"
+  /** Select only transactions with an explicitly linked review or blocker. */
+  readonly attention?: boolean
   readonly cursor?: string | null
   readonly limit?: number
 }
+
+/** Owned economic asset choices, including historical assets with zero holdings. */
+export type TransactionFilterChoices = Schema.Codec.Encoded<typeof TransactionFilterChoicesResponse>
 
 /** Exact facts and run-backed calculation with independently current corrections. */
 export type TransactionDetail = Schema.Codec.Encoded<typeof TransactionDetailResponse>
@@ -35,6 +41,7 @@ export type TransactionDetailError = Effect.Error<
 >
 
 export type TransactionsEffectResource = {
+  readonly filterChoices: () => Effect.Effect<TransactionFilterChoices, unknown, never>
   readonly get: (
     input: TransactionDetailInput
   ) => Effect.Effect<TransactionDetail, TransactionDetailError>
@@ -42,6 +49,7 @@ export type TransactionsEffectResource = {
 }
 
 export type TransactionsPromiseResource = {
+  readonly filterChoices: () => Promise<TransactionFilterChoices>
   readonly get: (input: TransactionDetailInput) => Promise<TransactionDetail>
   readonly list: (input?: TransactionListInput) => Promise<Transactions>
 }
@@ -49,10 +57,16 @@ export type TransactionsPromiseResource = {
 const encodeDetail = Schema.encodeSync(TransactionDetailResponse)
 
 const encodeTransactions = Schema.encodeSync(TransactionListResponse)
+const encodeFilterChoices = Schema.encodeSync(TransactionFilterChoicesResponse)
 
 export const makeTransactionsEffectResource = (
   client: Effect.Effect<TaxMaxiEffectClient, never>
 ): TransactionsEffectResource => ({
+  filterChoices: () =>
+    Effect.gen(function* () {
+      const resolved = yield* client
+      return encodeFilterChoices(yield* resolved.transactions.filterChoices())
+    }),
   get: ({ transactionId, taxYear }) =>
     Effect.gen(function* () {
       const query = yield* Schema.decodeEffect(TransactionDetailQuery)({ taxYear: String(taxYear) })
@@ -66,6 +80,7 @@ export const makeTransactionsEffectResource = (
       const query = yield* Schema.decodeEffect(TransactionListQuery)({
         ...input,
         cursor: input.cursor ?? undefined,
+        attention: input.attention === undefined ? undefined : input.attention ? "true" : "false",
         limit: input.limit === undefined ? undefined : String(input.limit),
       })
       const resolved = yield* client
@@ -77,6 +92,7 @@ export const makeTransactionsPromiseResource = (
   effect: TransactionsEffectResource,
   run: <A>(effect: Effect.Effect<A, unknown, never>) => Promise<A>
 ): TransactionsPromiseResource => ({
+  filterChoices: () => run(effect.filterChoices()),
   get: (input) => run(effect.get(input)),
   list: (input) => run(effect.list(input)),
 })

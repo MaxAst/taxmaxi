@@ -578,130 +578,180 @@ const seedSourceFilterFixtures = Effect.gen(function* () {
 })
 
 // Source records and movements cross the same writer used by sync before API reads.
-const seedQueryFilterFixtures = Effect.gen(function* () {
-  const fixture = yield* seedSyncEngineRepositoryFixture({
-    principalId: fixtureIds.principalId,
-    userId: fixtureIds.userId,
-    sourceId: fixtureIds.sourceId,
-  })
-  yield* seedSyncEngineAssets(fixture)
-  const db = yield* drizzle
-  for (const sourceId of [fixtureIds.canonicalSourceId, fixtureIds.emptySourceId]) {
-    const [address] = yield* db
-      .insert(schema.addresses)
-      .values({
+const seedQueryFilterFixtures = (attention = false) =>
+  Effect.gen(function* () {
+    const fixture = yield* seedSyncEngineRepositoryFixture({
+      principalId: fixtureIds.principalId,
+      userId: fixtureIds.userId,
+      sourceId: fixtureIds.sourceId,
+    })
+    yield* seedSyncEngineAssets(fixture)
+    const db = yield* drizzle
+    for (const sourceId of [fixtureIds.canonicalSourceId, fixtureIds.emptySourceId]) {
+      const [address] = yield* db
+        .insert(schema.addresses)
+        .values({
+          principalId: fixture.principalId,
+          address: `bc1qquery${sourceId}`,
+          type: "bitcoin",
+          name: "Query fixture",
+        })
+        .returning({ id: schema.addresses.id })
+      if (address === undefined) return yield* Effect.die("Missing fixture address")
+      yield* db.insert(schema.sources).values({
+        id: sourceId,
         principalId: fixture.principalId,
-        address: `bc1qquery${sourceId}`,
-        type: "bitcoin",
-        name: "Query fixture",
+        name: "Query source",
+        providerKey: "bitcoin-rpc",
+        sourceableType: "onchain",
+        addressId: address.id,
       })
-      .returning({ id: schema.addresses.id })
-    if (address === undefined) return yield* Effect.die("Missing fixture address")
-    yield* db.insert(schema.sources).values({
-      id: sourceId,
-      principalId: fixture.principalId,
-      name: "Query source",
-      providerKey: "bitcoin-rpc",
-      sourceableType: "onchain",
-      addressId: address.id,
+    }
+    yield* seedSyncEngineRepositoryFixture({
+      principalId: fixtureIds.otherPrincipalId,
+      userId: fixtureIds.otherUserId,
+      sourceId: fixtureIds.otherSourceId,
     })
-  }
-  yield* seedSyncEngineRepositoryFixture({
-    principalId: fixtureIds.otherPrincipalId,
-    userId: fixtureIds.otherUserId,
-    sourceId: fixtureIds.otherSourceId,
+    const feeAssetId = "00000000-0000-4000-8000-000000009901"
+    if (attention)
+      yield* db.insert(schema.assets).values({
+        id: feeAssetId,
+        name: "Unpriced historical fee",
+        symbol: "BTC",
+        type: "fungible",
+      })
+    const writer = yield* SourceNormalizationRepository
+    const ids: Array<string> = []
+    for (const [index, sourceId] of [
+      fixture.sourceId,
+      fixture.sourceId,
+      fixtureIds.canonicalSourceId,
+      fixtureIds.emptySourceId,
+      ...(attention ? [fixtureIds.emptySourceId] : []),
+    ].entries()) {
+      const timestamp = DateTime.toDateUtc(
+        DateTime.makeUnsafe(index === 0 ? "2025-03-01T00:00:00Z" : "2025-03-02T00:00:00Z")
+      )
+      const externalId = `query-${index}`
+      const kind = attention && index === 1 ? ("disposal" as const) : ("acquisition" as const)
+      const transactionType = kind === "disposal" ? "sell_fiat" : "buy_fiat"
+      const assetId = attention && index === 2 ? feeAssetId : TEST_BTC_ASSET_ID
+      const persisted = yield* writer.persistNormalizedArtifacts({
+        transaction: {
+          sourceId,
+          principalId: fixture.principalId,
+          sourceRawRecordId: null,
+          externalId,
+          externalGroupId: null,
+          timestamp,
+          transactionType,
+          providerTransactionType: "buy",
+          providerStatus: "completed",
+          providerResourcePath: null,
+          providerDescription: null,
+          providerCreatedAt: timestamp,
+          providerUpdatedAt: timestamp,
+          metadata: null,
+          providerFiatAmount: attention ? (index === 1 ? "30" : "20") : null,
+          providerFiatCurrency: attention ? "EUR" : null,
+        },
+        venueContext: {
+          venueType: "cex",
+          cexAccountId: null,
+          externalAccountId: null,
+          externalOrderId: null,
+          externalFillId: null,
+          side: null,
+          instrument: null,
+          fillPrice: null,
+          commissionAmount: null,
+          commissionCurrency: null,
+          metadata: null,
+        },
+        providerTransfers: [],
+        canonicalTransfers: [],
+        providerAssetRowIds: [],
+        transactionReview:
+          attention && index >= 2
+            ? {
+                principalId: fixture.principalId,
+                reviewStatus: "needs_review",
+                originalTypeKey: null,
+                originalConfidence: null,
+                currentTypeKey: null,
+                legalRuleSetVersion: null,
+                categorizationReason: "Fixture explicit review",
+                matchedLayer: null,
+                needsReview: true,
+                userNotes: null,
+                reviewedAt: null,
+              }
+            : null,
+        resolvedTransactionType: {
+          providerTransactionType: "buy",
+          transactionType,
+          inventoryEffect: "acquisition",
+          taxTreatment: "requires_additional_rule_logic",
+          resolutionStrategy: "static",
+          pairedRecordRequired: false,
+          mappingStatus: "approved",
+        },
+        deriveLegs: ({ transaction }) =>
+          Effect.succeed(
+            attention && index >= 3
+              ? []
+              : [
+                  {
+                    movementIdentity: {
+                      _tag: "identified" as const,
+                      sourceRecordKey: externalId,
+                      componentKey: "acquisition",
+                    },
+                    sourceId,
+                    principalId: fixture.principalId,
+                    sourceRawRecordId: null,
+                    externalId: `${externalId}:leg`,
+                    txHash: null,
+                    timestamp,
+                    addressId: null,
+                    assetId,
+                    amount: "1",
+                    kind,
+                    provenance: "deterministic" as const,
+                    originKind: "none" as const,
+                    derivationRule: "query-fixture",
+                    metadata: null,
+                    transactionId: transaction.id,
+                    sourceTransferId: null,
+                    fiatAmount: null,
+                    fiatCurrency: null,
+                    feeForTransactionId: null,
+                  },
+                ].flatMap((leg) =>
+                  attention && index === 1
+                    ? [
+                        leg,
+                        {
+                          ...leg,
+                          assetId: feeAssetId,
+                          amount: "0.1",
+                          kind: "fee" as const,
+                          externalId: `${externalId}:fee`,
+                          movementIdentity: {
+                            _tag: "identified" as const,
+                            sourceRecordKey: externalId,
+                            componentKey: "fee",
+                          },
+                        },
+                      ]
+                    : [leg]
+                )
+          ),
+      })
+      ids.push(persisted.transaction.id)
+    }
+    return { ...fixture, ids }
   })
-  const writer = yield* SourceNormalizationRepository
-  const ids: Array<string> = []
-  for (const [index, sourceId] of [
-    fixture.sourceId,
-    fixture.sourceId,
-    fixtureIds.canonicalSourceId,
-    fixtureIds.emptySourceId,
-  ].entries()) {
-    const timestamp = DateTime.toDateUtc(
-      DateTime.makeUnsafe(index === 0 ? "2025-03-01T00:00:00Z" : "2025-03-02T00:00:00Z")
-    )
-    const externalId = `query-${index}`
-    const persisted = yield* writer.persistNormalizedArtifacts({
-      transaction: {
-        sourceId,
-        principalId: fixture.principalId,
-        sourceRawRecordId: null,
-        externalId,
-        externalGroupId: null,
-        timestamp,
-        transactionType: "buy_fiat",
-        providerTransactionType: "buy",
-        providerStatus: "completed",
-        providerResourcePath: null,
-        providerDescription: null,
-        providerCreatedAt: timestamp,
-        providerUpdatedAt: timestamp,
-        metadata: null,
-        providerFiatAmount: null,
-        providerFiatCurrency: null,
-      },
-      venueContext: {
-        venueType: "cex",
-        cexAccountId: null,
-        externalAccountId: null,
-        externalOrderId: null,
-        externalFillId: null,
-        side: null,
-        instrument: null,
-        fillPrice: null,
-        commissionAmount: null,
-        commissionCurrency: null,
-        metadata: null,
-      },
-      providerTransfers: [],
-      canonicalTransfers: [],
-      providerAssetRowIds: [],
-      transactionReview: null,
-      resolvedTransactionType: {
-        providerTransactionType: "buy",
-        transactionType: "buy_fiat",
-        inventoryEffect: "acquisition",
-        taxTreatment: "requires_additional_rule_logic",
-        resolutionStrategy: "static",
-        pairedRecordRequired: false,
-        mappingStatus: "approved",
-      },
-      deriveLegs: ({ transaction }) =>
-        Effect.succeed([
-          {
-            movementIdentity: {
-              _tag: "identified" as const,
-              sourceRecordKey: externalId,
-              componentKey: "acquisition",
-            },
-            sourceId,
-            principalId: fixture.principalId,
-            sourceRawRecordId: null,
-            externalId: `${externalId}:leg`,
-            txHash: null,
-            timestamp,
-            addressId: null,
-            assetId: TEST_BTC_ASSET_ID,
-            amount: "1",
-            kind: "acquisition",
-            provenance: "deterministic",
-            originKind: "none" as const,
-            derivationRule: "query-fixture",
-            metadata: null,
-            transactionId: transaction.id,
-            sourceTransferId: null,
-            fiatAmount: null,
-            fiatCurrency: null,
-            feeForTransactionId: null,
-          },
-        ]),
-    })
-    ids.push(persisted.transaction.id)
-  }
-  return { ...fixture, ids }
-})
 
 await Effect.runPromise(context.recreateTestDatabase())
 
@@ -709,10 +759,112 @@ describe("TransactionsApiLive", () => {
   beforeEach(() => Effect.runPromise(Effect.asVoid(context.recreateTestDatabase())))
 
   it.effect(
+    "shares exact writer-linked attention across rows, count, cursor and historical choices",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* seedQueryFilterFixtures(true)
+        const calculation = yield* context.runWithLayer({
+          layer: runLayer,
+          effect: Effect.flatMap(CalculationRunService, (service) =>
+            service.recompute({
+              id: runId(80),
+              principalId: PrincipalId.make(fixture.principalId),
+              jurisdiction: scope.jurisdiction,
+              taxYear: TaxYear.make(2025),
+              reportingCurrency: EUR,
+              accountingChoices: [],
+            })
+          ),
+        })
+        expect(calculation.status).toBe("partial")
+        const client = yield* makeAuthenticatedClient({ userId: fixture.userId })
+        const all = yield* client.transactions.listTransactions({ query: { limit: 10 } })
+        expect(all.totalCount).toBe(3)
+        expect(
+          all.transactions
+            .filter((row) => row.attention)
+            .map((row) => row.transactionId)
+            .sort()
+        ).toEqual([fixture.ids[1], fixture.ids[2]].sort())
+        const sale = all.transactions.find((row) => row.transactionId === fixture.ids[1])
+        expect(sale).toMatchObject({ attention: true, needsReview: false, realizedGainLoss: "10" })
+        expect(all.transactions.find((row) => row.transactionId === fixture.ids[0])).toMatchObject({
+          attention: false,
+          needsReview: false,
+        })
+        const first = yield* client.transactions.listTransactions({
+          query: { attention: true, limit: 1 },
+        })
+        expect(first.totalCount).toBe(2)
+        expect(first.transactions).toHaveLength(1)
+        const cursor = first.page.nextCursor
+        if (cursor === null) return yield* Effect.die("Expected attention cursor")
+        const second = yield* client.transactions.listTransactions({
+          query: { attention: true, limit: 1, cursor },
+        })
+        expect(second.totalCount).toBe(2)
+        expect(second.page.hasMore).toBe(false)
+        expect(
+          new Set([...first.transactions, ...second.transactions].map((row) => row.transactionId))
+            .size
+        ).toBe(2)
+        const jobs = yield* SourceSyncJobRepository
+        const job = yield* jobs.createOrReuseJob({
+          sourceId: fixture.sourceId,
+          principalId: fixture.principalId,
+          mode: "sync",
+          maxAttempts: 1,
+        })
+        yield* jobs.claimJob({
+          jobId: job.id,
+          workerId: "attention-proof",
+          startedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-09-10T00:00:00Z")),
+        })
+        yield* jobs.failJob({
+          jobId: job.id,
+          message: "Fixture scope-only failure",
+          completedAt: DateTime.toDateUtc(DateTime.makeUnsafe("2026-09-10T00:00:00Z")),
+        })
+        const afterFailure = yield* client.transactions.listTransactions({
+          query: { attention: true, limit: 10 },
+        })
+        expect(afterFailure.totalCount).toBe(2)
+        expect(afterFailure.transactions.map((row) => row.transactionId).sort()).toEqual(
+          [fixture.ids[1], fixture.ids[2]].sort()
+        )
+        const invalid = yield* client.transactions
+          .listTransactions({ query: { attention: false, cursor } })
+          .pipe(Effect.result)
+        expect(invalid._tag).toBe("Failure")
+        const choices = yield* client.transactions.filterChoices()
+        expect(choices.assets.map((asset) => asset.assetId).sort()).toEqual(
+          [TEST_BTC_ASSET_ID, "00000000-0000-4000-8000-000000009901"].sort()
+        )
+        expect(new Set(choices.assets.map((asset) => asset.symbol))).toEqual(new Set(["BTC"]))
+        expect(new Set(choices.assets.map((asset) => asset.name)).size).toBe(2)
+        const db = yield* drizzle
+        const inventory = yield* db
+          .select({ quantity: schema.calculationRunDerivedLots.remainingQuantity })
+          .from(schema.calculationRunDerivedLots)
+          .where(
+            and(
+              eq(schema.calculationRunDerivedLots.runId, runId(80)),
+              eq(schema.calculationRunDerivedLots.assetId, TEST_BTC_ASSET_ID)
+            )
+          )
+        expect(
+          inventory.every((lot) => BigDecimal.isZero(BigDecimal.fromStringUnsafe(lot.quantity)))
+        ).toBe(true)
+        const foreign = yield* makeAuthenticatedClient({ userId: fixtureIds.otherUserId })
+        expect((yield* foreign.transactions.filterChoices()).assets).toEqual([])
+      }).pipe(Effect.provide(HttpLive), Effect.scoped)
+  )
+
+  it.effect(
     "filters writer-produced rows by owned source sets and UTC dates with query-bound ordering",
     () =>
       Effect.gen(function* () {
-        const fixture = yield* seedQueryFilterFixtures
+        const fixture = yield* seedQueryFilterFixtures()
         const client = yield* makeAuthenticatedClient({ userId: fixture.userId })
         const sourceIds = [fixture.sourceId, fixtureIds.canonicalSourceId]
         const all = yield* client.transactions.listTransactions({ query: { sourceIds: [] } })
@@ -841,7 +993,7 @@ describe("TransactionsApiLive", () => {
 
   it.effect("rejects impossible date boundaries and accepts leap dates with explicit offsets", () =>
     Effect.gen(function* () {
-      const fixture = yield* seedQueryFilterFixtures
+      const fixture = yield* seedQueryFilterFixtures()
       for (const date of [
         "2025-02-30T00:00:00Z",
         "2025-02-29T00:00:00Z",
@@ -960,9 +1112,8 @@ describe("TransactionsApiLive", () => {
           fixture.principalId,
           ...selectedIds,
         ])
-        const captureReads = statements.filter(
-          ({ text }) =>
-            text.startsWith("select ") && text.includes('from "calculation_run_movement_inputs"')
+        const captureReads = statements.filter(({ text }) =>
+          text.startsWith('select "calculation_run_movement_inputs".')
         )
         expect(captureReads).toHaveLength(3)
         for (const read of captureReads) {
@@ -2430,6 +2581,7 @@ const seedCalculation = (quantity = "2") =>
 
 // Replay the fixture through the real reset and normalization writers, preserving writer-recorded targets.
 const replaySyntheticSource = (replacement?: {
+  readonly timestamp?: string
   readonly kind?: "acquisition" | "disposal" | "income" | "fee"
   readonly amount?: string
   readonly assetId?: string
@@ -2478,7 +2630,10 @@ const replaySyntheticSource = (replacement?: {
           sourceRawRecordId: null,
           externalId: old.externalId,
           externalGroupId: null,
-          timestamp: old.timestamp,
+          timestamp:
+            replacement?.timestamp === undefined
+              ? old.timestamp
+              : DateTime.toDateUtc(DateTime.makeUnsafe(replacement.timestamp)),
           transactionType: old.transactionType,
           providerTransactionType: old.providerTransactionType,
           providerStatus: "completed",
@@ -2532,7 +2687,10 @@ const replaySyntheticSource = (replacement?: {
                 sourceRawRecordId: null,
                 externalId: leg.externalId,
                 txHash: null,
-                timestamp: old.timestamp,
+                timestamp:
+                  replacement?.timestamp === undefined
+                    ? old.timestamp
+                    : DateTime.toDateUtc(DateTime.makeUnsafe(replacement.timestamp)),
                 principalId: PRINCIPAL_ID,
                 addressId: null,
                 assetId: replacement?.assetId ?? leg.assetId,
@@ -2953,12 +3111,30 @@ describe("writer-produced transaction list captures", () => {
         yield* db
           .insert(schema.assets)
           .values({ id: replayAssetId, name: "New replay asset", symbol: "NEW", type: "fungible" })
-        yield* replaySyntheticSource({ kind: "fee", amount: "99", assetId: replayAssetId })
+        yield* replaySyntheticSource({
+          kind: "fee",
+          amount: "99",
+          assetId: replayAssetId,
+          timestamp: "2027-03-01T00:00:00Z",
+        })
         const after = yield* client.transactions.listTransactions({ query: { limit: 10 } })
         const replayed = after.transactions.find((row) =>
           row.movements.some(({ targetId }) => targetId === fixture.acquisition.targetId)
         )?.movements[0]
         expect(replayed).toEqual(original)
+        expect(
+          before.transactions.find((row) =>
+            row.movements.some((movement) => movement.targetId === fixture.acquisition.targetId)
+          )?.attention
+        ).toBe(true)
+        expect(
+          after.transactions.find((row) =>
+            row.movements.some((movement) => movement.targetId === fixture.acquisition.targetId)
+          )?.attention
+        ).toBe(true)
+        const choices = yield* client.transactions.filterChoices()
+        expect(choices.assets.map((asset) => asset.assetId)).toContain(TEST_BTC_ASSET_ID)
+        expect(choices.assets.map((asset) => asset.assetId)).not.toContain(replayAssetId)
       }).pipe(Effect.provide(HttpLive), Effect.scoped)
   )
 

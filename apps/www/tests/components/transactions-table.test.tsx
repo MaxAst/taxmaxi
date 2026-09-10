@@ -55,6 +55,7 @@ const transaction: TransactionListItem = {
   fiatCurrency: "EUR",
   calculationState: "complete",
   needsReview: false,
+  attention: false,
 }
 
 const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://treatment.example.test" })

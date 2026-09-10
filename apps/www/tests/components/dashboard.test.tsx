@@ -279,6 +279,7 @@ const transaction = (transactionId: string, description: string) => ({
   fiatCurrency: "EUR",
   calculationState: "complete" as const,
   needsReview: false,
+  attention: false,
 })
 
 describe("Dashboard transaction pagination", () => {

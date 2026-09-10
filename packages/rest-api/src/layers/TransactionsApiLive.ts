@@ -23,6 +23,7 @@ import {
   TransactionBadRequestError,
   TransactionNotFoundError,
   TransactionDetailResponse,
+  TransactionFilterChoicesResponse,
   TransactionListItem,
   TransactionListMovement,
   TransactionListPageInfo,
@@ -53,6 +54,23 @@ export const TransactionsApiLive = HttpApiBuilder.group(TaxMaxiApi, "transaction
     const principalResolutionService = yield* PrincipalResolutionService
 
     return handlers
+      .handle("filterChoices", () =>
+        Effect.gen(function* () {
+          const { principal } = yield* principalResolutionService.resolveCurrentUserPrincipal.pipe(
+            Effect.mapError(() => internalError("Failed to resolve the current user."))
+          )
+          const choices = yield* repository
+            .filterChoices({
+              principalId: principal.id,
+              jurisdiction: GERMAN_JURISDICTION,
+              reportingCurrency: EUR,
+            })
+            .pipe(
+              Effect.mapError(() => internalError("Failed to load transaction filter choices."))
+            )
+          return TransactionFilterChoicesResponse.make(choices)
+        })
+      )
       .handle("getTransaction", ({ params, query }) =>
         Effect.gen(function* () {
           const { principal } = yield* principalResolutionService.resolveCurrentUserPrincipal.pipe(
@@ -137,6 +155,7 @@ export const TransactionsApiLive = HttpApiBuilder.group(TaxMaxiApi, "transaction
               from: query.from ?? null,
               to: query.to ?? null,
               order: query.order ?? "newest",
+              attention: query.attention ?? false,
               cursor: query.cursor ?? null,
               limit: query.limit ?? defaultPageLimit,
             })

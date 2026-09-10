@@ -39,6 +39,16 @@ const TransactionDateBoundary = Schema.String.check(
   )
 ).pipe(Schema.decodeTo(Schema.Date, SchemaTransformation.dateFromString))
 
+const TransactionAttentionQuery = Schema.Literals(["true", "false"]).pipe(
+  Schema.decodeTo(
+    Schema.Boolean,
+    SchemaTransformation.transform({
+      decode: (value) => value === "true",
+      encode: (value) => (value ? "true" : "false"),
+    })
+  )
+)
+
 /** Empty source selection means all owned sources; dates form a UTC half-open interval. */
 export const TransactionListQuery = Schema.Struct({
   sourceId: Schema.optional(Schema.String.check(Schema.isUUID())),
@@ -46,6 +56,7 @@ export const TransactionListQuery = Schema.Struct({
   from: Schema.optional(TransactionDateBoundary),
   to: Schema.optional(TransactionDateBoundary),
   order: Schema.optional(Schema.Literals(["newest", "oldest"])),
+  attention: Schema.optional(TransactionAttentionQuery),
   cursor: Schema.optional(Schema.String),
   limit: Schema.optional(
     Schema.FiniteFromString.check(
@@ -126,6 +137,8 @@ export class TransactionListItem extends Schema.Class<TransactionListItem>("Tran
   fiatCurrency: Schema.NullOr(Schema.String),
   calculationState: Schema.Literals(["complete", "partial"]),
   needsReview: Schema.Boolean,
+  /** An owned review or blocker explicitly links to this transaction or one of its movements. */
+  attention: Schema.Boolean,
 }) {}
 
 export class TransactionListPageInfo extends Schema.Class<TransactionListPageInfo>(
@@ -142,6 +155,22 @@ export class TransactionListResponse extends Schema.Class<TransactionListRespons
   transactions: Schema.Array(TransactionListItem),
   page: TransactionListPageInfo,
   totalCount: Schema.Finite,
+}) {}
+
+/** Owned economic assets available for filtering, including historical zero holdings. */
+export class TransactionFilterChoicesResponse extends Schema.Class<TransactionFilterChoicesResponse>(
+  "TransactionFilterChoicesResponse"
+)({
+  assets: Schema.Array(
+    Schema.Struct({
+      assetId: Schema.String,
+      symbol: Schema.String,
+      name: Schema.String,
+      type: Schema.Literals(["fungible", "nft"]),
+      coingeckoCoinId: Schema.NullOr(Schema.String),
+      logoUrl: Schema.NullOr(Schema.String),
+    })
+  ),
 }) {}
 
 /** Missing, foreign and activity identifiers share the same public failure. */
@@ -302,6 +331,17 @@ export const TransactionDetailResponse = Schema.Struct({
   }),
 })
 
+const filterChoices = HttpApiEndpoint.get("filterChoices", "/transactions/filter-choices", {
+  success: TransactionFilterChoicesResponse,
+  error: [InternalServerError],
+}).annotateMerge(
+  OpenApi.annotations({
+    summary: "Get transaction filter choices",
+    description:
+      "Returns owned economic assets with disambiguating metadata, including historical assets with zero holdings. Choices use the same completed calculation projection as transaction rows.",
+  })
+)
+
 const getTransaction = HttpApiEndpoint.get("getTransaction", "/transactions/:transactionId", {
   params: Schema.Struct({ transactionId: Schema.String.check(Schema.isUUID()) }),
   query: TransactionDetailQuery,
@@ -323,12 +363,12 @@ const listTransactions = HttpApiEndpoint.get("listTransactions", "/transactions"
   OpenApi.annotations({
     summary: "List transactions",
     description:
-      "Returns a stable cursor page of compact accounting transactions owned by the authenticated principal. Select exact owned sources with repeated sourceIds parameters or the sourceId shorthand, never both. Omitted or empty sourceIds selects all owned sources. Optional from/to timestamps require explicit UTC offsets and form an inclusive-start, exclusive-end interval. Order is newest (default) or oldest, with transaction IDs breaking timestamp ties. Cursors are bound to the source set, dates and order. Rows and totalCount share these filters and exclude provider activity without accounting movements.",
+      "Returns a stable cursor page of compact accounting transactions owned by the authenticated principal. Select exact owned sources with repeated sourceIds parameters or the sourceId shorthand, never both. Omitted or empty sourceIds selects all owned sources. Optional from/to timestamps require explicit UTC offsets and form an inclusive-start, exclusive-end interval. Order is newest (default) or oldest, with transaction IDs breaking timestamp ties. Optional attention=true selects rows with an explicitly linked owned review or blocker; false or omitted keeps all rows. Cursors are bound to the source set, dates, order and attention selection. Rows and totalCount share these filters and exclude provider activity without accounting movements.",
   })
 )
 
 export class TransactionsApi extends HttpApiGroup.make("transactions")
-  .add(listTransactions, getTransaction)
+  .add(listTransactions, filterChoices, getTransaction)
   .middleware(AuthMiddleware)
   .prefix("/v1")
   .annotateMerge(

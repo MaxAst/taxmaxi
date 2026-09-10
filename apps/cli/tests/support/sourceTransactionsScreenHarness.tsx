@@ -39,6 +39,7 @@ const row: TransactionListItem = {
   realizedGainLoss: "12.34",
   fiatCurrency: "EUR",
   needsReview: false,
+  attention: false,
 }
 const scenario = process.argv[2]
 const partialRow: TransactionListItem = {
@@ -48,6 +49,7 @@ const partialRow: TransactionListItem = {
   realizedGainLoss: null,
   fiatCurrency: null,
   needsReview: true,
+  attention: true,
 }
 const exactValues: Readonly<Record<string, string>> = {
   "large-gain": "9007199254740993",
@@ -61,11 +63,12 @@ const firstRows: ReadonlyArray<TransactionListItem> = (() => {
   if (scenario === "partial") return [partialRow]
   if (scenario === "zero") return [{ ...row, realizedGainLoss: "0" }]
   if (exactValue !== undefined) return [{ ...row, realizedGainLoss: exactValue }]
-  if (scenario === "complete-review") return [{ ...row, needsReview: true }]
+  if (scenario === "complete-review") return [{ ...row, needsReview: true, attention: true }]
   if (isShortTerminal) {
     return Array.from({ length: 8 }, (_, index) => ({
       ...(scenario === "short-review" ? row : partialRow),
       needsReview: true,
+      attention: true,
       transactionId: `short-${index}`,
       description: `Trade ${index}`,
       movements: [

@@ -104,6 +104,8 @@ export interface TransactionListItem {
   readonly fiatCurrency: string | null
   readonly calculationState: "complete" | "partial"
   readonly needsReview: boolean
+  /** Explicit owned review or movement/transaction-linked blocker; independent of scope status. */
+  readonly attention: boolean
 }
 
 /** Stable cursor page with an exact count for principal transactions that have accounting legs. */
@@ -123,12 +125,32 @@ export interface TransactionListParams {
   readonly from: Date | null
   readonly to: Date | null
   readonly order: "newest" | "oldest"
+  readonly attention?: boolean
   readonly cursor: string | null
   readonly limit: number
 }
 
+/** Owned historical economic asset metadata, including assets whose inventory is fully sold. */
+export interface TransactionFilterAssetChoice {
+  readonly assetId: string
+  readonly symbol: string
+  readonly name: string
+  readonly type: "fungible" | "nft"
+  readonly coingeckoCoinId: string | null
+  readonly logoUrl: string | null
+}
+
 /** Persistence contract for the canonical principal-owned transaction list. */
 export interface TransactionListRepositoryService {
+  /** Choices follow completed movement identity, independently of current holdings and page filters. */
+  readonly filterChoices: (params: {
+    readonly principalId: string
+    readonly jurisdiction: JurisdictionCode
+    readonly reportingCurrency: CurrencyCode
+  }) => Effect.Effect<
+    { readonly assets: ReadonlyArray<TransactionFilterAssetChoice> },
+    PersistenceError
+  >
   readonly list: (
     params: TransactionListParams
   ) => Effect.Effect<TransactionListPage, TransactionListRepositoryError>
