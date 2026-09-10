@@ -22,6 +22,7 @@ import {
 } from "taxmaxi"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { transactionFilterInput, type TransactionFilters } from "#/lib/transaction-filters"
 import { Dashboard } from "#/components/dashboard"
 import type { SourceSyncIslandItem } from "#/components/source-sync-island"
 import { queryKeys, queries, refreshTransactionQueries } from "#/integrations/taxmaxi/queries"
@@ -769,8 +770,13 @@ describe("Dashboard calculation refresh", () => {
         .every((url) => url.searchParams.get("taxYear") === "2024")
     ).toBe(true)
     const listRequests = requests.filter((url) => url.pathname.endsWith("/transactions"))
-    expect(listRequests).toHaveLength(4)
-    expect(new Set(listRequests.map((url) => url.search)).size).toBe(1)
+    expect(listRequests).toHaveLength(5)
+    expect(listRequests[0]?.searchParams.has("sourceIds")).toBe(false)
+    expect(
+      listRequests
+        .slice(1)
+        .every((url) => url.searchParams.get("sourceIds") === row.source.sourceId)
+    ).toBe(true)
     const settledReads = requests.filter((url) => url.pathname.endsWith(row.transactionId)).length
     await tick(4_000)
     expect(requests.filter((url) => url.pathname.endsWith(row.transactionId))).toHaveLength(
@@ -1258,7 +1264,8 @@ describe("Dashboard calculation refresh", () => {
     await tick()
     fireEvent.click(screen.getByRole("button", { name: "Source B" }))
     await tick()
-    expect(transactionCalls).toBe(calls)
+    // Returning to an invalidated all-sources query refetches that scope once.
+    expect(transactionCalls).toBe(calls + 1)
   })
 
   it("shows unavailable positions instead of the API's empty zero summary when no active run exists", async () => {
@@ -2208,7 +2215,7 @@ describe("Inspector cursor navigation", () => {
     totalCount: 1204,
     page: { hasMore: true, nextCursor: `page-${offset + 25}` },
   })
-  function setup() {
+  function setup(filters?: TransactionFilters) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     client.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
     testTaxMaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://navigation.example.test" })
@@ -2220,17 +2227,143 @@ describe("Inspector cursor navigation", () => {
     const list = vi
       .spyOn(testTaxMaxi.transactions, "list")
       .mockImplementation(async (input) => page(input?.cursor === "page-25" ? 25 : 0))
-    const view = render(
+    const tree = (filters?: TransactionFilters) => (
       <QueryClientProvider client={client}>
-        <Dashboard accounts={[]} sourceOverviews={syncedOverviews} />
+        <Dashboard accounts={[]} sourceOverviews={syncedOverviews} filters={filters} />
       </QueryClientProvider>
     )
-    return { client, list, ...view }
+    const view = render(tree(filters))
+    return {
+      client,
+      list,
+      ...view,
+      changeFilters: (next: TransactionFilters) => view.rerender(tree(next)),
+    }
   }
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
   })
+
+  it("shares source scope with portfolio and retains all transaction filters through pages and inspector neighbours", async () => {
+    const filters: TransactionFilters = {
+      sourceIds: [SOURCE_A, "00000000-0000-4000-8000-000000000202"],
+      assetIds: ["00000000-0000-4000-8000-000000000203"],
+      categories: ["staking"],
+      from: "2026-03-29",
+      to: "2026-03-29",
+      timezone: "Europe/Berlin",
+      order: "oldest",
+      attention: true,
+    }
+    const scope = transactionFilterInput(filters)
+    const { client, list } = setup(filters)
+    await screen.findByText("Transaction 25")
+    expect(list).toHaveBeenCalledWith({ ...scope, cursor: null, limit: 25 })
+    expect(testTaxMaxi.portfolio.listAssets).toHaveBeenCalledWith({
+      sourceIds: filters.sourceIds,
+      currency: "eur",
+    })
+    expect(screen.queryByRole("button", { name: "Source actions" })).toBeNull()
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open transaction · Transaction 25 · row-25" })
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Next transaction" }))
+    expect(await screen.findByText("26 of 1,204")).toBeTruthy()
+    expect(list).toHaveBeenLastCalledWith({ ...scope, cursor: "page-25", limit: 25 })
+    expect(
+      client.getQueryData(queryKeys.transactionList({ ...scope, cursor: "page-25", limit: 25 }))
+    ).toBeDefined()
+    expect(
+      client.getQueryData(queryKeys.transactionList({ cursor: "page-25", limit: 25 }))
+    ).toBeUndefined()
+    fireEvent.click(screen.getByRole("button", { name: "Previous transaction" }))
+    expect(await screen.findByText("25 of 1,204")).toBeTruthy()
+    expect(list).toHaveBeenLastCalledWith({ ...scope, cursor: null, limit: 25 })
+    act(() => {
+      void refreshTransactionQueries(client)
+    })
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(4))
+    expect(list).toHaveBeenLastCalledWith({ ...scope, cursor: null, limit: 25 })
+    client.clear()
+  })
+
+  it("shows changed-filter loading without old rows while leaving portfolio scope available", async () => {
+    const { client, list, changeFilters } = setup({})
+    await screen.findByText("Transaction 25")
+    const portfolioReads = vi.mocked(testTaxMaxi.portfolio.listAssets).mock.calls.length
+    let finish: ((page: TransactionListResponse) => void) | undefined
+    list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    changeFilters({ assetIds: [SOURCE_A], categories: ["staking"] })
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+    expect(screen.queryByText("Transaction 25")).toBeNull()
+    expect(
+      screen.getByRole("region", { name: "Transactions" }).querySelector('[aria-busy="true"]')
+    ).toBeTruthy()
+    expect(testTaxMaxi.portfolio.listAssets).toHaveBeenCalledTimes(portfolioReads)
+    expect(client.getQueryData(queryKeys.portfolioAssets())).toEqual(portfolio())
+    expect(queryKeys.portfolioAssets([SOURCE_A, SOURCE_A])).toEqual(
+      queryKeys.portfolioAssets(SOURCE_A)
+    )
+    await act(async () => finish?.(page(0)))
+    await screen.findByText("Transaction 25")
+    expect(
+      screen.getByRole("region", { name: "Transactions" }).querySelector('[aria-busy="true"]')
+    ).toBeNull()
+    client.clear()
+  })
+
+  it.each([
+    { sourceIds: [SOURCE_A] },
+    { assetIds: [SOURCE_A] },
+    { categories: ["staking"] },
+    { from: "2026-03-29" },
+    { to: "2026-03-29" },
+    { timezone: "America/New_York" },
+    { order: "oldest" },
+    { attention: true },
+  ] satisfies TransactionFilters[])(
+    "clears cursor and inspector and drops an old neighbour after scope changes: %j",
+    async (filters) => {
+      const { client, list, changeFilters } = setup({})
+      await screen.findByText("Transaction 25")
+      fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+      await screen.findByText("Transaction 26")
+      fireEvent.click(
+        screen.getByRole("button", { name: "Open transaction · Transaction 26 · row-26" })
+      )
+      let finish: ((page: TransactionListResponse) => void) | undefined
+      list.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          })
+      )
+      fireEvent.click(screen.getByRole("button", { name: "Previous transaction" }))
+      changeFilters(filters)
+      await screen.findByText("1–25 of 1204")
+      expect(screen.queryByRole("complementary")).toBeNull()
+      await act(async () => finish?.(page(0)))
+      expect(screen.queryByRole("complementary")).toBeNull()
+      expect(screen.getByText("1–25 of 1204")).toBeTruthy()
+      expect(
+        list.mock.calls.some(
+          ([input]) =>
+            JSON.stringify(input) ===
+            JSON.stringify({ ...transactionFilterInput(filters), cursor: null, limit: 25 })
+        )
+      ).toBe(true)
+      changeFilters({})
+      expect(screen.queryByRole("complementary")).toBeNull()
+      expect(screen.getByText("1–25 of 1204")).toBeTruthy()
+      client.clear()
+    }
+  )
 
   it("crosses both boundaries only after success, retries in place, and uses the exact total", async () => {
     const { client, list } = setup()

@@ -12,6 +12,12 @@ import {
   type TransactionListItem,
 } from "taxmaxi"
 
+import {
+  EMPTY_TRANSACTION_FILTERS,
+  transactionFilterInput,
+  type TransactionFilters,
+} from "#/lib/transaction-filters"
+
 import { appSurfaceClassName } from "#/components/app-workspace"
 import { CalculationStatus } from "#/components/calculation-status"
 import { AssetsTable } from "#/components/assets-table"
@@ -156,7 +162,11 @@ export function Dashboard({
   sourceOverviews = NO_OVERVIEWS,
   sourceSyncSeeds,
   startSourceSync,
+  filters: controlledFilters,
+  onFiltersChange,
 }: {
+  filters?: TransactionFilters
+  onFiltersChange?: (filters: TransactionFilters) => void
   accounts?: ReadonlyArray<Account>
   createWalletSource?: (walletAddress: string) => Promise<Account>
   getSourceSyncJob?: (input: SourceSyncJobInput) => Promise<SourceSyncJob>
@@ -263,7 +273,15 @@ export function Dashboard({
     return () => window.clearTimeout(timeout)
   }, [authenticationLost, syncCompletedAt])
 
-  const [accountScope, setAccountScope] = useState<AccountScope>(ALL_ACCOUNTS)
+  const [localFilters, setLocalFilters] = useState(EMPTY_TRANSACTION_FILTERS)
+  const filters = controlledFilters ?? localFilters
+  const filterScope = JSON.stringify(filters)
+  const transactionScope = useMemo(() => transactionFilterInput(filters), [filters])
+  const sourceIds = filters.sourceIds ?? []
+  const selectedSourceId = sourceIds.length === 1 ? sourceIds[0] : undefined
+  const accountScope = selectedSourceId ?? ALL_ACCOUNTS
+  const portfolioScope = sourceIds.length > 1 ? sourceIds : selectedSourceId
+  const [observedFilterScope, setObservedFilterScope] = useState(filterScope)
   const [taxYear] = useState<TaxYear>(2025)
   const [transactionCursors, setTransactionCursors] = useState<ReadonlyArray<string | null>>([null])
   const [transactionPageSize, setTransactionPageSize] =
@@ -297,15 +315,26 @@ export function Dashboard({
     }
   }
 
+  // Reset before committing a new URL scope, including browser Back. An old
+  // cursor/selection must never render or navigate against the new query.
+  if (observedFilterScope !== filterScope) {
+    setObservedFilterScope(filterScope)
+    cancelNavigation()
+    setTransactionCursors([null])
+    setSequenceRefreshVersion(null)
+    setSelectedTransaction(null)
+    transactionOpenerRef.current = null
+  }
+
   const resetTransactionSequence = useCallback(() => {
     cancelNavigation()
     setTransactionCursors([null])
     setSequenceRefreshVersion(
       queryClient.getQueryState(
-        queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
+        queryKeys.transactionList({ ...transactionScope, cursor: null, limit: transactionPageSize })
       )?.dataUpdateCount ?? 0
     )
-  }, [cancelNavigation, queryClient, transactionPageSize])
+  }, [cancelNavigation, queryClient, transactionPageSize, transactionScope])
 
   const accountsById = useMemo(
     () => new Map(accounts.map((account) => [account.id, account])),
@@ -314,10 +343,10 @@ export function Dashboard({
 
   const activeAccounts = useMemo(
     () =>
-      accountScope === ALL_ACCOUNTS
-        ? accounts
-        : accounts.filter((account) => account.id === accountScope),
-    [accountScope, accounts]
+      filters.sourceIds?.length
+        ? accounts.filter((account) => filters.sourceIds?.includes(account.id))
+        : accounts,
+    [filters.sourceIds, accounts]
   )
 
   const activeAccountIds = useMemo(
@@ -325,9 +354,8 @@ export function Dashboard({
     [activeAccounts]
   )
 
-  const selectedSourceId = accountScope === ALL_ACCOUNTS ? undefined : accountScope
   const portfolioQuery = useQuery({
-    ...queries.portfolioAssets(taxmaxi, selectedSourceId),
+    ...queries.portfolioAssets(taxmaxi, portfolioScope),
     enabled: !authenticationLost,
     refetchInterval: (query) => {
       if (!isVisible || authenticationLost || isTaxMaxiUnauthorizedError(query.state.error))
@@ -339,9 +367,11 @@ export function Dashboard({
   })
   const activeHoldings = portfolioQuery.data?.assets ?? []
   const isSwitchingPortfolio = portfolioQuery.isPending
-  const transactionCursor = transactionCursors.at(-1) ?? null
+  const transactionCursor =
+    observedFilterScope === filterScope ? (transactionCursors.at(-1) ?? null) : null
   const transactionQuery = useQuery({
     ...queries.transactionList(taxmaxi, {
+      ...transactionScope,
       cursor: transactionCursor,
       limit: transactionPageSize,
     }),
@@ -359,12 +389,13 @@ export function Dashboard({
         )
           return
         const key = queryKeys.transactionList({
+          ...transactionScope,
           cursor: transactionCursor,
           limit: transactionPageSize,
         })
         if (JSON.stringify(event.query.queryKey) === JSON.stringify(key)) cancelNavigation()
       }),
-    [cancelNavigation, queryClient, transactionCursor, transactionPageSize]
+    [cancelNavigation, queryClient, transactionCursor, transactionPageSize, transactionScope]
   )
   const pageShape = transactionQuery.data
     ? JSON.stringify([
@@ -384,7 +415,11 @@ export function Dashboard({
       setTransactionCursors([null])
       setSequenceRefreshVersion(
         queryClient.getQueryState(
-          queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
+          queryKeys.transactionList({
+            ...transactionScope,
+            cursor: null,
+            limit: transactionPageSize,
+          })
         )?.dataUpdateCount ?? 0
       )
     }
@@ -392,10 +427,20 @@ export function Dashboard({
   useEffect(() => {
     if (sequenceRefreshVersion !== null && transactionCursor === null)
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.transactionList({ cursor: null, limit: transactionPageSize }),
+        queryKey: queryKeys.transactionList({
+          ...transactionScope,
+          cursor: null,
+          limit: transactionPageSize,
+        }),
         exact: true,
       })
-  }, [queryClient, sequenceRefreshVersion, transactionCursor, transactionPageSize])
+  }, [
+    queryClient,
+    sequenceRefreshVersion,
+    transactionCursor,
+    transactionPageSize,
+    transactionScope,
+  ])
 
   const survivingRow = transactionQuery.data?.transactions.find(
     (row) => row.transactionId === selectedTransaction?.transactionId
@@ -527,7 +572,7 @@ export function Dashboard({
   const sequenceReady =
     sequenceRefreshVersion === null ||
     (queryClient.getQueryState(
-      queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
+      queryKeys.transactionList({ ...transactionScope, cursor: null, limit: transactionPageSize })
     )?.dataUpdateCount ?? 0) > sequenceRefreshVersion
   if (sequenceRefreshVersion !== null && sequenceReady) setSequenceRefreshVersion(null)
   const position =
@@ -561,7 +606,11 @@ export function Dashboard({
     navigating.current = true
     setNavigationPending(true)
     setNavigationFailure(null)
-    const input = { cursor: cursors.at(-1) ?? null, limit: transactionPageSize }
+    const input = {
+      ...transactionScope,
+      cursor: cursors.at(-1) ?? null,
+      limit: transactionPageSize,
+    }
     try {
       // A neighbour is speculative until it succeeds. Do not move the visible
       // query or write a late response into another session's cache.
@@ -575,7 +624,7 @@ export function Dashboard({
       // Query cache delivery precedes React's run-change effect. Compare the
       // producer here too so a response cannot slip through that interval.
       const currentRunId = queryClient.getQueryData(
-        queries.portfolioAssets(taxmaxi, selectedSourceId).queryKey
+        queries.portfolioAssets(taxmaxi, portfolioScope).queryKey
       )?.activeRun?.runId
       if (currentRunId !== activeRunId || page.totalCount !== totalTransactions) {
         resetTransactionSequence()
@@ -635,7 +684,11 @@ export function Dashboard({
       if (selectedTransaction !== null || transactionCursor !== null)
         setSequenceRefreshVersion(
           queryClient.getQueryState(
-            queryKeys.transactionList({ cursor: null, limit: transactionPageSize })
+            queryKeys.transactionList({
+              ...transactionScope,
+              cursor: null,
+              limit: transactionPageSize,
+            })
           )?.dataUpdateCount ?? 0
         )
       setTransactionCursors([null])
@@ -660,6 +713,7 @@ export function Dashboard({
       transactionPageSize,
       selectedTransaction,
       transactionCursor,
+      transactionScope,
     ]
   )
 
@@ -735,11 +789,13 @@ export function Dashboard({
   }, [activeAccountIds, activeAccounts, portfolioQuery.data, taxYear])
 
   const onAccountScopeChange = (scope: AccountScope) => {
-    if (scope === accountScope) return
+    if (scope === accountScope && sourceIds.length <= 1) return
     cancelNavigation()
     setTransactionCursors([null])
     setSelectedTransaction(null)
-    setAccountScope(scope)
+    const next = { ...filters, sourceIds: scope === ALL_ACCOUNTS ? [] : [scope] }
+    if (onFiltersChange) onFiltersChange(next)
+    else setLocalFilters(next)
   }
 
   const {

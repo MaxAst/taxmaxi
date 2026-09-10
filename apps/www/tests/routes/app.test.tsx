@@ -1,5 +1,13 @@
 // @vitest-environment jsdom
 
+import {
+  createMemoryHistory,
+  createRootRouteWithContext,
+  createRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router"
+import type { TransactionFilters } from "#/lib/transaction-filters"
 import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query"
 import { act, cleanup, render, waitFor } from "@testing-library/react"
 import type { ReactNode } from "react"
@@ -11,6 +19,8 @@ import { Route } from "#/routes/app"
 
 const dashboard = vi.hoisted<{
   onSourceSyncCompleted: ((sourceId: string) => Promise<void>) | undefined
+  filters?: TransactionFilters
+  onFiltersChange?: (filters: TransactionFilters) => void
 }>(() => ({ onSourceSyncCompleted: undefined }))
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
@@ -18,7 +28,13 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   Outlet: () => null,
 }))
 vi.mock("#/components/dashboard", () => ({
-  Dashboard: (props: { onSourceSyncCompleted: (sourceId: string) => Promise<void> }) => {
+  Dashboard: (props: {
+    onSourceSyncCompleted: (sourceId: string) => Promise<void>
+    filters: TransactionFilters
+    onFiltersChange: (filters: TransactionFilters) => void
+  }) => {
+    dashboard.filters = props.filters
+    dashboard.onFiltersChange = props.onFiltersChange
     dashboard.onSourceSyncCompleted = props.onSourceSyncCompleted
     return null
   },
@@ -80,6 +96,7 @@ it("cancels old transaction delivery while the source overview refresh is still 
   const transactions = new QueryObserver(queryClient, options)
   const stopTransactions = transactions.subscribe(() => undefined)
   vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, taxmaxi: () => taxmaxi })
+  vi.spyOn(Route, "useSearch").mockReturnValue({})
   vi.spyOn(Route, "useNavigate").mockReturnValue(vi.fn().mockResolvedValue(undefined))
   const Component = Route.options.component
   expect(Component).toBeDefined()
@@ -115,4 +132,52 @@ it("cancels old transaction delivery while the source overview refresh is still 
     stopTransactions()
     queryClient.clear()
   }
+})
+
+it("restores filter sets and timezone through real router Back while retaining unrelated URL keys", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  queryClient.setQueryData(queryKeys.sourceList(), { sources: [] })
+  const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://route.example.test" })
+  const root = createRootRouteWithContext<{ queryClient: QueryClient; taxmaxi: () => TaxMaxi }>()()
+  const route = createRoute({
+    getParentRoute: () => root,
+    path: "/app",
+    validateSearch: Route.options.validateSearch,
+    component: Route.options.component,
+  })
+  const history = createMemoryHistory({ initialEntries: ["/app?unrelated=keep"] })
+  const router = createRouter({
+    routeTree: root.addChildren([route]),
+    history,
+    context: { queryClient, taxmaxi: () => taxmaxi },
+  })
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>
+  )
+  await waitFor(() => expect(dashboard.filters).toEqual({}))
+  const original: TransactionFilters = {
+    sourceIds: ["00000000-0000-4000-8000-000000000001"],
+    assetIds: ["00000000-0000-4000-8000-000000000002"],
+    categories: ["staking"],
+    from: "2026-03-29",
+    to: "2026-03-29",
+    timezone: "Europe/Berlin",
+    order: "oldest",
+    attention: true,
+  }
+  await act(async () => dashboard.onFiltersChange?.(original))
+  await waitFor(() => expect(dashboard.filters).toEqual(original))
+  expect(router.state.location.search).toMatchObject({ unrelated: "keep", ...original })
+  await act(async () =>
+    dashboard.onFiltersChange?.({ sourceIds: [], timezone: "America/New_York" })
+  )
+  await waitFor(() =>
+    expect(dashboard.filters).toEqual({ sourceIds: [], timezone: "America/New_York" })
+  )
+  await act(async () => history.back())
+  await waitFor(() => expect(dashboard.filters).toEqual(original))
+  expect(router.state.location.search).toMatchObject({ unrelated: "keep", ...original })
+  queryClient.clear()
 })

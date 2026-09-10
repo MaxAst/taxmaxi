@@ -49,6 +49,12 @@ const normalizeAssetExceptionListInput = (
   ...(input.limit !== undefined ? { limit: input.limit } : {}),
 })
 
+const portfolioSourceKey = (source: string | ReadonlyArray<string> | undefined) => {
+  if (typeof source === "string") return source
+  const ids = [...new Set(source)].sort()
+  return ids.length === 0 ? "all" : ids.length === 1 ? ids[0] : ids
+}
+
 export const queryKeys = {
   all: ["taxmaxi"] as const,
   account: () => [...queryKeys.all, "account"] as const,
@@ -66,8 +72,8 @@ export const queryKeys = {
   sources: () => [...queryKeys.all, "sources"] as const,
   sourceList: () => [...queryKeys.sources(), "list"] as const,
   sourceOverview: (sourceId: string) => [...queryKeys.sources(), sourceId, "overview"] as const,
-  portfolioAssets: (sourceId?: string) =>
-    [...queryKeys.all, "portfolio", "assets", sourceId ?? "all"] as const,
+  portfolioAssets: (sourceId?: string | ReadonlyArray<string>) =>
+    [...queryKeys.all, "portfolio", "assets", portfolioSourceKey(sourceId)] as const,
   transactions: () => [...queryKeys.all, "transactions"] as const,
   transactionCalculationStatus: (taxYear: number) =>
     [...queryKeys.transactions(), "calculation-status", taxYear] as const,
@@ -207,14 +213,17 @@ export const queries = {
       queryFn: async () => taxmaxi.sources.getOverview({ sourceId }),
       staleTime: 30 * 1000,
     }),
-  portfolioAssets: (taxmaxi: TaxMaxi, sourceId?: string) =>
+  portfolioAssets: (taxmaxi: TaxMaxi, sourceId?: string | ReadonlyArray<string>) =>
     queryOptions({
       queryKey: queryKeys.portfolioAssets(sourceId),
       queryFn: async ({ signal }) => {
         // The SDK read has no transport signal. Consuming Query's signal still
         // cancels delivery and retries when the dashboard leaves this scope.
         signal.throwIfAborted()
-        return taxmaxi.portfolio.listAssets({ sourceId, currency: "eur" })
+        return taxmaxi.portfolio.listAssets({
+          ...(typeof sourceId === "string" ? { sourceId } : { sourceIds: sourceId }),
+          currency: "eur",
+        })
       },
       staleTime: 30 * 1000,
       retry: (failureCount, error) => !isTaxMaxiUnauthorizedError(error) && failureCount < 2,
