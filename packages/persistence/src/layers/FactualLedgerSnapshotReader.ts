@@ -1470,7 +1470,7 @@ export const makeFactualLedgerSnapshotReader = Effect.gen(function* () {
     occurredBefore,
     principalId,
     reportingCurrency,
-  }: LoadParams): Effect.Effect<FactualLedgerSnapshot, PersistenceError> =>
+  }: LoadParams): Effect.Effect<FactualLedgerSnapshot, PersistenceError | Schema.SchemaError> =>
     Effect.gen(function* () {
       const supportedReportingCurrency = yield* validateReportingCurrency(reportingCurrency)
       const legTargetRows = yield* db
@@ -1694,7 +1694,8 @@ export const makeFactualLedgerSnapshotReader = Effect.gen(function* () {
       const encodedValuations = new Map<string, Schema.Codec.Encoded<typeof ValuationFact>[]>()
       for (const fact of effectiveValuationFacts) {
         const existing = encodedValuations.get(fact.eventId) ?? []
-        existing.push(Schema.encodeSync(ValuationFact)(fact))
+        const encoded = yield* Schema.encodeEffect(ValuationFact)(fact)
+        existing.push(encoded)
         encodedValuations.set(fact.eventId, existing)
       }
       // Follow the event links recorded above and retain the completed combined inputs.

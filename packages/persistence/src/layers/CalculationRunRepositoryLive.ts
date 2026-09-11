@@ -1138,12 +1138,10 @@ const make = Effect.gen(function* () {
       for (const movement of params.movements.values()) {
         const sourceId = movement.current?.sourceId ?? movement.corrections[0]?.history.sourceId
         if (sourceId === undefined)
-          return yield* Effect.fail(
-            new PersistenceError({
-              operation: "calculationRunRepository.captureMovement",
-              cause: "Movement has no recorded source link",
-            })
-          )
+          return yield* new PersistenceError({
+            operation: "calculationRunRepository.captureMovement",
+            cause: "Movement has no recorded source link",
+          })
         const eventId = movement.effective.event?.id ?? null
         const selection =
           eventId === null ? undefined : selections.get(AccountingEventId.make(eventId))
@@ -1152,12 +1150,10 @@ const make = Effect.gen(function* () {
           movement.effective.event._tag !== "custody_movement" &&
           selection === undefined
         )
-          return yield* Effect.fail(
-            new PersistenceError({
-              operation: "calculationRunRepository.captureMovement",
-              cause: "Accounting event has no recorded valuation selection",
-            })
-          )
+          return yield* new PersistenceError({
+            operation: "calculationRunRepository.captureMovement",
+            cause: "Accounting event has no recorded valuation selection",
+          })
         const valuation: CalculationRunMovementValuation =
           selection?._tag === "selected"
             ? {

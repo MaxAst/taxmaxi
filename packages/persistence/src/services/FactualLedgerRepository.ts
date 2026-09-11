@@ -240,7 +240,9 @@ export interface FactualLedgerSnapshot {
 
 /** Persistence contract for adapting stored rows to a factual ledger. */
 export interface FactualLedgerRepositoryShape {
-  readonly load: (params: LoadFactualLedgerParams) => Effect.Effect<FactualLedger, PersistenceError>
+  readonly load: (
+    params: LoadFactualLedgerParams
+  ) => Effect.Effect<FactualLedger, PersistenceError | Schema.SchemaError>
 }
 
 /** Context tag for factual-ledger reads. */
