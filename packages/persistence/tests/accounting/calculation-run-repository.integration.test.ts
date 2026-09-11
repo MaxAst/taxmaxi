@@ -2105,7 +2105,7 @@ describe("CalculationRunRepositoryLive", () => {
 
   it.effect("rejects reuse of a run ID for identical and different payloads", () =>
     Effect.gen(function* () {
-      yield* runPgEffect(seedCalculationRunFixture())
+      yield* runPgEffect(seedCalculationRunFixture({ includeOtherPrincipal: true }))
       yield* runRepository(persistResult())
 
       const identicalError = yield* runRepository(Effect.flip(persistResult()))
@@ -2117,43 +2117,282 @@ describe("CalculationRunRepositoryLive", () => {
         )
       )
 
+      const otherOwnerError = yield* runRepository(
+        Effect.flip(
+          persistResult({
+            principalId: OTHER_PRINCIPAL_ID,
+            result: completeResult({
+              custodyUnitId: OTHER_CUSTODY_UNIT_ID,
+              custodySourceId: SourceId.make(OTHER_SOURCE_ID),
+            }),
+          })
+        )
+      )
+      expect(otherOwnerError).toBeInstanceOf(CalculationRunAlreadyStoredError)
+      const storedOwner = yield* runPgEffect(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          return yield* db
+            .select({
+              principalId: schema.calculationRuns.principalId,
+              taxYear: schema.calculationRuns.taxYear,
+            })
+            .from(schema.calculationRuns)
+        })
+      )
+      expect(storedOwner).toEqual([{ principalId: TEST_PRINCIPAL_ID, taxYear: 2025 }])
       expect(identicalError).toBeInstanceOf(CalculationRunAlreadyStoredError)
       expect(differentError).toBeInstanceOf(CalculationRunAlreadyStoredError)
+    })
+  )
+
+  it.effect("lets a waiting claim succeed when the first transaction rolls back", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* runPgEffect(seedCalculationRunFixture())
+        yield* runPgEffect(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            yield* db.execute(
+              sql.raw(`
+          create function reject_test_partial_claim() returns trigger as $$
+          begin
+            if exists (select 1 from calculation_runs where id = new.run_id and status = 'partial') then
+              perform pg_advisory_xact_lock(hashtextextended('calculation-claim-rollback-test', 0));
+              raise exception 'forced partial claim rollback';
+            end if;
+            return new;
+          end;
+          $$ language plpgsql;
+          create trigger reject_test_partial_claim before insert on active_calculation_runs
+          for each row execute function reject_test_partial_claim();
+        `)
+            )
+          })
+        )
+        yield* Effect.addFinalizer(() =>
+          runPgEffect(
+            Effect.gen(function* () {
+              const db = yield* drizzle
+              yield* db.execute(
+                sql`drop trigger if exists reject_test_partial_claim on active_calculation_runs`
+              )
+              yield* db.execute(sql`drop function if exists reject_test_partial_claim()`)
+            })
+          )
+        )
+        const held = yield* context.holdAdvisoryLock({ key: "calculation-claim-rollback-test" })
+        const failed = yield* Effect.forkChild(
+          runRepository(
+            persistResult({
+              result: {
+                ...completeResult(),
+                status: "partial",
+                blockers: [
+                  {
+                    code: "missing_valuation",
+                    eventId: DISPOSITION_EVENT_ID,
+                    assetId: TEST_BTC_ASSET_ID,
+                    custodyUnitId: TEST_CUSTODY_UNIT_ID,
+                    missingQuantity: null,
+                  },
+                ],
+              },
+            })
+          ).pipe(Effect.result)
+        )
+        yield* Effect.promise(() =>
+          context.waitForQueryBlockedOnLock({
+            queryIncludes: 'insert into "active_calculation_runs"',
+          })
+        )
+        const waiting = yield* Effect.forkChild(runRepository(persistResult()))
+        yield* waitForCalculationRunLockWaiter()
+        yield* held.release
+        expect(yield* Fiber.join(failed)).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "PersistenceError" },
+        })
+        expect(yield* Fiber.join(waiting)).toMatchObject({ status: "complete", activated: true })
+        const stored = yield* runPgEffect(
+          Effect.gen(function* () {
+            const db = yield* drizzle
+            const runs = yield* db
+              .select({ id: schema.calculationRuns.id, status: schema.calculationRuns.status })
+              .from(schema.calculationRuns)
+            const active = yield* db
+              .select({ runId: schema.activeCalculationRuns.runId })
+              .from(schema.activeCalculationRuns)
+            const blockers = yield* db
+              .select({ runId: schema.calculationRunBlockers.runId })
+              .from(schema.calculationRunBlockers)
+            const realized = yield* db
+              .select({ runId: schema.calculationRunRealizedResults.runId })
+              .from(schema.calculationRunRealizedResults)
+            return { runs, active, blockers, realized }
+          })
+        )
+        expect(stored).toEqual({
+          runs: [{ id: RUN_ID, status: "complete" }],
+          active: [{ runId: RUN_ID }],
+          blockers: [],
+          realized: [{ runId: RUN_ID }],
+        })
+      })
+    )
+  )
+
+  it.effect("classifies concurrent starts of the same run ID as single-use", () =>
+    Effect.gen(function* () {
+      yield* runPgEffect(seedCalculationRunFixture({ includeOtherPrincipal: true }))
+      const result = completeResult()
+      for (let round = 0; round < 100; round++) {
+        const id = CalculationRunId.make(
+          `00000000-0000-4000-8000-${String(1000 + round).padStart(12, "0")}`
+        )
+        const outcomes = yield* runRepository(
+          Effect.gen(function* () {
+            const repository = yield* CalculationRunRepository
+            const start = (
+              overrides: { readonly principalId?: PrincipalId; readonly taxYear?: TaxYear } = {}
+            ) =>
+              repository
+                .start({
+                  id,
+                  principalId: overrides.principalId ?? TEST_PRINCIPAL_ID,
+                  reportingCurrency: EUR,
+                  jurisdiction: result.jurisdiction,
+                  taxYear: overrides.taxYear ?? result.taxYear,
+                  engineVersion: result.engineVersion,
+                  ruleSetVersion: result.ruleSetVersion,
+                  inputLedgerRevision: InputLedgerRevision.make(`v2:801:1.2.:${"a".repeat(64)}`),
+                  valuationRevision: ValuationRevision.make(`sha256:${"b".repeat(64)}`),
+                  custodyUnitMembership: [
+                    {
+                      custodyUnitId: TEST_CUSTODY_UNIT_ID,
+                      sourceId: SourceId.make(TEST_SOURCE_ID),
+                    },
+                  ],
+                  correctionInputs: [],
+                  syncCapture: { requestIds: [] },
+                })
+                .pipe(
+                  Effect.match({
+                    onFailure: (error) => error._tag,
+                    onSuccess: () => "success" as const,
+                  })
+                )
+            const outcomes = yield* Effect.all([start(), start()], { concurrency: 2 })
+            if (round === 0) {
+              expect(yield* start({ principalId: OTHER_PRINCIPAL_ID })).toBe(
+                "CalculationRunAlreadyStoredError"
+              )
+              expect(yield* start({ taxYear: TaxYear.make(2024) })).toBe(
+                "CalculationRunAlreadyStoredError"
+              )
+            }
+            return outcomes
+          })
+        )
+        expect([...outcomes].sort()).toEqual(["CalculationRunAlreadyStoredError", "success"])
+      }
+      const stored = yield* runPgEffect(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const runs = yield* db
+            .select({
+              status: schema.calculationRuns.status,
+              taxYear: schema.calculationRuns.taxYear,
+              principalId: schema.calculationRuns.principalId,
+            })
+            .from(schema.calculationRuns)
+          const memberships = yield* db
+            .select({
+              runId: schema.calculationRunCustodyUnitSources.runId,
+              sourceId: schema.calculationRunCustodyUnitSources.sourceId,
+            })
+            .from(schema.calculationRunCustodyUnitSources)
+          const captures = yield* db
+            .select({
+              runId: schema.calculationRunSyncCaptures.runId,
+              principalId: schema.calculationRunSyncCaptures.principalId,
+            })
+            .from(schema.calculationRunSyncCaptures)
+          return { runs, memberships, captures }
+        })
+      )
+      expect(stored.runs).toHaveLength(100)
+      expect(
+        stored.runs.every(
+          ({ status, principalId, taxYear }) =>
+            status === "running" && principalId === TEST_PRINCIPAL_ID && taxYear === 2025
+        )
+      ).toBe(true)
+      expect(stored.memberships).toHaveLength(100)
+      expect(new Set(stored.memberships.map(({ runId }) => runId)).size).toBe(100)
+      expect(stored.memberships.every(({ sourceId }) => sourceId === TEST_SOURCE_ID)).toBe(true)
+      expect(stored.captures).toHaveLength(100)
+      expect(stored.captures.every(({ principalId }) => principalId === TEST_PRINCIPAL_ID)).toBe(
+        true
+      )
     })
   )
 
   it.effect("classifies concurrent claims of the same run ID as single-use", () =>
     Effect.gen(function* () {
       yield* runPgEffect(seedCalculationRunFixture())
-
-      const outcomes = yield* runRepository(
-        Effect.gen(function* () {
-          const repository = yield* CalculationRunRepository
-          const write = () =>
-            Effect.match(
-              repository.persist({
-                movements: new Map(),
-                writeMode: "atomic",
-                syncCapture: { requestIds: [] },
-                correctionInputs: [],
-                id: RUN_ID,
-                principalId: TEST_PRINCIPAL_ID,
-                reportingCurrency: EUR,
-                inputLedgerRevision: InputLedgerRevision.make(`v2:801:1.2.:${"a".repeat(64)}`),
-                valuationRevision: ValuationRevision.make(`sha256:${"b".repeat(64)}`),
-                result: completeResult(),
-              }),
-              {
+      // Repeat fresh claims: the speculative-index race needs both inserts
+      // to pass their initial uniqueness check before either finishes.
+      for (let round = 0; round < 100; round++) {
+        const id = CalculationRunId.make(
+          `00000000-0000-4000-8000-${String(1000 + round).padStart(12, "0")}`
+        )
+        const outcomes = yield* runRepository(
+          Effect.all(
+            [persistResult({ id }), persistResult({ id })].map((write) =>
+              Effect.match(write, {
                 onFailure: (error) => error._tag,
                 onSuccess: () => "success" as const,
-              }
-            )
-
-          return yield* Effect.all([write(), write()], { concurrency: 2 })
+              })
+            ),
+            { concurrency: 2 }
+          )
+        )
+        expect([...outcomes].sort()).toEqual(["CalculationRunAlreadyStoredError", "success"])
+      }
+      const stored = yield* runPgEffect(
+        Effect.gen(function* () {
+          const db = yield* drizzle
+          const runs = yield* db
+            .select({ status: schema.calculationRuns.status })
+            .from(schema.calculationRuns)
+          const realized = yield* db
+            .select({
+              runId: schema.calculationRunRealizedResults.runId,
+              quantity: schema.calculationRunRealizedResults.quantity,
+              gainLoss: schema.calculationRunRealizedResults.gainLoss,
+            })
+            .from(schema.calculationRunRealizedResults)
+          return { runs, realized }
         })
       )
-
-      expect([...outcomes].sort()).toEqual(["CalculationRunAlreadyStoredError", "success"])
+      expect(stored.runs).toHaveLength(100)
+      expect(stored.runs.every(({ status }) => status === "complete")).toBe(true)
+      expect(stored.realized).toHaveLength(100)
+      expect(new Set(stored.realized.map(({ runId }) => runId)).size).toBe(100)
+      expect(
+        stored.realized.every(
+          ({ quantity: value, gainLoss }) =>
+            BigDecimal.equals(
+              BigDecimal.fromStringUnsafe(value),
+              BigDecimal.fromStringUnsafe("0.25")
+            ) &&
+            BigDecimal.equals(
+              BigDecimal.fromStringUnsafe(gainLoss),
+              BigDecimal.fromStringUnsafe("5000")
+            )
+        )
+      ).toBe(true)
     })
   )
 

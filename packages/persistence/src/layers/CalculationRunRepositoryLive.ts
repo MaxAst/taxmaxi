@@ -787,6 +787,8 @@ const make = Effect.gen(function* () {
 
   const claimRun = ({ tx, params, result, startedAt }: WriteContext) =>
     Effect.gen(function* () {
+      // All unique run indexes contain id. Arbitrate them together so concurrent
+      // inserts cannot deadlock between the primary and owner/scope indexes.
       const claimedRuns =
         params.writeMode === "finalize_started"
           ? []
@@ -813,7 +815,7 @@ const make = Effect.gen(function* () {
                 createdAt: startedAt,
                 updatedAt: startedAt,
               })
-              .onConflictDoNothing({ target: schema.calculationRuns.id })
+              .onConflictDoNothing()
               .returning({ id: schema.calculationRuns.id })
 
       if (claimedRuns.length === 1) {
@@ -1433,6 +1435,7 @@ const make = Effect.gen(function* () {
       .transaction((tx) =>
         Effect.gen(function* () {
           const startedAt = yield* DateTime.nowAsDate
+          // Include owner/scope indexes in the same conflict arbitration as id.
           const startedRuns = yield* tx
             .insert(schema.calculationRuns)
             .values({
@@ -1456,7 +1459,7 @@ const make = Effect.gen(function* () {
               createdAt: startedAt,
               updatedAt: startedAt,
             })
-            .onConflictDoNothing({ target: schema.calculationRuns.id })
+            .onConflictDoNothing()
             .returning({ id: schema.calculationRuns.id })
 
           if (startedRuns.length === 0) {
