@@ -79,6 +79,7 @@ export const queryKeys = {
     [...queryKeys.transactions(), "calculation-status", taxYear] as const,
   transactionDetail: (input: TransactionDetailInput) =>
     [...queryKeys.transactions(), "detail", input.transactionId, input.taxYear] as const,
+  transactionFilterChoices: () => [...queryKeys.transactions(), "filter-choices"] as const,
   transactionLists: () => [...queryKeys.transactions(), "list"] as const,
   transactionList: (input: TransactionListInput = {}) =>
     [...queryKeys.transactionLists(), input] as const,
@@ -134,6 +135,19 @@ const hasPendingTransactionWork = (detail: TransactionDetail): boolean =>
   ) || detail.assetOverrides.some((item) => item.projection?.recomputation.status === "updating")
 
 export const queries = {
+  transactionFilterChoices: (taxmaxi: TaxMaxi) =>
+    queryOptions({
+      queryKey: queryKeys.transactionFilterChoices(),
+      queryFn: async ({ signal }) => {
+        // The SDK has no request options here. Consume Query's signal so cancellation
+        // discards late results on logout or refresh even if transport is still running.
+        const result = await taxmaxi.transactions.filterChoices()
+        signal.throwIfAborted()
+        return result
+      },
+      retry: false,
+      staleTime: 60 * 1000,
+    }),
   // Auth and billing fail fast: a 401 should redirect immediately, not retry.
   account: (taxmaxi: TaxMaxi) =>
     queryOptions({

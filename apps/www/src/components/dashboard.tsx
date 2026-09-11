@@ -22,6 +22,7 @@ import { appSurfaceClassName } from "#/components/app-workspace"
 import { CalculationStatus } from "#/components/calculation-status"
 import { AssetsTable } from "#/components/assets-table"
 import { FIRST_SYNC_WELCOME_VIDEO_ID, FirstSyncWizard } from "#/components/first-sync-wizard"
+import { TransactionFilterControls } from "#/components/transaction-filters"
 import { SourceCards } from "#/components/source-cards"
 import { Button } from "#/components/ui/button"
 import {
@@ -389,6 +390,10 @@ export function Dashboard({
   const isSwitchingPortfolio = portfolioQuery.isPending
   const transactionCursor =
     observedFilterScope === filterScope ? (transactionCursors.at(-1) ?? null) : null
+  const filterChoicesQuery = useQuery({
+    ...queries.transactionFilterChoices(taxmaxi),
+    enabled: !authenticationLost,
+  })
   const transactionQuery = useQuery({
     ...queries.transactionList(taxmaxi, {
       ...transactionScope,
@@ -634,6 +639,7 @@ export function Dashboard({
 
   useEffect(() => {
     if (
+      isTaxMaxiUnauthorizedError(filterChoicesQuery.error) ||
       isTaxMaxiUnauthorizedError(portfolioQuery.error) ||
       isTaxMaxiUnauthorizedError(transactionQuery.error) ||
       isTaxMaxiUnauthorizedError(billingQuery.error) ||
@@ -643,6 +649,7 @@ export function Dashboard({
     }
   }, [
     accountQuery.error,
+    filterChoicesQuery.error,
     billingQuery.error,
     handleUnauthorized,
     portfolioQuery.error,
@@ -1193,6 +1200,22 @@ export function Dashboard({
                       role="region"
                       aria-label={m["app.dashboard.tabs.transactions"]()}
                     >
+                      <TransactionFilterControls
+                        filters={filters}
+                        onChange={(next) => {
+                          cancelNavigation()
+                          setTransactionCursors([null])
+                          setSelectedTransaction(null)
+                          if (onFiltersChange) onFiltersChange(next)
+                          else setLocalFilters(next)
+                        }}
+                        sources={accounts}
+                        assets={filterChoicesQuery.data?.assets}
+                        loading={filterChoicesQuery.isPending}
+                        failed={filterChoicesQuery.isError}
+                        onRetry={() => void filterChoicesQuery.refetch()}
+                        disabled={authenticationLost}
+                      />
                       <TransactionsTable
                         disabled={authenticationLost}
                         onSelect={selectTransaction}
