@@ -163,6 +163,9 @@ progress or reset write can turn the value into a false negative (#108, D10).
 For reader and UI lifecycle acceptance, verify that the tested states are
 actually produced by writers and reach the read being used. Schema-valid
 fixtures alone do not prove this, even for result-preserving consumers.
+Decimal display and arithmetic proofs must consume the producer's serialized
+values, including scientific notation, signed tiny amounts and zero. A plain
+decimal fixture alone can miss a transport-format defect (#369 T02/T08).
 
 Use the existing Testing and seams section to map each acceptance behavior to
 its task, named test/seam, and exact expected outcome. This is proof coverage,
@@ -337,7 +340,13 @@ For schema tasks, distinguish generated schema changes and any required audit
 trigger DDL from deliberate clearing/replay outside the migration chain. Plan
 both before implementation; migrations remain schema-only under AGENTS.md.
 If generation cannot express required protection, prepare the exact missing DDL
-for review without silently weakening the protection. AGENTS.md's approval for
+for review without silently weakening the protection. Once the maintainer
+approves the specific custom SQL, generate a separate custom migration through
+`mise x -- pnpm --filter @my/persistence run migration:generate --custom --name=<name>`.
+Put the approved guards or constraint DDL only in that custom migration; keep
+the generated schema SQL untouched and retain Drizzle's tracking artifacts
+(#369 T05 correction 2, PR #384). Validate the normal migration chain, not just
+DDL installed outside it in a preview database. AGENTS.md's approval for
 hand-editing a specific migration still governs. Carry existing authorization
 forward within its actual file/task/action scope; a past exception is neither
 blanket permission for manual SQL nor permission to clear another database.
