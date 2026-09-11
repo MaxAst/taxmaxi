@@ -44,8 +44,6 @@ const SOURCE_STACK = {
   tapScale: 0.98,
   spring: { type: "spring" as const, stiffness: 230, damping: 28, mass: 0.9 },
   reducedTransition: { duration: 0 },
-  reducedGap: 16,
-  reducedPadding: 8,
 }
 
 const stressSourceNetworks = ["Ethereum", "Solana", "Base", "Arbitrum", "Optimism"] as const
@@ -267,13 +265,27 @@ function SourceCardRail({
         <div
           className={cn(
             "relative h-[21.5rem] overflow-x-auto overflow-y-clip overscroll-x-contain",
-            !reduceMotion && "-mx-10 sm:-mx-12"
+            reduceMotion ? "scroll-px-2" : "-mx-10 sm:-mx-12"
           )}
+          onFocusCapture={(event) => {
+            if (
+              reduceMotion &&
+              event.target instanceof HTMLElement &&
+              event.target === document.activeElement &&
+              event.target.matches(":focus-visible") &&
+              event.currentTarget.contains(event.target)
+            ) {
+              event.target.scrollIntoView({
+                block: "nearest",
+                inline: "nearest",
+                behavior: "instant",
+              })
+            }
+          }}
           ref={scrollerRef}
         >
-          {/* The stack mounts only after the scroller is measured, so cards
-              paint at their final placements instead of springing over from
-              a zero-width layout. */}
+          {/* The normal fan waits for measurement before painting. The reduced
+              row uses CSS flow and is ready at its first paint. */}
           {stackLayout.ready ? (
             <SourceCardStack
               isAddingWallet={isAddingWallet}
@@ -391,15 +403,19 @@ function SourceCardStack({
     <div
       className={cn(
         "absolute top-0",
-        layout.align === "center" ? "left-1/2 -translate-x-1/2" : "left-0"
+        !layout.reducedMotion && layout.align === "center" ? "left-1/2 -translate-x-1/2" : "left-0"
       )}
       style={{
-        left: layout.align === "center" ? undefined : layout.left,
-        width: layout.stackWidth,
+        left: layout.reducedMotion || layout.align === "center" ? undefined : layout.left,
+        width: layout.reducedMotion ? "max-content" : layout.stackWidth,
+        minWidth: layout.reducedMotion ? "100%" : undefined,
       }}
     >
       <div
-        className="relative isolate overflow-visible"
+        className={cn(
+          "relative isolate overflow-visible",
+          layout.reducedMotion && "flex items-start justify-center gap-4 px-2 pt-5"
+        )}
         ref={stackRef}
         style={{ height: SOURCE_STACK.height }}
       >
@@ -490,7 +506,10 @@ function SourceCardStack({
                       aria-label={m["app.dashboard.sources.syncSource"]({
                         sourceName: source.name,
                       })}
-                      className="relative inline-flex h-7 touch-manipulation items-center gap-1 rounded-full border border-white/24 bg-white/16 px-2.5 text-xs font-medium text-current shadow-sm backdrop-blur-md transition-[background-color,border-color,transform] duration-150 before:absolute before:-inset-y-2 before:inset-x-0 hover:bg-white/24 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-white/35 [&_svg]:size-3"
+                      className={cn(
+                        layout.reducedMotion && "scroll-mx-2",
+                        "relative inline-flex h-7 touch-manipulation items-center gap-1 rounded-full border border-white/24 bg-white/16 px-2.5 text-xs font-medium text-current shadow-sm backdrop-blur-md transition-[background-color,border-color,transform] duration-150 before:absolute before:-inset-y-2 before:inset-x-0 hover:bg-white/24 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-white/35 [&_svg]:size-3"
+                      )}
                       onClick={(event) => {
                         event.stopPropagation()
                         void onSourceSync(source)
@@ -558,7 +577,12 @@ function FanCard({
         x: target.x,
         y: target.y,
       }}
-      className={cn("absolute left-0 top-0 will-change-transform", className)}
+      className={cn(
+        reduceMotion
+          ? "relative shrink-0 scroll-mx-2"
+          : "absolute left-0 top-0 will-change-transform",
+        className
+      )}
       initial={
         reduceMotion || initialPlacement === false
           ? false
@@ -613,8 +637,8 @@ function getCardPlacement({
   // Keep every reduced-motion control above the sheet without moving cards on focus or selection.
   if (layout.reducedMotion) {
     return {
-      x: layout.startX + index * layout.stepX,
-      y: SOURCE_STACK.fan.selectedY,
+      x: 0,
+      y: 0,
       rotate: 0,
       scale: 1,
       zIndex: index + 1,
@@ -721,17 +745,14 @@ function getStackLayout({
   const startX = SOURCE_STACK.fan.startX
 
   if (reducedMotion) {
-    const stepX = cardWidth + SOURCE_STACK.reducedGap
-    const rowPadding = SOURCE_STACK.reducedPadding
-    const stackWidth = rowPadding * 2 + Math.max(0, total - 1) * stepX + cardWidth
     return {
       reducedMotion: true,
       align: "measured",
-      left: Math.max(0, (containerWidth - stackWidth) / 2),
-      ready: containerWidth > 0,
-      stackWidth,
-      startX: rowPadding,
-      stepX,
+      left: 0,
+      ready: true,
+      stackWidth: 0,
+      startX: 0,
+      stepX: 0,
     }
   }
 

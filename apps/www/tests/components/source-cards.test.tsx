@@ -6,6 +6,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { SourceCards } from "#/components/source-cards"
 import type { Source } from "#/components/source-card"
 
+const motionPreference = vi.hoisted(() => ({ reduced: true }))
+
+vi.mock("motion/react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("motion/react")>()),
+  useReducedMotion: () => motionPreference.reduced,
+}))
+
+const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+  HTMLElement.prototype,
+  "scrollIntoView"
+)
+
 const sources: Source[] = ["A", "B"].map((name) => ({
   id: name,
   name,
@@ -26,6 +38,11 @@ function keyboardFocus(card: HTMLElement) {
 }
 
 beforeEach(() => {
+  motionPreference.reduced = true
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  })
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -50,6 +67,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  if (originalScrollIntoView)
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView)
+  else Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView")
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
@@ -85,6 +105,7 @@ describe("SourceCards shared selection", () => {
   })
 
   it("does not move a card when its nested sync button receives focus", async () => {
+    motionPreference.reduced = false
     const select = vi.fn()
     const sync = vi.fn()
     render(
@@ -103,11 +124,25 @@ describe("SourceCards shared selection", () => {
       await new Promise((resolve) => requestAnimationFrame(resolve))
     })
     expect(a.style.transform).toBe(before)
+    expect(a.scrollIntoView).not.toHaveBeenCalled()
     expect(select).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole("button", { name: "Sync A" }))
     expect(sync).toHaveBeenCalledExactlyOnceWith(sources[0])
     keyboardFocus(a)
-    await waitFor(() => expect(a.style.transform).toBe(before))
+    await waitFor(() => expect(a.style.transform).not.toBe(before))
+  })
+
+  it("does not scroll a reduced-motion sync target on pointer focus", () => {
+    const select = vi.fn()
+    const sync = vi.fn()
+    render(<SourceCards sources={sources} onSourceSelect={select} onSourceSync={sync} />)
+    const button = screen.getByRole("button", { name: "Sync A" })
+    vi.spyOn(button, "matches").mockReturnValue(false)
+    act(() => button.focus())
+    expect(button.scrollIntoView).not.toHaveBeenCalled()
+    fireEvent.click(button)
+    expect(sync).toHaveBeenCalledExactlyOnceWith(sources[0])
+    expect(select).not.toHaveBeenCalled()
   })
 
   it("keeps reduced-motion placements fixed through focus and source selection", async () => {
@@ -122,6 +157,11 @@ describe("SourceCards shared selection", () => {
     const placements = cards.map((card) => card.style.transform)
     const first = cards[0]
     keyboardFocus(first)
+    expect(first.scrollIntoView).toHaveBeenLastCalledWith({
+      block: "nearest",
+      inline: "nearest",
+      behavior: "instant",
+    })
     fireEvent.keyDown(first, { key: "Enter" })
     view.rerender(
       <SourceCards sources={sources} selectedSourceIds={["A"]} onSourceSelect={select} />
