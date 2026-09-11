@@ -146,9 +146,9 @@ export function SourceCards({
   contentClassName,
   onAddWallet,
   onResolveName,
-  onSelectedSourceIdChange,
+  onSourceSelect,
   onSourceSync,
-  selectedSourceId,
+  selectedSourceIds,
   syncingSourceIds,
   sources = mockSources,
 }: {
@@ -157,9 +157,9 @@ export function SourceCards({
   contentClassName?: string
   onAddWallet?: (walletAddress: string) => Promise<void>
   onResolveName?: (name: string) => Promise<NameResolution>
-  onSelectedSourceIdChange?: (sourceId: Source["id"] | undefined) => void
+  onSourceSelect?: (sourceId: Source["id"]) => void
   onSourceSync?: (source: Source) => void | Promise<void>
-  selectedSourceId?: Source["id"]
+  selectedSourceIds?: ReadonlyArray<Source["id"]>
   syncingSourceIds?: ReadonlySet<Source["id"]>
   sources?: ReadonlyArray<Source>
 }) {
@@ -171,9 +171,9 @@ export function SourceCards({
       <SourceCardRail
         onAddWallet={onAddWallet}
         onResolveName={onResolveName}
-        onSelectedSourceIdChange={onSelectedSourceIdChange}
+        onSourceSelect={onSourceSelect}
         onSourceSync={onSourceSync}
-        selectedSourceId={selectedSourceId}
+        selectedSourceIds={selectedSourceIds}
         syncingSourceIds={syncingSourceIds}
         sources={sources}
       />
@@ -198,23 +198,24 @@ export function SourceCards({
 function SourceCardRail({
   onAddWallet,
   onResolveName,
-  onSelectedSourceIdChange,
+  onSourceSelect,
   onSourceSync,
-  selectedSourceId,
+  selectedSourceIds,
   syncingSourceIds,
   sources,
 }: {
   onAddWallet?: (walletAddress: string) => Promise<void>
   onResolveName?: (name: string) => Promise<NameResolution>
-  onSelectedSourceIdChange?: (sourceId: Source["id"] | undefined) => void
+  onSourceSelect?: (sourceId: Source["id"]) => void
   onSourceSync?: (source: Source) => void | Promise<void>
-  selectedSourceId?: Source["id"]
+  selectedSourceIds?: ReadonlyArray<Source["id"]>
   syncingSourceIds?: ReadonlySet<Source["id"]>
   sources: ReadonlyArray<Source>
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null)
   const [containerWidth, setContainerWidth] = useState(0)
   const [isAddingWallet, setIsAddingWallet] = useState(false)
+  const reduceMotion = useReducedMotion()
   const totalSlots = sources.length + (onAddWallet === undefined ? 0 : 1)
   const stackLayout = useMemo(
     () => getStackLayout({ containerWidth, total: totalSlots }),
@@ -231,9 +232,9 @@ function SourceCardRail({
 
   useEffect(() => {
     if (isAddingWallet) {
-      scrollerRef.current?.scrollTo({ behavior: "smooth", left: 0 })
+      scrollerRef.current?.scrollTo({ behavior: reduceMotion ? "instant" : "smooth", left: 0 })
     }
-  }, [isAddingWallet])
+  }, [isAddingWallet, reduceMotion])
 
   useLayoutEffect(() => {
     const scroller = scrollerRef.current
@@ -274,9 +275,9 @@ function SourceCardRail({
               onAddWallet={onAddWallet}
               onResolveName={onResolveName}
               onAddingWalletChange={setIsAddingWallet}
-              onSelectedSourceIdChange={onSelectedSourceIdChange}
+              onSourceSelect={onSourceSelect}
               onSourceSync={onSourceSync}
-              selectedSourceId={selectedSourceId}
+              selectedSourceIds={selectedSourceIds}
               syncingSourceIds={syncingSourceIds}
               sources={sources}
             />
@@ -293,9 +294,9 @@ function SourceCardStack({
   onAddWallet,
   onAddingWalletChange,
   onResolveName,
-  onSelectedSourceIdChange,
+  onSourceSelect,
   onSourceSync,
-  selectedSourceId,
+  selectedSourceIds,
   syncingSourceIds,
   sources,
 }: {
@@ -304,9 +305,9 @@ function SourceCardStack({
   onAddWallet?: (walletAddress: string) => Promise<void>
   onResolveName?: (name: string) => Promise<NameResolution>
   onAddingWalletChange: (isAddingWallet: boolean) => void
-  onSelectedSourceIdChange?: (sourceId: Source["id"] | undefined) => void
+  onSourceSelect?: (sourceId: Source["id"]) => void
   onSourceSync?: (source: Source) => void | Promise<void>
-  selectedSourceId?: Source["id"]
+  selectedSourceIds?: ReadonlyArray<Source["id"]>
   syncingSourceIds?: ReadonlySet<Source["id"]>
   sources: ReadonlyArray<Source>
 }) {
@@ -317,10 +318,8 @@ function SourceCardStack({
   const showAddCard = onAddWallet !== undefined
   const slotOffset = showAddCard ? 1 : 0
   const totalSlots = sources.length + slotOffset
-  const selectedIndex =
-    selectedSourceId === undefined
-      ? -1
-      : sources.findIndex((source) => source.id === selectedSourceId)
+  const [liftedSourceId, setLiftedSourceId] = useState<Source["id"]>()
+  const selectedIndex = sources.findIndex((source) => source.id === liftedSourceId)
   const selectedSlot =
     showAddCard && isAddingWallet ? 0 : selectedIndex >= 0 ? selectedIndex + slotOffset : -1
 
@@ -346,13 +345,13 @@ function SourceCardStack({
     knownSourceIdsRef.current = new Set(sources.map((source) => source.id))
   }, [sources])
 
-  // Escape clears the selection, matching the add-wallet card. Presses
+  // Escape lowers the focused card without changing the source filter. Presses
   // inside text fields are left to the field itself — that is how the
-  // add-wallet input closes first and a second press deselects. Focus
+  // add-wallet input closes first and a second press lowers the source card. Focus
   // leaves the card as well, again matching the add-wallet card, so the
   // keyboard focus ring does not linger after a mouse-driven dismiss.
   useEffect(() => {
-    if (selectedSourceId === undefined) {
+    if (liftedSourceId === undefined) {
       return
     }
 
@@ -374,13 +373,13 @@ function SourceCardStack({
         focused.blur()
       }
 
-      onSelectedSourceIdChange?.(undefined)
+      setLiftedSourceId(undefined)
     }
 
     document.addEventListener("keydown", handleKeyDown)
 
     return () => document.removeEventListener("keydown", handleKeyDown)
-  }, [onSelectedSourceIdChange, selectedSourceId])
+  }, [liftedSourceId])
 
   return (
     <div
@@ -421,7 +420,8 @@ function SourceCardStack({
           </FanCard>
         ) : null}
         {sources.map((source, index) => {
-          const active = selectedSourceId === source.id
+          const active = selectedSourceIds?.includes(source.id) ?? false
+          const lifted = liftedSourceId === source.id
           const isSyncing = syncingSourceIds?.has(source.id) ?? false
           const isNewlyAdded = source.id === dealSourceId
           const resting = getCardPlacement({
@@ -433,21 +433,24 @@ function SourceCardStack({
 
           return (
             <FanCard
-              aria-label={
-                active
-                  ? m["app.dashboard.sources.showAllSources"]()
-                  : m["app.dashboard.sources.showSource"]({ sourceName: source.name })
-              }
+              aria-label={m["app.dashboard.sources.showSource"]({ sourceName: source.name })}
               aria-pressed={active}
-              className="cursor-pointer rounded-2xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+              className={cn(
+                "cursor-pointer rounded-2xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+                active && "ring-2 ring-ring"
+              )}
               hoverPlacement={{
                 ...resting,
                 scale: resting.scale * SOURCE_STACK.hoverScale,
-                y: active ? resting.y : SOURCE_STACK.hoverY,
+                y: lifted ? resting.y : SOURCE_STACK.hoverY,
               }}
               initialPlacement={isNewlyAdded ? liftedPlacement : false}
               key={source.id}
-              onClick={() => onSelectedSourceIdChange?.(active ? undefined : source.id)}
+              onFocus={() => setLiftedSourceId(source.id)}
+              onClick={() => {
+                setLiftedSourceId(source.id)
+                onSourceSelect?.(source.id)
+              }}
               onKeyDown={(event) => {
                 if (event.target !== event.currentTarget) {
                   return
@@ -458,7 +461,8 @@ function SourceCardStack({
                 }
 
                 event.preventDefault()
-                onSelectedSourceIdChange?.(active ? undefined : source.id)
+                setLiftedSourceId(source.id)
+                onSourceSelect?.(source.id)
               }}
               placement={resting}
               role="button"
@@ -524,7 +528,7 @@ function FanCard({
   zIndex: number
 } & Pick<
   React.ComponentProps<typeof motion.div>,
-  "aria-label" | "aria-pressed" | "onClick" | "onKeyDown" | "role" | "tabIndex"
+  "aria-label" | "aria-pressed" | "onClick" | "onFocus" | "onKeyDown" | "role" | "tabIndex"
 >) {
   const reduceMotion = useReducedMotion()
   const [isHovered, setIsHovered] = useState(false)

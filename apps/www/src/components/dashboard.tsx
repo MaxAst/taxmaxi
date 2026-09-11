@@ -1129,9 +1129,9 @@ export function Dashboard({
             contentClassName={appSurfaceClassName}
             onAddWallet={createWalletSource === undefined ? undefined : handleAddWallet}
             onResolveName={resolveName}
-            onSelectedSourceIdChange={(sourceId) => onAccountScopeChange(sourceId ?? ALL_ACCOUNTS)}
+            onSourceSelect={onAccountScopeChange}
             onSourceSync={onSourceSync}
-            selectedSourceId={accountScope === ALL_ACCOUNTS ? undefined : accountScope}
+            selectedSourceIds={sourceIds}
             syncingSourceIds={syncingSourceIds}
             sources={accounts}
           >
