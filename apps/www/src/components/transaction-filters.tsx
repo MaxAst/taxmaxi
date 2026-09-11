@@ -1,3 +1,4 @@
+import { useRef, type MouseEvent, type Ref } from "react"
 import type { TransactionFilterChoices } from "taxmaxi"
 import { X, Plus } from "lucide-react"
 import { Button } from "#/components/ui/button"
@@ -42,7 +43,9 @@ function FilterMenu({
   loading,
   failed,
   onRetry,
+  triggerRef,
 }: {
+  triggerRef: Ref<HTMLButtonElement>
   label: string
   choices: ReadonlyArray<Choice>
   selected: ReadonlyArray<string>
@@ -56,6 +59,7 @@ function FilterMenu({
     <Popover>
       <PopoverTrigger asChild>
         <Button
+          ref={triggerRef}
           variant="outline"
           className="min-h-11"
           disabled={disabled}
@@ -69,9 +73,13 @@ function FilterMenu({
       <PopoverContent
         align="start"
         aria-label={label}
-        className="w-88 max-w-[calc(100vw-2rem)] p-1 motion-reduce:[--tw-enter-scale:1] motion-reduce:[--tw-exit-scale:1] motion-reduce:[--tw-enter-translate-x:0] motion-reduce:[--tw-enter-translate-y:0] motion-reduce:[--tw-exit-translate-x:0] motion-reduce:[--tw-exit-translate-y:0]"
+        collisionPadding={8}
+        className="max-h-(--radix-popover-content-available-height) w-88 max-w-[calc(100vw-2rem)] overflow-y-auto p-1 motion-reduce:[--tw-enter-scale:1]! motion-reduce:[--tw-exit-scale:1]! motion-reduce:[--tw-enter-translate-x:0]! motion-reduce:[--tw-enter-translate-y:0]! motion-reduce:[--tw-exit-translate-x:0]! motion-reduce:[--tw-exit-translate-y:0]!"
       >
-        <Command label={label} className="[&_[data-slot=input-group]]:min-h-11">
+        <Command
+          label={label}
+          className="h-auto shrink-0 overflow-visible [&_[data-slot=input-group]]:min-h-11"
+        >
           <CommandInput
             aria-label={m["app.transactionFilters.search"]({ group: label })}
             placeholder={m["app.transactionFilters.search"]({ group: label })}
@@ -82,15 +90,7 @@ function FilterMenu({
               {m["app.transactionFilters.loading"]()}
             </p>
           ) : null}
-          {failed ? (
-            <div role="status" className="flex flex-col gap-2 p-3">
-              <p>{m["app.transactionFilters.failed"]()}</p>
-              <Button variant="outline" className="min-h-11" onClick={onRetry}>
-                {m["app.transactionFilters.retry"]()}
-              </Button>
-            </div>
-          ) : null}
-          <CommandList aria-label={label}>
+          <CommandList aria-label={label} className="max-h-none overflow-visible">
             {!loading ? (
               <CommandEmpty>{m["app.transactionFilters.noChoices"]()}</CommandEmpty>
             ) : null}
@@ -122,6 +122,14 @@ function FilterMenu({
             </CommandGroup>
           </CommandList>
         </Command>
+        {failed ? (
+          <div role="status" className="flex flex-col gap-2 p-3">
+            <p>{m["app.transactionFilters.failed"]()}</p>
+            <Button variant="outline" className="min-h-11" onClick={onRetry}>
+              {m["app.transactionFilters.retry"]()}
+            </Button>
+          </div>
+        ) : null}
       </PopoverContent>
     </Popover>
   )
@@ -147,6 +155,10 @@ export function TransactionFilterControls({
   onRetry: () => void
   disabled?: boolean
 }) {
+  const triggers = useRef(new Map<string, HTMLButtonElement>())
+  const focusAfterKeyboardAction = (event: MouseEvent<HTMLButtonElement>, group: string) => {
+    if (event.detail === 0) triggers.current.get(group)?.focus()
+  }
   const labels = categoryLabels()
   const sourceChoices = sources.map((source) => ({
     id: source.id,
@@ -246,6 +258,10 @@ export function TransactionFilterControls({
         {groups.map((group) => (
           <FilterMenu
             key={group.key}
+            triggerRef={(node) => {
+              if (node) triggers.current.set(group.key, node)
+              else triggers.current.delete(group.key)
+            }}
             label={group.label}
             choices={group.choices}
             selected={group.selected}
@@ -261,7 +277,10 @@ export function TransactionFilterControls({
             variant="ghost"
             className="min-h-11"
             disabled={disabled}
-            onClick={() => onChange({})}
+            onClick={(event) => {
+              focusAfterKeyboardAction(event, "sourceIds")
+              onChange({})
+            }}
           >
             {m["app.transactionFilters.reset"]()}
           </Button>
@@ -270,7 +289,7 @@ export function TransactionFilterControls({
       <div className="flex flex-wrap gap-2">
         {groups.flatMap((group) =>
           group.selected.map((id) => {
-            const choice = group.choices.find((choice) => choice.id === id)
+            const choice: Choice | undefined = group.choices.find((choice) => choice.id === id)
             const duplicate =
               choice &&
               group.choices.some((other) => other.id !== id && other.label === choice.label)
@@ -284,9 +303,12 @@ export function TransactionFilterControls({
                 disabled={disabled}
                 className="h-auto min-h-11 max-w-full whitespace-normal text-left"
                 aria-label={m["app.transactionFilters.remove"]({ value: label })}
-                onClick={() => group.toggle(id)}
+                onClick={(event) => {
+                  focusAfterKeyboardAction(event, group.key)
+                  group.toggle(id)
+                }}
               >
-                <span className="min-w-0 break-all">{label}</span>
+                <span className="min-w-0 wrap-anywhere">{label}</span>
                 <X data-icon="inline-end" />
               </Button>
             )
@@ -304,7 +326,10 @@ export function TransactionFilterControls({
               variant="ghost"
               className="min-h-11"
               disabled={disabled}
-              onClick={() => onChange({ ...filters, categories: [category] })}
+              onClick={(event) => {
+                focusAfterKeyboardAction(event, "categories")
+                onChange({ ...filters, categories: [category] })
+              }}
             >
               {labels[category]}
             </Button>

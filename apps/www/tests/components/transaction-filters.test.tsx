@@ -132,6 +132,36 @@ describe("structured filter controls", () => {
     )
   })
 
+  it("retry keyboard events do not select cmdk options or change filters", async () => {
+    const change = vi.fn()
+    const retry = vi.fn()
+    render(
+      <TransactionFilterControls
+        filters={{ sourceIds: [A], assetIds: [Y], categories: ["staking"] }}
+        sources={[source]}
+        assets={assets}
+        failed
+        onRetry={retry}
+        onChange={change}
+      />
+    )
+    const input = await open("Assets")
+    fireEvent.keyDown(input, { key: "ArrowDown" })
+    const button = screen.getByRole("button", { name: "Try again" })
+    button.focus()
+    for (const key of ["Enter", " "]) {
+      fireEvent.keyDown(button, { key })
+      fireEvent.keyUp(button, { key })
+      fireEvent.click(button, { detail: 0 })
+    }
+    expect(retry).toHaveBeenCalledTimes(2)
+    expect(change).not.toHaveBeenCalled()
+    await close(button)
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter Assets" }))
+    )
+  })
+
   it("retains readable selected assets on failure and keeps manual categories usable", async () => {
     const change = mount({ assetIds: [X] }, true)
     const input = await open("Assets")
@@ -142,6 +172,22 @@ describe("structured filter controls", () => {
     await close(input)
     fireEvent.click(screen.getByRole("button", { name: "Staking" }))
     expect(change).toHaveBeenLastCalledWith({ assetIds: [X], categories: ["staking"] })
+  })
+
+  it("keeps keyboard focus on surviving controls after chip removal, suggestions and reset", () => {
+    mount({ assetIds: [X] })
+    const chip = screen.getByRole("button", { name: new RegExp(`Remove.*${X}`) })
+    chip.focus()
+    fireEvent.click(chip, { detail: 0 })
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter Assets" }))
+    const suggestion = screen.getByRole("button", { name: "Staking" })
+    suggestion.focus()
+    fireEvent.click(suggestion, { detail: 0 })
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter Categories" }))
+    const reset = screen.getByRole("button", { name: "Clear all filters" })
+    reset.focus()
+    fireEvent.click(reset, { detail: 0 })
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter Sources" }))
   })
 
   it("shows removable identity fallback on a saved URL without loaded options", () => {
