@@ -367,6 +367,22 @@ describe("TransactionsTable", () => {
     expect(defaultProps.onRetry).toHaveBeenCalledOnce()
   })
 
+  it("retains the body scroll position until a page or scope commits", () => {
+    const view = render(<TransactionsTable {...defaultProps} scopeKey="all" />)
+    const body = document.querySelector<HTMLElement>("[data-transaction-body]")
+    if (!body) throw new Error("Missing transaction body")
+    body.scrollTop = 400
+    view.rerender(<TransactionsTable {...defaultProps} scopeKey="all" loading />)
+    expect(document.querySelector("[data-transaction-body]")).toBe(body)
+    expect(body.scrollTop).toBe(400)
+    view.rerender(<TransactionsTable {...defaultProps} scopeKey="all" error />)
+    expect(body.scrollTop).toBe(400)
+    view.rerender(<TransactionsTable {...defaultProps} scopeKey="all" pageIndex={1} />)
+    expect(document.querySelector<HTMLElement>("[data-transaction-body]")?.scrollTop).toBe(0)
+    view.rerender(<TransactionsTable {...defaultProps} scopeKey="source-b" pageIndex={1} />)
+    expect(document.querySelector<HTMLElement>("[data-transaction-body]")?.scrollTop).toBe(0)
+  })
+
   it("keeps loading bounded at page size 500", () => {
     render(<TransactionsWithInspector {...defaultProps} pageSize={500} loading transactions={[]} />)
     expect(screen.getAllByRole("status")).toHaveLength(1)

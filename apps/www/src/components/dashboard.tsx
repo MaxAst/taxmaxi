@@ -201,6 +201,13 @@ export function Dashboard({
     taxYear: number
     description: string
   } | null>(null)
+  const speculativePage = useRef<{
+    key: string
+    userId: string
+    controller: AbortController
+    promise: ReturnType<typeof prefetchTransactionPage>
+  } | null>(null)
+  const pageRequest = useRef<AbortController | null>(null)
   const navigationRequest = useRef(0)
   const navigating = useRef(false)
   const [sequenceRefreshVersion, setSequenceRefreshVersion] = useState<number | null>(null)
@@ -210,6 +217,8 @@ export function Dashboard({
   const [pageFailure, setPageFailure] = useState<-1 | 1 | null>(null)
   const cancelNavigation = useCallback(() => {
     navigationRequest.current += 1
+    pageRequest.current?.abort()
+    pageRequest.current = null
     navigating.current = false
     setNavigationPending(false)
     setNavigationFailure(null)
@@ -223,6 +232,8 @@ export function Dashboard({
   useEffect(
     () => () => {
       navigationRequest.current += 1
+      pageRequest.current?.abort()
+      speculativePage.current?.controller.abort()
     },
     []
   )
@@ -397,11 +408,36 @@ export function Dashboard({
       cursor === undefined
     )
       return
-    void prefetchTransactionPage({
+    const userId = queryClient.getQueryData(queries.account(taxmaxi).queryKey)?.account.id
+    if (userId === undefined) return
+    const input = { ...transactionScope, cursor, limit: transactionPageSize }
+    const controller = new AbortController()
+    const runId = portfolioQuery.data?.activeRun?.runId
+    const promise = prefetchTransactionPage({
       queryClient,
       taxmaxi,
-      input: { ...transactionScope, cursor, limit: transactionPageSize },
+      input,
+      userId,
+      signal: controller.signal,
+      isCurrent: () =>
+        queryClient.getQueryData(queries.portfolioAssets(taxmaxi, portfolioScope).queryKey)
+          ?.activeRun?.runId === runId,
     })
+    const read = {
+      key: JSON.stringify(queryKeys.transactionList(input)),
+      userId,
+      controller,
+      promise,
+    }
+    speculativePage.current = read
+    // Prefetch errors are shown only if navigation actually consumes this request.
+    void promise.catch(() => {
+      if (speculativePage.current === read) speculativePage.current = null
+    })
+    return () => {
+      controller.abort()
+      if (speculativePage.current === read) speculativePage.current = null
+    }
   }, [
     authenticationLost,
     pageSizeLoaded,
@@ -410,7 +446,10 @@ export function Dashboard({
     transactionPageSize,
     transactionScope,
     transactionQuery.data?.page.nextCursor,
+    transactionQuery.dataUpdatedAt,
     transactionQuery.isFetching,
+    portfolioQuery.data?.activeRun?.runId,
+    portfolioScope,
   ])
 
   // Refetching the current page supersedes a speculative neighbour request.
@@ -428,7 +467,17 @@ export function Dashboard({
           cursor: transactionCursor,
           limit: transactionPageSize,
         })
-        if (JSON.stringify(event.query.queryKey) === JSON.stringify(key)) cancelNavigation()
+        if (JSON.stringify(event.query.queryKey) === JSON.stringify(key)) {
+          cancelNavigation()
+          const read = speculativePage.current
+          read?.controller.abort()
+          speculativePage.current = null
+          if (read && read.key !== JSON.stringify(key)) {
+            queryClient.removeQueries({
+              predicate: (query) => JSON.stringify(query.queryKey) === read.key,
+            })
+          }
+        }
       }),
     [cancelNavigation, queryClient, transactionCursor, transactionPageSize, transactionScope]
   )
@@ -719,7 +768,28 @@ export function Dashboard({
       limit: transactionPageSize,
     }
     try {
-      const page = await queryClient.fetchQuery(queries.transactionList(taxmaxi, input))
+      if (userId === undefined) return
+      const key = JSON.stringify(queryKeys.transactionList(input))
+      const ownedRead = speculativePage.current
+      const read =
+        ownedRead?.controller.signal.aborted || ownedRead?.userId !== userId ? null : ownedRead
+      const controller = read?.key === key ? read.controller : new AbortController()
+      pageRequest.current = controller
+      const page = await (read?.key === key
+        ? read.promise
+        : prefetchTransactionPage({
+            queryClient,
+            taxmaxi,
+            input,
+            userId,
+            signal: controller.signal,
+            isCurrent: () =>
+              request === navigationRequest.current &&
+              dependentReadsAllowed.current &&
+              queryClient.getQueryData(queries.portfolioAssets(taxmaxi, portfolioScope).queryKey)
+                ?.activeRun?.runId === activeRunId,
+          }))
+      if (!page) return
       if (
         request !== navigationRequest.current ||
         !dependentReadsAllowed.current ||
@@ -748,6 +818,7 @@ export function Dashboard({
       if (request === navigationRequest.current) {
         navigating.current = false
         setPagePending(false)
+        pageRequest.current = null
       }
     }
   }
@@ -1129,6 +1200,7 @@ export function Dashboard({
                         error={transactionQuery.isError || pageFailure !== null}
                         hasNextPage={transactionQuery.data?.page.hasMore ?? false}
                         loading={transactionQuery.isFetching || pagePending}
+                        scopeKey={filterScope}
                         onNextPage={goToNextTransactionPage}
                         onPreviousPage={goToPreviousTransactionPage}
                         onRetry={() =>
@@ -1149,7 +1221,7 @@ export function Dashboard({
                         total: totalTransactions,
                         canPrevious: position !== null && position > 1,
                         canNext: position !== null && position < totalTransactions,
-                        pending: navigationPending,
+                        pending: navigationPending || pagePending,
                         failed: navigationFailure !== null,
                         onNavigate: (direction) => void navigateTransaction(direction),
                         onRetry: () => {

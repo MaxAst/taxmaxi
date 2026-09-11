@@ -43,6 +43,7 @@ export function TransactionsTable({
   disabled,
   onSelect,
   selectedTransactionId,
+  scopeKey = "",
   error,
   hasNextPage,
   loading,
@@ -57,6 +58,7 @@ export function TransactionsTable({
 }: {
   readonly disabled: boolean
   readonly onSelect: (transaction: TransactionListItem, trigger: HTMLElement) => void
+  readonly scopeKey?: string
   readonly selectedTransactionId: string | null
   readonly error: boolean
   readonly hasNextPage: boolean
@@ -126,6 +128,7 @@ export function TransactionsTable({
       <div className="overflow-hidden rounded-xl border bg-background shadow-sm">
         <div
           className="h-[min(32rem,60vh)] overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+          key={JSON.stringify([scopeKey, pageIndex, pageSize])}
           data-transaction-body
         >
           {loading && transactions.length === 0 ? (

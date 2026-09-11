@@ -292,13 +292,34 @@ export const queries = {
 export const isTaxMaxiAssetNotFoundError = (error: unknown): boolean =>
   error instanceof TaxMaxiError && (error.status === 400 || error.status === 404)
 
-/** Warm the exact next-page key; session cancellation also cancels late cache delivery. */
-export const prefetchTransactionPage = ({
+/** Read a speculative page and publish only while its starting session still owns it. */
+export const prefetchTransactionPage = async ({
   queryClient,
   taxmaxi,
   input,
+  userId,
+  signal,
+  isCurrent = () => true,
 }: {
   readonly queryClient: QueryClient
   readonly taxmaxi: TaxMaxi
   readonly input: TransactionListInput
-}): Promise<void> => queryClient.prefetchQuery(queries.transactionList(taxmaxi, input))
+  readonly userId: string
+  readonly signal?: AbortSignal
+  readonly isCurrent?: () => boolean
+}) => {
+  const ownsRequest = () =>
+    !signal?.aborted &&
+    isCurrent() &&
+    queryClient.getQueryData<Account>(queryKeys.account())?.account.id === userId
+  if (!ownsRequest()) return
+  const page = await taxmaxi.transactions.list(input)
+  if (!ownsRequest()) return
+  setSessionQueryData({
+    queryClient,
+    queryKey: queryKeys.transactionList(input),
+    userId,
+    data: page,
+  })
+  return page
+}
