@@ -344,6 +344,45 @@ describe("TransactionsTable", () => {
     expect(screen.queryByLabelText("Needs review")).toBeNull()
   })
 
+  it("keeps a bounded skeleton and footer frame on initial and changed-scope loads", () => {
+    render(
+      <TransactionsWithInspector
+        {...defaultProps}
+        pageSize={500}
+        loading
+        transactions={[]}
+        totalCount={0}
+      />
+    )
+    expect(document.querySelectorAll("[data-transaction-skeleton]")).toHaveLength(6)
+    expect(screen.getByRole("navigation", { name: "Transaction pages" })).toBeTruthy()
+    expect(document.querySelectorAll("article")).toHaveLength(0)
+  })
+
+  it("retains populated rows and the footer range on a paging error", () => {
+    render(<TransactionsWithInspector {...defaultProps} error />)
+    expect(screen.getByText("Sold Bitcoin")).toBeTruthy()
+    expect(screen.getByText("1–1 of 1")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Page could not load. Retry" }))
+    expect(defaultProps.onRetry).toHaveBeenCalledOnce()
+  })
+
+  it("retains the body scroll position until a page or scope commits", () => {
+    const view = render(<TransactionsTable {...defaultProps} scopeKey="all" />)
+    const body = document.querySelector<HTMLElement>("[data-transaction-body]")
+    if (!body) throw new Error("Missing transaction body")
+    body.scrollTop = 400
+    view.rerender(<TransactionsTable {...defaultProps} scopeKey="all" loading />)
+    expect(document.querySelector("[data-transaction-body]")).toBe(body)
+    expect(body.scrollTop).toBe(400)
+    view.rerender(<TransactionsTable {...defaultProps} scopeKey="all" error />)
+    expect(body.scrollTop).toBe(400)
+    view.rerender(<TransactionsTable {...defaultProps} scopeKey="all" pageIndex={1} />)
+    expect(document.querySelector<HTMLElement>("[data-transaction-body]")?.scrollTop).toBe(0)
+    view.rerender(<TransactionsTable {...defaultProps} scopeKey="source-b" pageIndex={1} />)
+    expect(document.querySelector<HTMLElement>("[data-transaction-body]")?.scrollTop).toBe(0)
+  })
+
   it("keeps loading bounded at page size 500", () => {
     render(<TransactionsWithInspector {...defaultProps} pageSize={500} loading transactions={[]} />)
     expect(screen.getAllByRole("status")).toHaveLength(1)

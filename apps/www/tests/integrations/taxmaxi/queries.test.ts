@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from "vitest"
 
 import {
   queries,
+  clearSessionQueries,
+  prefetchTransactionPage,
   queryKeys,
   refreshTransactionQueries,
   setSessionQueryData,
@@ -266,20 +268,21 @@ describe("transaction writer-signal refresh", () => {
 
 // Logout removes every `taxmaxi` query. A response that resolves after that
 // must not write the previous session's data back into the cache (#108 T07).
+const account = (id: string): Account => ({
+  account: {
+    id,
+    email: `${id}@example.test`,
+    displayName: "User",
+    role: "member",
+    emailVerified: true,
+    welcomeSeenAt: null,
+    createdAt: "2025-01-01T00:00:00.000Z",
+    updatedAt: "2025-01-01T00:00:00.000Z",
+  },
+  loginMethods: [],
+})
+
 describe("session-scoped query writes", () => {
-  const account = (id: string): Account => ({
-    account: {
-      id,
-      email: `${id}@example.test`,
-      displayName: "User",
-      role: "member",
-      emailVerified: true,
-      welcomeSeenAt: null,
-      createdAt: "2025-01-01T00:00:00.000Z",
-      updatedAt: "2025-01-01T00:00:00.000Z",
-    },
-    loginMethods: [],
-  })
   const userId = "00000000-0000-4000-8000-000000000001"
   const otherUserId = "00000000-0000-4000-8000-000000000002"
   const refreshed = {
@@ -341,4 +344,46 @@ describe("session-scoped query writes", () => {
 
     expect(queryClient.getQueryData(queryKeys.billingStatus())).toBeUndefined()
   })
+})
+
+describe("transaction page prefetch", () => {
+  it.each(["logout", "replacement"])(
+    "drops late page delivery after account %s",
+    async (change) => {
+      let finish: ((response: Response) => void) | undefined
+      const taxmaxi = new TaxMaxi({
+        apiKey: "",
+        baseUrl: "https://prefetch.example.test",
+        fetch: () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve
+          }),
+      })
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      client.setQueryData(queryKeys.account(), account("user-a"))
+      const pending = prefetchTransactionPage({
+        userId: "user-a",
+        queryClient: client,
+        taxmaxi,
+        input: { cursor: "next", limit: 25 },
+      })
+      await vi.waitFor(() => expect(finish).toBeDefined())
+      if (change === "logout") await clearSessionQueries(client)
+      else client.setQueryData(queryKeys.account(), account("user-b"))
+      finish?.(
+        Response.json({
+          transactions: [],
+          page: { hasMore: false, nextCursor: null },
+          totalCount: 0,
+        })
+      )
+      await pending
+      expect(
+        client.getQueryCache().findAll({ queryKey: queryKeys.transactionLists() })
+      ).toHaveLength(0)
+      if (change === "logout")
+        expect(client.getQueryCache().findAll({ queryKey: queryKeys.all })).toHaveLength(0)
+      else expect(client.getQueryData<Account>(queryKeys.account())?.account.id).toBe("user-b")
+    }
+  )
 })

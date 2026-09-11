@@ -281,7 +281,9 @@ export const queries = {
       queryFn: async ({ signal }) => {
         // Consuming the signal cancels stale delivery even without SDK transport support.
         signal.throwIfAborted()
-        return taxmaxi.transactions.list(input)
+        const page = await taxmaxi.transactions.list(input)
+        signal.throwIfAborted()
+        return page
       },
       staleTime: 30 * 1000,
     }),
@@ -289,3 +291,35 @@ export const queries = {
 
 export const isTaxMaxiAssetNotFoundError = (error: unknown): boolean =>
   error instanceof TaxMaxiError && (error.status === 400 || error.status === 404)
+
+/** Read a speculative page and publish only while its starting session still owns it. */
+export const prefetchTransactionPage = async ({
+  queryClient,
+  taxmaxi,
+  input,
+  userId,
+  signal,
+  isCurrent = () => true,
+}: {
+  readonly queryClient: QueryClient
+  readonly taxmaxi: TaxMaxi
+  readonly input: TransactionListInput
+  readonly userId: string
+  readonly signal?: AbortSignal
+  readonly isCurrent?: () => boolean
+}) => {
+  const ownsRequest = () =>
+    !signal?.aborted &&
+    isCurrent() &&
+    queryClient.getQueryData<Account>(queryKeys.account())?.account.id === userId
+  if (!ownsRequest()) return
+  const page = await taxmaxi.transactions.list(input)
+  if (!ownsRequest()) return
+  setSessionQueryData({
+    queryClient,
+    queryKey: queryKeys.transactionList(input),
+    userId,
+    data: page,
+  })
+  return page
+}

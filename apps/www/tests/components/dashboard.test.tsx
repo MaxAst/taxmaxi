@@ -411,6 +411,115 @@ describe("Dashboard transaction pagination", () => {
     vi.clearAllMocks()
   })
 
+  it.each([false, true])(
+    "recovers paging after a prefetch failure (before navigation: %s)",
+    async (failBeforeNavigation) => {
+      const page = (start: number): TransactionListResponse => ({
+        transactions: Array.from({ length: 25 }, (_, index) =>
+          transaction(`row-${start + index + 1}`, `Page row ${start + index + 1}`)
+        ),
+        totalCount: 50,
+        page: { hasMore: start === 0, nextCursor: start === 0 ? "next-25" : null },
+      })
+      let reject: ((error: Error) => void) | undefined
+      const next = new Promise<TransactionListResponse>((_, fail) => {
+        reject = fail
+      })
+      const list = vi.fn(async (input: TransactionListInput = {}) =>
+        input.cursor ? next : page(0)
+      )
+      testTaxMaxi = {
+        portfolio: { listAssets: vi.fn(async () => ({ assets: [], summary: undefined })) },
+        transactions: { list },
+      } as unknown as TaxMaxi
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      client.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
+      render(
+        <QueryClientProvider client={client}>
+          <Dashboard accounts={[]} sourceOverviews={syncedOverviews} />
+        </QueryClientProvider>
+      )
+      await screen.findByText("Page row 25")
+      await waitFor(() => expect(list).toHaveBeenCalledWith({ cursor: "next-25", limit: 25 }))
+      if (failBeforeNavigation) {
+        await act(async () => reject?.(new Error("Prefetch unavailable")))
+        list.mockResolvedValueOnce(page(25))
+        fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+        await screen.findByText("Page row 26")
+        expect(screen.getByText("26–50 of 50")).toBeTruthy()
+        client.clear()
+        return
+      }
+      fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+      expect(screen.getByText("Page row 1")).toBeTruthy()
+      expect(screen.getByText("1–25 of 50")).toBeTruthy()
+      await act(async () => reject?.(new Error("Page unavailable")))
+      const retry = await screen.findByRole("button", { name: "Page could not load. Retry" })
+      expect(screen.getByText("Page row 25")).toBeTruthy()
+      expect(screen.getByText("1–25 of 50")).toBeTruthy()
+      list.mockResolvedValueOnce(page(25))
+      fireEvent.click(retry)
+      await screen.findByText("Page row 26")
+      expect(screen.getByText("26–50 of 50")).toBeTruthy()
+      expect(screen.queryByText("Page row 1")).toBeNull()
+      client.clear()
+    }
+  )
+
+  it("discards a pending neighbour when the visible page refetches", async () => {
+    const first: TransactionListResponse = {
+      transactions: [transaction("first", "Visible first page")],
+      totalCount: 2,
+      page: { hasMore: true, nextCursor: "next" },
+    }
+    const neighbour = (description: string): TransactionListResponse => ({
+      transactions: [transaction(description, description)],
+      totalCount: 2,
+      page: { hasMore: false, nextCursor: null },
+    })
+    let finishOld: ((page: TransactionListResponse) => void) | undefined
+    let neighbourReads = 0
+    const list = vi.fn(async (input: TransactionListInput = {}) => {
+      if (!input.cursor) return first
+      neighbourReads += 1
+      if (neighbourReads === 1)
+        return new Promise<TransactionListResponse>((resolve) => {
+          finishOld = resolve
+        })
+      return neighbour("Fresh neighbour")
+    })
+    testTaxMaxi = {
+      portfolio: { listAssets: vi.fn(async () => ({ assets: [], summary: undefined })) },
+      transactions: { list },
+    } as unknown as TaxMaxi
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    client.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
+    render(
+      <QueryClientProvider client={client}>
+        <Dashboard accounts={[]} sourceOverviews={syncedOverviews} />
+      </QueryClientProvider>
+    )
+    await screen.findByText("Visible first page")
+    await waitFor(() => expect(finishOld).toBeDefined())
+    await act(async () => {
+      await client.refetchQueries({
+        queryKey: queryKeys.transactionList({ cursor: null, limit: 25 }),
+        exact: true,
+      })
+    })
+    await waitFor(() => expect(neighbourReads).toBe(2))
+    await act(async () => finishOld?.(neighbour("Obsolete neighbour")))
+    expect(
+      client.getQueryData<TransactionListResponse>(
+        queryKeys.transactionList({ cursor: "next", limit: 25 })
+      )?.transactions[0]?.description
+    ).toBe("Fresh neighbour")
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+    await screen.findByText("Fresh neighbour")
+    expect(screen.queryByText("Obsolete neighbour")).toBeNull()
+    client.clear()
+  })
+
   it("uses server cursors and returns to the first page after a completed sync", async () => {
     const requestedCursors: Array<string | null> = []
     const firstPage: TransactionListResponse = {
@@ -458,8 +567,9 @@ describe("Dashboard transaction pagination", () => {
     expect(await screen.findByText("First transaction page")).toBeTruthy()
 
     fireEvent.click(screen.getByRole("button", { name: "Next page" }))
-    expect(await screen.findByText("Loading transactions…")).toBeTruthy()
-    expect(screen.queryByText("First transaction page")).toBeNull()
+    expect(screen.getByText("First transaction page")).toBeTruthy()
+    expect(screen.getByText("1–1 of 2")).toBeTruthy()
+    expect(screen.queryByText("Second transaction page")).toBeNull()
 
     await act(async () => {
       resolveSecondPage?.(secondPage)
@@ -2249,6 +2359,86 @@ describe("Inspector cursor navigation", () => {
     vi.restoreAllMocks()
   })
 
+  it("does not reuse a completed page from the previous account", async () => {
+    const { client, list } = setup()
+    await screen.findByText("Transaction 25")
+    const nextKey = queryKeys.transactionList({ cursor: "page-25", limit: 25 })
+    await waitFor(() => expect(client.getQueryData(nextKey)).toBeDefined())
+    let finish: ((value: TransactionListResponse) => void) | undefined
+    list.mockImplementation(
+      () =>
+        new Promise<TransactionListResponse>((resolve) => {
+          finish = resolve
+        })
+    )
+    await act(async () => {
+      const prior = sdkAccount(WELCOME_SEEN_AT)
+      client.setQueryData(queryKeys.account(), {
+        ...prior,
+        account: { ...prior.account, id: "user-b" },
+      })
+      client.removeQueries({ queryKey: nextKey, exact: true })
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+    await waitFor(() => expect(finish).toBeDefined())
+    expect(screen.getByText("1–25 of 1204")).toBeTruthy()
+    const replacementPage = {
+      ...page(25),
+      transactions: page(25).transactions.map((row) => ({
+        ...row,
+        description: `B ${row.description}`,
+      })),
+    }
+    await act(async () => finish?.(replacementPage))
+    await screen.findByText("B Transaction 26")
+    expect(screen.queryByText("Transaction 26")).toBeNull()
+    expect(
+      client.getQueryData<TransactionListResponse>(nextKey)?.transactions[0]?.description
+    ).toBe("B Transaction 26")
+    client.clear()
+  })
+
+  it("disables inspector navigation during footer paging and can cancel then retry", async () => {
+    const { client, list } = setup()
+    await screen.findByText("Transaction 25")
+    let finish: ((value: TransactionListResponse) => void) | undefined
+    list.mockImplementation((input) =>
+      input?.cursor
+        ? new Promise<TransactionListResponse>((resolve) => {
+            finish = resolve
+          })
+        : Promise.resolve(page(0))
+    )
+    await act(async () => {
+      await client.refetchQueries({
+        queryKey: queryKeys.transactionList({ cursor: null, limit: 25 }),
+        exact: true,
+      })
+    })
+    await waitFor(() => expect(finish).toBeDefined())
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open transaction · Transaction 25 · row-25" })
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+    expect(screen.getByRole("button", { name: "Next transaction" })).toHaveProperty(
+      "disabled",
+      true
+    )
+    expect(screen.getByRole("button", { name: "Previous transaction" })).toHaveProperty(
+      "disabled",
+      true
+    )
+    fireEvent.keyDown(document, { key: "ArrowRight" })
+    expect(screen.getByRole("complementary").textContent).toContain("Transaction 25")
+    fireEvent.click(screen.getByRole("button", { name: "Close transaction" }))
+    await act(async () => finish?.(page(25)))
+    expect(screen.getByText("1–25 of 1204")).toBeTruthy()
+    list.mockResolvedValueOnce(page(25))
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+    await screen.findByText("Transaction 26")
+    client.clear()
+  })
+
   it("uses uppercase URL UUIDs as one lowercase source for selection and both readers", async () => {
     const id = "abcdef01-2345-4678-9abc-def012345678"
     const filters = parseTransactionFilters({ sourceIds: [id.toUpperCase(), id] })
@@ -2285,7 +2475,7 @@ describe("Inspector cursor navigation", () => {
     )
     fireEvent.click(screen.getByRole("button", { name: "Next transaction" }))
     expect(await screen.findByText("26 of 1,204")).toBeTruthy()
-    expect(list).toHaveBeenLastCalledWith({ ...scope, cursor: "page-25", limit: 25 })
+    expect(list).toHaveBeenCalledWith({ ...scope, cursor: "page-25", limit: 25 })
     expect(
       client.getQueryData(queryKeys.transactionList({ ...scope, cursor: "page-25", limit: 25 }))
     ).toBeDefined()
@@ -2294,12 +2484,16 @@ describe("Inspector cursor navigation", () => {
     ).toBeUndefined()
     fireEvent.click(screen.getByRole("button", { name: "Previous transaction" }))
     expect(await screen.findByText("25 of 1,204")).toBeTruthy()
-    expect(list).toHaveBeenLastCalledWith({ ...scope, cursor: null, limit: 25 })
+    expect(list).toHaveBeenCalledWith({ ...scope, cursor: null, limit: 25 })
     act(() => {
       void refreshTransactionQueries(client)
     })
-    await waitFor(() => expect(list).toHaveBeenCalledTimes(4))
-    expect(list).toHaveBeenLastCalledWith({ ...scope, cursor: null, limit: 25 })
+    await waitFor(() =>
+      expect(
+        list.mock.calls.filter(([input]) => input?.cursor === null).length
+      ).toBeGreaterThanOrEqual(3)
+    )
+    expect(list).toHaveBeenCalledWith({ ...scope, cursor: null, limit: 25 })
     client.clear()
   })
 
@@ -2315,7 +2509,7 @@ describe("Inspector cursor navigation", () => {
         })
     )
     changeFilters({ assetIds: [SOURCE_A], categories: ["staking"] })
-    await waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(3))
     expect(screen.queryByText("Transaction 25")).toBeNull()
     expect(
       screen.getByRole("region", { name: "Transactions" }).querySelector('[aria-busy="true"]')
@@ -2397,9 +2591,10 @@ describe("Inspector cursor navigation", () => {
         })
     )
     const next = screen.getByRole("button", { name: "Next transaction" })
+    const beforeNavigation = list.mock.calls.length
     fireEvent.click(next)
     fireEvent.click(next)
-    expect(list).toHaveBeenCalledTimes(2)
+    expect(list).toHaveBeenCalledTimes(beforeNavigation + 1)
     expect(next).toHaveProperty("disabled", true)
     expect(screen.getByText("25 of 1,204")).toBeTruthy()
     await act(async () => reject?.(new Error("Neighbour unavailable")))
@@ -2464,11 +2659,23 @@ describe("Inspector cursor navigation", () => {
           await client.invalidateQueries({ queryKey: queryKeys.portfolioAssets() })
         }
       })
-      await act(async () => finish?.(page(25)))
+      await act(async () =>
+        finish?.({
+          ...page(25),
+          transactions: page(25).transactions.map((row) => ({
+            ...row,
+            description: "Obsolete neighbour",
+          })),
+        })
+      )
       expect(screen.queryByText("26 of 1,204")).toBeNull()
       expect(
-        client.getQueryData(queryKeys.transactionList({ cursor: "page-25", limit: 25 }))
-      ).toBeUndefined()
+        client
+          .getQueryData<TransactionListResponse>(
+            queryKeys.transactionList({ cursor: "page-25", limit: 25 })
+          )
+          ?.transactions.some((row) => row.description === "Obsolete neighbour")
+      ).not.toBe(true)
       if (change === "close" || change === "size" || change === "source")
         expect(screen.queryByRole("complementary")).toBeNull()
       client.clear()
@@ -2490,14 +2697,43 @@ describe("Inspector cursor navigation", () => {
       page: { hasMore: true, nextCursor: "page-24" },
     })
     fireEvent.click(screen.getByRole("button", { name: "Next transaction" }))
-    await waitFor(() => expect(list).toHaveBeenCalledTimes(3))
+    await screen.findByText("1–25 of 1205")
     expect(screen.queryByText("26 of 1,205")).toBeNull()
     expect(screen.getByRole("complementary").textContent).toContain("Transaction 25")
     expect(screen.getByText("1–25 of 1205")).toBeTruthy()
     expect(screen.getByText("Position unavailable")).toBeTruthy()
     expect(
-      client.getQueryData(queryKeys.transactionList({ cursor: "page-25", limit: 25 }))
-    ).toBeUndefined()
+      client.getQueryData<TransactionListResponse>(
+        queryKeys.transactionList({ cursor: "page-25", limit: 25 })
+      )?.totalCount
+    ).not.toBe(1205)
+    client.clear()
+  })
+
+  it("keeps the inspected row when a new run enters the cache before footer paging resolves", async () => {
+    const { client, list } = setup()
+    await screen.findByText("Transaction 25")
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open transaction · Transaction 25 · row-25" })
+    )
+    client.removeQueries({
+      queryKey: queryKeys.transactionList({ cursor: "page-25", limit: 25 }),
+      exact: true,
+    })
+    let finish: ((value: TransactionListResponse) => void) | undefined
+    list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }))
+    await act(async () => {
+      client.setQueryData(queryKeys.portfolioAssets(), portfolio(RUN_B))
+      finish?.(page(25))
+    })
+    expect(screen.getByRole("complementary").textContent).toContain("Transaction 25")
+    expect(screen.queryByText("26–50 of 1204")).toBeNull()
     client.clear()
   })
 
