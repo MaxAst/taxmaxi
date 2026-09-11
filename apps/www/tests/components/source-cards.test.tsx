@@ -16,6 +16,15 @@ const sources: Source[] = ["A", "B"].map((name) => ({
   lastSync: "Today",
 }))
 
+// jsdom does not track input modality. Browser proof checks the real keyboard-to-pointer transition.
+function keyboardFocus(card: HTMLElement) {
+  const matches = card.matches.bind(card)
+  vi.spyOn(card, "matches").mockImplementation(
+    (selector) => selector === ":focus-visible" || matches(selector)
+  )
+  act(() => card.focus())
+}
+
 beforeEach(() => {
   vi.stubGlobal(
     "ResizeObserver",
@@ -54,7 +63,7 @@ describe("SourceCards shared selection", () => {
     const a = screen.getByRole("button", { name: "Show A" })
     const b = screen.getByRole("button", { name: "Show B" })
     expect(screen.getAllByRole("button", { pressed: true })).toHaveLength(2)
-    act(() => b.focus())
+    keyboardFocus(b)
     expect(select).not.toHaveBeenCalled()
     fireEvent.keyDown(b, { key: "Escape" })
     expect(select).not.toHaveBeenCalled()
@@ -97,7 +106,7 @@ describe("SourceCards shared selection", () => {
     expect(select).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole("button", { name: "Sync A" }))
     expect(sync).toHaveBeenCalledExactlyOnceWith(sources[0])
-    act(() => a.focus())
+    keyboardFocus(a)
     await waitFor(() => expect(a.style.transform).not.toBe(before))
   })
 

@@ -447,7 +447,12 @@ function SourceCardStack({
               initialPlacement={isNewlyAdded ? liftedPlacement : false}
               key={source.id}
               onFocus={(event) => {
-                if (event.target === event.currentTarget) setLiftedSourceId(source.id)
+                if (
+                  event.target === event.currentTarget &&
+                  event.currentTarget.matches(":focus-visible")
+                ) {
+                  setLiftedSourceId(source.id)
+                }
               }}
               onClick={() => {
                 setLiftedSourceId(source.id)
