@@ -281,7 +281,9 @@ export const queries = {
       queryFn: async ({ signal }) => {
         // Consuming the signal cancels stale delivery even without SDK transport support.
         signal.throwIfAborted()
-        return taxmaxi.transactions.list(input)
+        const page = await taxmaxi.transactions.list(input)
+        signal.throwIfAborted()
+        return page
       },
       staleTime: 30 * 1000,
     }),
@@ -289,3 +291,14 @@ export const queries = {
 
 export const isTaxMaxiAssetNotFoundError = (error: unknown): boolean =>
   error instanceof TaxMaxiError && (error.status === 400 || error.status === 404)
+
+/** Warm the exact next-page key; session cancellation also cancels late cache delivery. */
+export const prefetchTransactionPage = ({
+  queryClient,
+  taxmaxi,
+  input,
+}: {
+  readonly queryClient: QueryClient
+  readonly taxmaxi: TaxMaxi
+  readonly input: TransactionListInput
+}): Promise<void> => queryClient.prefetchQuery(queries.transactionList(taxmaxi, input))

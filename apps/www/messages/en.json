@@ -527,7 +527,8 @@
           "reward": "Reward",
           "payment": "Payment"
         },
-        "movementValue": "Value"
+        "movementValue": "Value",
+        "pageRetry": "Page could not load. Retry"
       }
     }
   },

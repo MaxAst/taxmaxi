@@ -46,7 +46,12 @@ import {
   type SourceSyncSeed,
   type TaxYear,
 } from "#/lib/dashboard-types"
-import { queries, queryKeys, setSessionQueryData } from "#/integrations/taxmaxi/queries"
+import {
+  queries,
+  queryKeys,
+  setSessionQueryData,
+  prefetchTransactionPage,
+} from "#/integrations/taxmaxi/queries"
 import {
   TRANSACTION_PAGE_SIZE,
   TransactionsTable,
@@ -201,11 +206,15 @@ export function Dashboard({
   const [sequenceRefreshVersion, setSequenceRefreshVersion] = useState<number | null>(null)
   const [navigationPending, setNavigationPending] = useState(false)
   const [navigationFailure, setNavigationFailure] = useState<-1 | 1 | null>(null)
+  const [pagePending, setPagePending] = useState(false)
+  const [pageFailure, setPageFailure] = useState<-1 | 1 | null>(null)
   const cancelNavigation = useCallback(() => {
     navigationRequest.current += 1
     navigating.current = false
     setNavigationPending(false)
     setNavigationFailure(null)
+    setPagePending(false)
+    setPageFailure(null)
   }, [])
   const closeInspector = () => {
     cancelNavigation()
@@ -377,6 +386,32 @@ export function Dashboard({
     }),
     enabled: !authenticationLost && pageSizeLoaded,
   })
+
+  useEffect(() => {
+    const cursor = transactionQuery.data?.page.nextCursor
+    if (
+      authenticationLost ||
+      !pageSizeLoaded ||
+      transactionQuery.isFetching ||
+      cursor === null ||
+      cursor === undefined
+    )
+      return
+    void prefetchTransactionPage({
+      queryClient,
+      taxmaxi,
+      input: { ...transactionScope, cursor, limit: transactionPageSize },
+    })
+  }, [
+    authenticationLost,
+    pageSizeLoaded,
+    queryClient,
+    taxmaxi,
+    transactionPageSize,
+    transactionScope,
+    transactionQuery.data?.page.nextCursor,
+    transactionQuery.isFetching,
+  ])
 
   // Refetching the current page supersedes a speculative neighbour request.
   // The SDK may still finish after cancellation, so selection has its own token.
@@ -664,19 +699,60 @@ export function Dashboard({
     }
   }
 
-  const goToNextTransactionPage = () => {
+  const goToTransactionPage = async (direction: -1 | 1) => {
+    if (navigating.current || authenticationLost || transactionQuery.isFetching) return
     const nextCursor = transactionQuery.data?.page.nextCursor
-    if (nextCursor === null || nextCursor === undefined) return
+    const cursors =
+      direction === -1
+        ? transactionCursors.slice(0, -1)
+        : [...transactionCursors, nextCursor ?? null]
+    if (!cursors.length || (direction === 1 && (nextCursor === null || nextCursor === undefined)))
+      return
     cancelNavigation()
-    setSelectedTransaction(null)
-    setTransactionCursors((current) => [...current, nextCursor])
+    const request = navigationRequest.current
+    const userId = queryClient.getQueryData(queries.account(taxmaxi).queryKey)?.account.id
+    navigating.current = true
+    setPagePending(true)
+    const input = {
+      ...transactionScope,
+      cursor: cursors.at(-1) ?? null,
+      limit: transactionPageSize,
+    }
+    try {
+      const page = await queryClient.fetchQuery(queries.transactionList(taxmaxi, input))
+      if (
+        request !== navigationRequest.current ||
+        !dependentReadsAllowed.current ||
+        userId !== queryClient.getQueryData(queries.account(taxmaxi).queryKey)?.account.id
+      )
+        return
+      const currentRunId = queryClient.getQueryData(
+        queries.portfolioAssets(taxmaxi, portfolioScope).queryKey
+      )?.activeRun?.runId
+      if (currentRunId !== activeRunId || page.totalCount !== totalTransactions) {
+        resetTransactionSequence()
+        return
+      }
+      setSelectedTransaction(null)
+      setTransactionCursors(cursors)
+    } catch (error: unknown) {
+      if (
+        request !== navigationRequest.current ||
+        !dependentReadsAllowed.current ||
+        userId !== queryClient.getQueryData(queries.account(taxmaxi).queryKey)?.account.id
+      )
+        return
+      if (isTaxMaxiUnauthorizedError(error)) void handleUnauthorized()
+      else setPageFailure(direction)
+    } finally {
+      if (request === navigationRequest.current) {
+        navigating.current = false
+        setPagePending(false)
+      }
+    }
   }
-
-  const goToPreviousTransactionPage = () => {
-    cancelNavigation()
-    setSelectedTransaction(null)
-    setTransactionCursors((current) => (current.length > 1 ? current.slice(0, -1) : current))
-  }
+  const goToNextTransactionPage = () => void goToTransactionPage(1)
+  const goToPreviousTransactionPage = () => void goToTransactionPage(-1)
 
   const handleSourceSyncCompleted = useCallback(
     async (sourceId: AccountId) => {
@@ -1050,12 +1126,16 @@ export function Dashboard({
                         disabled={authenticationLost}
                         onSelect={selectTransaction}
                         selectedTransactionId={selectedTransaction?.transactionId ?? null}
-                        error={transactionQuery.isError}
+                        error={transactionQuery.isError || pageFailure !== null}
                         hasNextPage={transactionQuery.data?.page.hasMore ?? false}
-                        loading={transactionQuery.isFetching}
+                        loading={transactionQuery.isFetching || pagePending}
                         onNextPage={goToNextTransactionPage}
                         onPreviousPage={goToPreviousTransactionPage}
-                        onRetry={() => void transactionQuery.refetch()}
+                        onRetry={() =>
+                          pageFailure === null
+                            ? void transactionQuery.refetch()
+                            : void goToTransactionPage(pageFailure)
+                        }
                         pageIndex={transactionCursors.length - 1}
                         pageSize={transactionPageSize}
                         onPageSizeChange={changeTransactionPageSize}

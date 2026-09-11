@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from "vitest"
 
 import {
   queries,
+  clearSessionQueries,
+  prefetchTransactionPage,
   queryKeys,
   refreshTransactionQueries,
   setSessionQueryData,
@@ -340,5 +342,32 @@ describe("session-scoped query writes", () => {
     })
 
     expect(queryClient.getQueryData(queryKeys.billingStatus())).toBeUndefined()
+  })
+})
+
+describe("transaction page prefetch", () => {
+  it("drops late prefetch delivery after logout", async () => {
+    let finish: ((response: Response) => void) | undefined
+    const taxmaxi = new TaxMaxi({
+      apiKey: "",
+      baseUrl: "https://prefetch.example.test",
+      fetch: () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve
+        }),
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const pending = prefetchTransactionPage({
+      queryClient: client,
+      taxmaxi,
+      input: { cursor: "next", limit: 25 },
+    })
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    await clearSessionQueries(client)
+    finish?.(
+      Response.json({ transactions: [], page: { hasMore: false, nextCursor: null }, totalCount: 0 })
+    )
+    await pending
+    expect(client.getQueryCache().findAll({ queryKey: queryKeys.all })).toHaveLength(0)
   })
 })

@@ -527,7 +527,8 @@
           "reward": "Belohnung",
           "payment": "Zahlung"
         },
-        "movementValue": "Wert"
+        "movementValue": "Wert",
+        "pageRetry": "Seite konnte nicht geladen werden. Erneut versuchen"
       }
     }
   },
