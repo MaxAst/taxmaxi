@@ -152,6 +152,7 @@ it("restores filter sets and timezone through real router Back while retaining u
     history,
     context: { queryClient, taxmaxi: () => taxmaxi },
   })
+  const navigate = vi.spyOn(router, "navigate")
   render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
@@ -170,6 +171,7 @@ it("restores filter sets and timezone through real router Back while retaining u
   }
   await act(async () => dashboard.onFiltersChange?.(original))
   await waitFor(() => expect(dashboard.filters).toEqual(original))
+  expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ resetScroll: false }))
   expect(router.state.location.search).toMatchObject({ unrelated: "keep", ...original })
   await act(async () =>
     dashboard.onFiltersChange?.({ sourceIds: [], timezone: "America/New_York" })
@@ -177,6 +179,7 @@ it("restores filter sets and timezone through real router Back while retaining u
   await waitFor(() =>
     expect(dashboard.filters).toEqual({ sourceIds: [], timezone: "America/New_York" })
   )
+  expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ resetScroll: false }))
   await act(async () => history.back())
   await waitFor(() => expect(dashboard.filters).toEqual(original))
   expect(router.state.location.search).toMatchObject({ unrelated: "keep", ...original })

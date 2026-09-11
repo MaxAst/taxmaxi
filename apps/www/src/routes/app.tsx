@@ -156,7 +156,10 @@ function RouteComponent() {
   const filters = useMemo(() => parseTransactionFilters(search), [search])
   const onFiltersChange = useCallback(
     (next: TransactionFilters) => {
-      void navigate({ search: (previous) => updateTransactionSearch(previous, next) })
+      void navigate({
+        search: (previous) => updateTransactionSearch(previous, next),
+        resetScroll: false,
+      })
     },
     [navigate]
   )

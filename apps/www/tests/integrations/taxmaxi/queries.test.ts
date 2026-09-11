@@ -429,3 +429,56 @@ describe("transaction page prefetch", () => {
     }
   )
 })
+
+describe("transaction filter choices", () => {
+  it("reads owned historical choices and retains them after a failed refresh", async () => {
+    const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://choices.example.test" })
+    const choices = {
+      assets: [
+        {
+          assetId: "00000000-0000-4000-8000-000000000011",
+          symbol: "OLD",
+          name: "Sold token",
+          type: "fungible" as const,
+          coingeckoCoinId: null,
+          logoUrl: null,
+        },
+      ],
+    }
+    const read = vi
+      .spyOn(taxmaxi.transactions, "filterChoices")
+      .mockResolvedValueOnce(choices)
+      .mockRejectedValueOnce(new Error("offline"))
+    const client = new QueryClient()
+    await expect(client.fetchQuery(queries.transactionFilterChoices(taxmaxi))).resolves.toEqual(
+      choices
+    )
+    await client.invalidateQueries({ queryKey: queryKeys.transactions() })
+    await expect(client.fetchQuery(queries.transactionFilterChoices(taxmaxi))).rejects.toThrow(
+      "offline"
+    )
+    expect(read).toHaveBeenCalledTimes(2)
+    expect(client.getQueryData(queryKeys.transactionFilterChoices())).toEqual(choices)
+    client.clear()
+  })
+
+  it("drops delayed choices when logout clears the session", async () => {
+    const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://choices.example.test" })
+    let finish: ((value: { assets: [] }) => void) | undefined
+    vi.spyOn(taxmaxi.transactions, "filterChoices").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const client = new QueryClient()
+    const pending = client
+      .fetchQuery(queries.transactionFilterChoices(taxmaxi))
+      .catch(() => undefined)
+    await clearSessionQueries(client)
+    finish?.({ assets: [] })
+    await pending
+    expect(client.getQueryData(queryKeys.transactionFilterChoices())).toBeUndefined()
+    client.clear()
+  })
+})

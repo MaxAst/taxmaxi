@@ -2360,6 +2360,98 @@ describe("Inspector cursor navigation", () => {
     vi.restoreAllMocks()
   })
 
+  it("uses real menus to share source scope while asset/category edits leave portfolio alone", async () => {
+    sourceCardsState.real = true
+    HTMLElement.prototype.scrollIntoView = vi.fn()
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(0, 0, 900, 344)
+    )
+    const sourceB = "00000000-0000-4000-8000-000000000202"
+    const assetId = "00000000-0000-4000-8000-000000000011"
+    const accounts: Account[] = [SOURCE_A, sourceB].map((id, index) => ({
+      id,
+      name: index === 0 ? "Wallet A" : "Wallet B",
+      kind: "wallet",
+      network: "Solana",
+      importedTransactions: 25,
+      unresolvedItems: 0,
+      lastSync: "Today",
+    }))
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    client.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
+    testTaxMaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://menus.example.test" })
+    vi.spyOn(testTaxMaxi.transactions, "filterChoices").mockResolvedValue({
+      assets: [
+        {
+          assetId,
+          symbol: "OLD",
+          name: "Sold token",
+          type: "fungible",
+          coingeckoCoinId: null,
+          logoUrl: null,
+        },
+      ],
+    })
+    const list = vi.spyOn(testTaxMaxi.transactions, "list").mockResolvedValue({
+      transactions: [],
+      totalCount: 0,
+      page: { hasMore: false, nextCursor: null },
+    })
+    const assets = vi.spyOn(testTaxMaxi.portfolio, "listAssets").mockResolvedValue(portfolio())
+    vi.spyOn(testTaxMaxi.portfolio, "getCalculationStatus").mockImplementation(
+      () => new Promise(() => {})
+    )
+    function SharedScope() {
+      const [filters, setFilters] = useState<TransactionFilters>({ sourceIds: [SOURCE_A] })
+      return (
+        <Dashboard
+          accounts={accounts}
+          sourceOverviews={syncedOverviews}
+          filters={filters}
+          onFiltersChange={setFilters}
+        />
+      )
+    }
+    render(
+      <QueryClientProvider client={client}>
+        <SharedScope />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(assets).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole("button", { name: "Filter Sources" }))
+    fireEvent.click(await screen.findByRole("option", { name: /Wallet B/ }))
+    fireEvent.keyDown(screen.getByRole("combobox", { name: /^(Sources|Assets)$/ }), {
+      key: "Escape",
+    })
+    await waitFor(() =>
+      expect(assets).toHaveBeenLastCalledWith({ sourceIds: [SOURCE_A, sourceB], currency: "eur" })
+    )
+    expect(screen.getByRole("button", { name: "Show Wallet A" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    )
+    expect(screen.getByRole("button", { name: "Show Wallet B" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    )
+    const portfolioCount = assets.mock.calls.length
+    fireEvent.click(screen.getByRole("button", { name: "Filter Assets" }))
+    fireEvent.click(await screen.findByRole("option", { name: /Sold token/ }))
+    fireEvent.keyDown(screen.getByRole("combobox", { name: /^(Sources|Assets)$/ }), {
+      key: "Escape",
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Staking" }))
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({
+        sourceIds: [SOURCE_A, sourceB],
+        assetIds: [assetId],
+        categories: ["staking"],
+        cursor: null,
+        limit: 25,
+      })
+    )
+    expect(assets).toHaveBeenCalledTimes(portfolioCount)
+    client.clear()
+  })
+
   it("uses real cards to share multi-source reads, then selects one source and cancels old prefetch", async () => {
     sourceCardsState.real = true
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
