@@ -146,9 +146,9 @@ export function SourceCards({
   contentClassName,
   onAddWallet,
   onResolveName,
-  onSelectedSourceIdChange,
+  onSourceSelect,
   onSourceSync,
-  selectedSourceId,
+  selectedSourceIds,
   syncingSourceIds,
   sources = mockSources,
 }: {
@@ -157,9 +157,9 @@ export function SourceCards({
   contentClassName?: string
   onAddWallet?: (walletAddress: string) => Promise<void>
   onResolveName?: (name: string) => Promise<NameResolution>
-  onSelectedSourceIdChange?: (sourceId: Source["id"] | undefined) => void
+  onSourceSelect?: (sourceId: Source["id"]) => void
   onSourceSync?: (source: Source) => void | Promise<void>
-  selectedSourceId?: Source["id"]
+  selectedSourceIds?: ReadonlyArray<Source["id"]>
   syncingSourceIds?: ReadonlySet<Source["id"]>
   sources?: ReadonlyArray<Source>
 }) {
@@ -171,9 +171,9 @@ export function SourceCards({
       <SourceCardRail
         onAddWallet={onAddWallet}
         onResolveName={onResolveName}
-        onSelectedSourceIdChange={onSelectedSourceIdChange}
+        onSourceSelect={onSourceSelect}
         onSourceSync={onSourceSync}
-        selectedSourceId={selectedSourceId}
+        selectedSourceIds={selectedSourceIds}
         syncingSourceIds={syncingSourceIds}
         sources={sources}
       />
@@ -198,27 +198,29 @@ export function SourceCards({
 function SourceCardRail({
   onAddWallet,
   onResolveName,
-  onSelectedSourceIdChange,
+  onSourceSelect,
   onSourceSync,
-  selectedSourceId,
+  selectedSourceIds,
   syncingSourceIds,
   sources,
 }: {
   onAddWallet?: (walletAddress: string) => Promise<void>
   onResolveName?: (name: string) => Promise<NameResolution>
-  onSelectedSourceIdChange?: (sourceId: Source["id"] | undefined) => void
+  onSourceSelect?: (sourceId: Source["id"]) => void
   onSourceSync?: (source: Source) => void | Promise<void>
-  selectedSourceId?: Source["id"]
+  selectedSourceIds?: ReadonlyArray<Source["id"]>
   syncingSourceIds?: ReadonlySet<Source["id"]>
   sources: ReadonlyArray<Source>
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null)
   const [containerWidth, setContainerWidth] = useState(0)
   const [isAddingWallet, setIsAddingWallet] = useState(false)
+  const reduceMotion = useReducedMotion()
   const totalSlots = sources.length + (onAddWallet === undefined ? 0 : 1)
   const stackLayout = useMemo(
-    () => getStackLayout({ containerWidth, total: totalSlots }),
-    [containerWidth, totalSlots]
+    () =>
+      getStackLayout({ containerWidth, total: totalSlots, reducedMotion: reduceMotion === true }),
+    [containerWidth, totalSlots, reduceMotion]
   )
 
   useEffect(() => {
@@ -231,9 +233,9 @@ function SourceCardRail({
 
   useEffect(() => {
     if (isAddingWallet) {
-      scrollerRef.current?.scrollTo({ behavior: "smooth", left: 0 })
+      scrollerRef.current?.scrollTo({ behavior: reduceMotion ? "instant" : "smooth", left: 0 })
     }
-  }, [isAddingWallet])
+  }, [isAddingWallet, reduceMotion])
 
   useLayoutEffect(() => {
     const scroller = scrollerRef.current
@@ -261,12 +263,29 @@ function SourceCardRail({
     >
       <ContentContainer className="h-full overflow-visible" width="2xl">
         <div
-          className="relative -mx-10 h-[21.5rem] overflow-x-auto overflow-y-clip overscroll-x-contain sm:-mx-12"
+          className={cn(
+            "relative h-[21.5rem] overflow-x-auto overflow-y-clip overscroll-x-contain",
+            reduceMotion ? "scroll-px-2" : "-mx-10 sm:-mx-12"
+          )}
+          onFocusCapture={(event) => {
+            if (
+              reduceMotion &&
+              event.target instanceof HTMLElement &&
+              event.target === document.activeElement &&
+              event.target.matches(":focus-visible") &&
+              event.currentTarget.contains(event.target)
+            ) {
+              event.target.scrollIntoView({
+                block: "nearest",
+                inline: "nearest",
+                behavior: "instant",
+              })
+            }
+          }}
           ref={scrollerRef}
         >
-          {/* The stack mounts only after the scroller is measured, so cards
-              paint at their final placements instead of springing over from
-              a zero-width layout. */}
+          {/* The normal fan waits for measurement before painting. The reduced
+              row uses CSS flow and is ready at its first paint. */}
           {stackLayout.ready ? (
             <SourceCardStack
               isAddingWallet={isAddingWallet}
@@ -274,9 +293,9 @@ function SourceCardRail({
               onAddWallet={onAddWallet}
               onResolveName={onResolveName}
               onAddingWalletChange={setIsAddingWallet}
-              onSelectedSourceIdChange={onSelectedSourceIdChange}
+              onSourceSelect={onSourceSelect}
               onSourceSync={onSourceSync}
-              selectedSourceId={selectedSourceId}
+              selectedSourceIds={selectedSourceIds}
               syncingSourceIds={syncingSourceIds}
               sources={sources}
             />
@@ -293,9 +312,9 @@ function SourceCardStack({
   onAddWallet,
   onAddingWalletChange,
   onResolveName,
-  onSelectedSourceIdChange,
+  onSourceSelect,
   onSourceSync,
-  selectedSourceId,
+  selectedSourceIds,
   syncingSourceIds,
   sources,
 }: {
@@ -304,9 +323,9 @@ function SourceCardStack({
   onAddWallet?: (walletAddress: string) => Promise<void>
   onResolveName?: (name: string) => Promise<NameResolution>
   onAddingWalletChange: (isAddingWallet: boolean) => void
-  onSelectedSourceIdChange?: (sourceId: Source["id"] | undefined) => void
+  onSourceSelect?: (sourceId: Source["id"]) => void
   onSourceSync?: (source: Source) => void | Promise<void>
-  selectedSourceId?: Source["id"]
+  selectedSourceIds?: ReadonlyArray<Source["id"]>
   syncingSourceIds?: ReadonlySet<Source["id"]>
   sources: ReadonlyArray<Source>
 }) {
@@ -317,10 +336,8 @@ function SourceCardStack({
   const showAddCard = onAddWallet !== undefined
   const slotOffset = showAddCard ? 1 : 0
   const totalSlots = sources.length + slotOffset
-  const selectedIndex =
-    selectedSourceId === undefined
-      ? -1
-      : sources.findIndex((source) => source.id === selectedSourceId)
+  const [liftedSourceId, setLiftedSourceId] = useState<Source["id"]>()
+  const selectedIndex = sources.findIndex((source) => source.id === liftedSourceId)
   const selectedSlot =
     showAddCard && isAddingWallet ? 0 : selectedIndex >= 0 ? selectedIndex + slotOffset : -1
 
@@ -346,13 +363,13 @@ function SourceCardStack({
     knownSourceIdsRef.current = new Set(sources.map((source) => source.id))
   }, [sources])
 
-  // Escape clears the selection, matching the add-wallet card. Presses
+  // Escape lowers the focused card without changing the source filter. Presses
   // inside text fields are left to the field itself — that is how the
-  // add-wallet input closes first and a second press deselects. Focus
+  // add-wallet input closes first and a second press lowers the source card. Focus
   // leaves the card as well, again matching the add-wallet card, so the
   // keyboard focus ring does not linger after a mouse-driven dismiss.
   useEffect(() => {
-    if (selectedSourceId === undefined) {
+    if (liftedSourceId === undefined) {
       return
     }
 
@@ -374,27 +391,31 @@ function SourceCardStack({
         focused.blur()
       }
 
-      onSelectedSourceIdChange?.(undefined)
+      setLiftedSourceId(undefined)
     }
 
     document.addEventListener("keydown", handleKeyDown)
 
     return () => document.removeEventListener("keydown", handleKeyDown)
-  }, [onSelectedSourceIdChange, selectedSourceId])
+  }, [liftedSourceId])
 
   return (
     <div
       className={cn(
         "absolute top-0",
-        layout.align === "center" ? "left-1/2 -translate-x-1/2" : "left-0"
+        !layout.reducedMotion && layout.align === "center" ? "left-1/2 -translate-x-1/2" : "left-0"
       )}
       style={{
-        left: layout.align === "center" ? undefined : layout.left,
-        width: layout.stackWidth,
+        left: layout.reducedMotion || layout.align === "center" ? undefined : layout.left,
+        width: layout.reducedMotion ? "max-content" : layout.stackWidth,
+        minWidth: layout.reducedMotion ? "100%" : undefined,
       }}
     >
       <div
-        className="relative isolate overflow-visible"
+        className={cn(
+          "relative isolate overflow-visible",
+          layout.reducedMotion && "flex items-start justify-center gap-4 px-2 pt-5"
+        )}
         ref={stackRef}
         style={{ height: SOURCE_STACK.height }}
       >
@@ -421,7 +442,8 @@ function SourceCardStack({
           </FanCard>
         ) : null}
         {sources.map((source, index) => {
-          const active = selectedSourceId === source.id
+          const active = selectedSourceIds?.includes(source.id) ?? false
+          const lifted = liftedSourceId === source.id
           const isSyncing = syncingSourceIds?.has(source.id) ?? false
           const isNewlyAdded = source.id === dealSourceId
           const resting = getCardPlacement({
@@ -433,21 +455,31 @@ function SourceCardStack({
 
           return (
             <FanCard
-              aria-label={
-                active
-                  ? m["app.dashboard.sources.showAllSources"]()
-                  : m["app.dashboard.sources.showSource"]({ sourceName: source.name })
-              }
+              aria-label={m["app.dashboard.sources.showSource"]({ sourceName: source.name })}
               aria-pressed={active}
-              className="cursor-pointer rounded-2xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+              className={cn(
+                "cursor-pointer rounded-2xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+                active && "ring-2 ring-ring"
+              )}
               hoverPlacement={{
                 ...resting,
                 scale: resting.scale * SOURCE_STACK.hoverScale,
-                y: active ? resting.y : SOURCE_STACK.hoverY,
+                y: lifted ? resting.y : SOURCE_STACK.hoverY,
               }}
               initialPlacement={isNewlyAdded ? liftedPlacement : false}
               key={source.id}
-              onClick={() => onSelectedSourceIdChange?.(active ? undefined : source.id)}
+              onFocus={(event) => {
+                if (
+                  event.target === event.currentTarget &&
+                  event.currentTarget.matches(":focus-visible")
+                ) {
+                  setLiftedSourceId(source.id)
+                }
+              }}
+              onClick={() => {
+                setLiftedSourceId(source.id)
+                onSourceSelect?.(source.id)
+              }}
               onKeyDown={(event) => {
                 if (event.target !== event.currentTarget) {
                   return
@@ -458,7 +490,8 @@ function SourceCardStack({
                 }
 
                 event.preventDefault()
-                onSelectedSourceIdChange?.(active ? undefined : source.id)
+                setLiftedSourceId(source.id)
+                onSourceSelect?.(source.id)
               }}
               placement={resting}
               role="button"
@@ -473,7 +506,10 @@ function SourceCardStack({
                       aria-label={m["app.dashboard.sources.syncSource"]({
                         sourceName: source.name,
                       })}
-                      className="relative inline-flex h-7 touch-manipulation items-center gap-1 rounded-full border border-white/24 bg-white/16 px-2.5 text-xs font-medium text-current shadow-sm backdrop-blur-md transition-[background-color,border-color,transform] duration-150 before:absolute before:-inset-y-2 before:inset-x-0 hover:bg-white/24 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-white/35 [&_svg]:size-3"
+                      className={cn(
+                        layout.reducedMotion && "scroll-mx-2",
+                        "relative inline-flex h-7 touch-manipulation items-center gap-1 rounded-full border border-white/24 bg-white/16 px-2.5 text-xs font-medium text-current shadow-sm backdrop-blur-md transition-[background-color,border-color,transform] duration-150 before:absolute before:-inset-y-2 before:inset-x-0 hover:bg-white/24 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-white/35 [&_svg]:size-3"
+                      )}
                       onClick={(event) => {
                         event.stopPropagation()
                         void onSourceSync(source)
@@ -524,7 +560,7 @@ function FanCard({
   zIndex: number
 } & Pick<
   React.ComponentProps<typeof motion.div>,
-  "aria-label" | "aria-pressed" | "onClick" | "onKeyDown" | "role" | "tabIndex"
+  "aria-label" | "aria-pressed" | "onClick" | "onFocus" | "onKeyDown" | "role" | "tabIndex"
 >) {
   const reduceMotion = useReducedMotion()
   const [isHovered, setIsHovered] = useState(false)
@@ -541,9 +577,14 @@ function FanCard({
         x: target.x,
         y: target.y,
       }}
-      className={cn("absolute left-0 top-0 will-change-transform", className)}
+      className={cn(
+        reduceMotion
+          ? "relative shrink-0 scroll-mx-2"
+          : "absolute left-0 top-0 will-change-transform",
+        className
+      )}
       initial={
-        initialPlacement === false
+        reduceMotion || initialPlacement === false
           ? false
           : {
               opacity: 1,
@@ -565,6 +606,7 @@ function FanCard({
 }
 
 type SourceStackLayout = {
+  reducedMotion: boolean
   align: "center" | "measured"
   left: number
   ready: boolean
@@ -592,6 +634,17 @@ function getCardPlacement({
   selectedIndex: number
   total: number
 }): CardPlacement {
+  // Keep every reduced-motion control above the sheet without moving cards on focus or selection.
+  if (layout.reducedMotion) {
+    return {
+      x: 0,
+      y: 0,
+      rotate: 0,
+      scale: 1,
+      zIndex: index + 1,
+    }
+  }
+
   const basePlacement = getRestingPlacement({ index, layout, total })
 
   if (selectedIndex < 0) {
@@ -647,7 +700,7 @@ function getAddCardPlacement({
     total: totalSlots,
   })
 
-  if (selectedSlot >= 0 || totalSlots <= 2) {
+  if (layout.reducedMotion || selectedSlot >= 0 || totalSlots <= 2) {
     return placement
   }
 
@@ -681,16 +734,31 @@ function getRestingPlacement({
 function getStackLayout({
   containerWidth,
   total,
+  reducedMotion,
 }: {
   containerWidth: number
   total: number
+  reducedMotion: boolean
 }): SourceStackLayout {
   const cardWidth = SOURCE_STACK.cardWidthPx
   const sidePadding = SOURCE_STACK.fan.sidePadding
   const startX = SOURCE_STACK.fan.startX
 
+  if (reducedMotion) {
+    return {
+      reducedMotion: true,
+      align: "measured",
+      left: 0,
+      ready: true,
+      stackWidth: 0,
+      startX: 0,
+      stepX: 0,
+    }
+  }
+
   if (total <= 1) {
     return {
+      reducedMotion: false,
       align: "center",
       left: 0,
       ready: true,
@@ -709,6 +777,7 @@ function getStackLayout({
   const stackWidth = startX + Math.max(0, total - 1) * stepX + cardWidth + sidePadding
 
   return {
+    reducedMotion: false,
     align: "measured",
     left: Math.max(0, (maxStackWidth - stackWidth) / 2),
     ready,

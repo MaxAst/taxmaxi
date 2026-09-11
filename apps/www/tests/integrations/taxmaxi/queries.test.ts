@@ -185,6 +185,48 @@ describe("transaction list queries", () => {
 })
 
 describe("portfolio queries", () => {
+  it("sends the same multi-source set to both readers without reusing another scope", async () => {
+    const sourceIds = [
+      "00000000-0000-4000-8000-000000000201",
+      "00000000-0000-4000-8000-000000000202",
+    ]
+    const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://scope.example.test" })
+    const assets = vi.spyOn(taxmaxi.portfolio, "listAssets").mockResolvedValue({
+      currency: "eur",
+      activeRun: null,
+      latestRun: null,
+      assets: [],
+      summary: {
+        totalValue: null,
+        costBasis: null,
+        profitLoss: null,
+        profitLossPercentage: null,
+      },
+    })
+    const list = vi.spyOn(taxmaxi.transactions, "list").mockResolvedValue({
+      transactions: [],
+      totalCount: 0,
+      page: { hasMore: false, nextCursor: null },
+    })
+    const client = new QueryClient()
+    await client.fetchQuery(queries.portfolioAssets(taxmaxi, sourceIds))
+    await client.fetchQuery(
+      queries.transactionList(taxmaxi, { sourceIds, cursor: null, limit: 25 })
+    )
+    expect(assets).toHaveBeenCalledExactlyOnceWith({ sourceIds, currency: "eur" })
+    expect(list).toHaveBeenCalledExactlyOnceWith({ sourceIds, cursor: null, limit: 25 })
+    expect(client.getQueryData(queryKeys.portfolioAssets(sourceIds[0]))).toBeUndefined()
+    expect(
+      client.getQueryData(
+        queryKeys.transactionList({ sourceIds: [sourceIds[0]], cursor: null, limit: 25 })
+      )
+    ).toBeUndefined()
+    expect(queryKeys.portfolioAssets([...sourceIds].reverse())).toEqual(
+      queryKeys.portfolioAssets(sourceIds)
+    )
+    client.clear()
+  })
+
   it("keeps source scopes separate and refreshes on focus and reconnect", () => {
     const taxmaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://portfolio.example.test" })
     const sourceA = queries.portfolioAssets(taxmaxi, "source-a")

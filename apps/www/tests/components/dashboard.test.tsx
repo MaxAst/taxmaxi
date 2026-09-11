@@ -9,7 +9,7 @@ import {
   useQuery,
 } from "@tanstack/react-query"
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
-import type { ReactNode, Ref } from "react"
+import { useState, type ReactNode, type Ref } from "react"
 import {
   TaxMaxi,
   type Account as TaxMaxiAccount,
@@ -33,6 +33,7 @@ import { queryKeys, queries, refreshTransactionQueries } from "#/integrations/ta
 import type { Account, SourceSyncSeed } from "#/lib/dashboard-types"
 
 beforeEach(() => {
+  sourceCardsState.real = false
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -180,29 +181,29 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   }
 })
 
-vi.mock("#/components/source-cards", () => ({
-  SourceCards: ({
-    children,
-    onSelectedSourceIdChange,
-    selectedSourceId,
-  }: {
-    readonly children: ReactNode
-    readonly onSelectedSourceIdChange: (sourceId: string | undefined) => void
-    readonly selectedSourceId?: string
-  }) => (
-    <div>
-      <span>{selectedSourceId ?? "all sources"}</span>
-      <button onClick={() => onSelectedSourceIdChange("00000000-0000-4000-8000-000000000201")}>
-        Source A
-      </button>
-      <button onClick={() => onSelectedSourceIdChange("00000000-0000-4000-8000-000000000202")}>
-        Source B
-      </button>
-      <button onClick={() => onSelectedSourceIdChange(undefined)}>All sources</button>
-      {children}
-    </div>
-  ),
-}))
+const sourceCardsState = vi.hoisted(() => ({ real: false }))
+
+vi.mock("#/components/source-cards", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("#/components/source-cards")>()
+  return {
+    SourceCards: (props: React.ComponentProps<typeof actual.SourceCards>) => {
+      if (sourceCardsState.real) return <actual.SourceCards {...props} />
+      return (
+        <div>
+          <span>{props.selectedSourceIds?.join(",") || "all sources"}</span>
+          <button onClick={() => props.onSourceSelect?.("00000000-0000-4000-8000-000000000201")}>
+            Source A
+          </button>
+          <button onClick={() => props.onSourceSelect?.("00000000-0000-4000-8000-000000000202")}>
+            Source B
+          </button>
+          <button onClick={() => props.onSourceSelect?.("all")}>All sources</button>
+          {props.children}
+        </div>
+      )
+    },
+  }
+})
 
 // Mirrors the real island's Retry rule: a failed item offers Retry when a
 // handler exists and `canRetry` (default yes) allows it.
@@ -2357,6 +2358,116 @@ describe("Inspector cursor navigation", () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+  })
+
+  it("uses real cards to share multi-source reads, then selects one source and cancels old prefetch", async () => {
+    sourceCardsState.real = true
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(0, 0, 900, 344)
+    )
+    const sourceB = "00000000-0000-4000-8000-000000000202"
+    const accounts: Account[] = [SOURCE_A, sourceB].map((id, index) => ({
+      id,
+      name: index === 0 ? "Wallet A" : "Wallet B",
+      kind: "wallet",
+      network: "Solana",
+      importedTransactions: 25,
+      unresolvedItems: 0,
+      lastSync: "Today",
+    }))
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    client.setQueryData(queryKeys.account(), sdkAccount(WELCOME_SEEN_AT))
+    testTaxMaxi = new TaxMaxi({ apiKey: "", baseUrl: "https://cards.example.test" })
+    let finishOld: ((value: TransactionListResponse) => void) | undefined
+    let finishSelected: ((value: TransactionListResponse) => void) | undefined
+    let finishPortfolio: ((value: PortfolioAssets) => void) | undefined
+    const list = vi.spyOn(testTaxMaxi.transactions, "list").mockImplementation((input) => {
+      if (input?.sourceIds?.length === 2) {
+        return input.cursor
+          ? new Promise((resolve) => {
+              finishOld = resolve
+            })
+          : Promise.resolve(page(0))
+      }
+      return input?.cursor
+        ? Promise.resolve(page(25))
+        : new Promise((resolve) => {
+            finishSelected = resolve
+          })
+    })
+    const assets = vi.spyOn(testTaxMaxi.portfolio, "listAssets").mockImplementation((input) =>
+      input?.sourceIds?.length === 2
+        ? Promise.resolve(portfolio())
+        : new Promise((resolve) => {
+            finishPortfolio = resolve
+          })
+    )
+    vi.spyOn(testTaxMaxi.portfolio, "getCalculationStatus").mockImplementation(
+      () => new Promise(() => {})
+    )
+    const replay = vi.fn()
+    function SharedScope() {
+      const [filters, setFilters] = useState<TransactionFilters>({ sourceIds: [SOURCE_A, sourceB] })
+      return (
+        <Dashboard
+          accounts={accounts}
+          sourceOverviews={syncedOverviews}
+          filters={filters}
+          onFiltersChange={setFilters}
+          replaySourceSync={replay}
+        />
+      )
+    }
+    render(
+      <QueryClientProvider client={client}>
+        <SharedScope />
+      </QueryClientProvider>
+    )
+    await screen.findByText("Transaction 25")
+    await waitFor(() => expect(finishOld).toBeDefined())
+    const cardA = screen.getByRole("button", { name: "Show Wallet A" })
+    const cardB = screen.getByRole("button", { name: "Show Wallet B" })
+    expect(screen.getAllByRole("button", { pressed: true })).toHaveLength(2)
+    expect(cardA.className).toContain("ring-2")
+    expect(cardB.className).toContain("ring-2")
+    expect(assets).toHaveBeenCalledWith({ sourceIds: [SOURCE_A, sourceB], currency: "eur" })
+    expect(list).toHaveBeenCalledWith({ sourceIds: [SOURCE_A, sourceB], cursor: null, limit: 25 })
+    expect(screen.queryByRole("button", { name: "Source actions" })).toBeNull()
+    fireEvent.focus(cardB)
+    fireEvent.click(screen.getByRole("button", { name: "Sync Wallet B" }))
+    expect(syncState.onSourceSync).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: sourceB })
+    )
+    expect(replay).not.toHaveBeenCalled()
+    expect(screen.getAllByRole("button", { pressed: true })).toHaveLength(2)
+    expect(assets).toHaveBeenCalledTimes(1)
+    fireEvent.click(cardA)
+    await waitFor(() => expect(finishSelected).toBeDefined())
+    expect(cardA.getAttribute("aria-pressed")).toBe("true")
+    expect(cardB.getAttribute("aria-pressed")).toBe("false")
+    expect(screen.queryByText("Transaction 25")).toBeNull()
+    expect(
+      screen.getByRole("region", { name: "Transactions" }).querySelector('[aria-busy="true"]')
+    ).toBeTruthy()
+    expect(assets).toHaveBeenLastCalledWith({ sourceId: SOURCE_A, currency: "eur" })
+    await act(async () => finishOld?.(page(25)))
+    expect(
+      client.getQueryData(
+        queryKeys.transactionList({ sourceIds: [SOURCE_A, sourceB], cursor: "page-25", limit: 25 })
+      )
+    ).toBeUndefined()
+    await act(async () => {
+      finishSelected?.(page(0))
+      finishPortfolio?.(portfolio())
+    })
+    await screen.findByText("Transaction 25")
+    await waitFor(() =>
+      expect(list).toHaveBeenCalledWith({ sourceIds: [SOURCE_A], cursor: "page-25", limit: 25 })
+    )
+    fireEvent.keyDown(cardA, { key: "Escape" })
+    expect(cardA.getAttribute("aria-pressed")).toBe("true")
+    expect(cardB.getAttribute("aria-pressed")).toBe("false")
+    client.clear()
   })
 
   it("does not reuse a completed page from the previous account", async () => {
