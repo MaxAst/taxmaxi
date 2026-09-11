@@ -132,6 +132,45 @@ describe("structured filter controls", () => {
     )
   })
 
+  it("uses recognizable metadata before exact IDs when equal names can be distinguished", async () => {
+    render(
+      <TransactionFilterControls
+        filters={{ sourceIds: [A], assetIds: [X, Y] }}
+        sources={[source, { ...source, id: "00000000-0000-4000-8000-000000000002" }]}
+        assets={[
+          {
+            assetId: X,
+            symbol: "SAME",
+            name: "Same token",
+            type: "fungible",
+            coingeckoCoinId: "same-token",
+            logoUrl: null,
+          },
+          {
+            assetId: Y,
+            symbol: "SAME",
+            name: "Same token",
+            type: "nft",
+            coingeckoCoinId: null,
+            logoUrl: null,
+          },
+        ]}
+        onRetry={vi.fn()}
+        onChange={vi.fn()}
+      />
+    )
+    expect(screen.getByRole("button", { name: `Remove Wallet A · ${A}` })).toBeTruthy()
+    expect(
+      screen.getByRole("button", { name: "Remove SAME · Same token · Token · same-token" })
+    ).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Remove SAME · Same token · NFT" })).toBeTruthy()
+    await open("Assets")
+    for (const choice of screen.getAllByRole("option")) {
+      expect(choice.textContent).not.toContain(X)
+      expect(choice.textContent).not.toContain(Y)
+    }
+  })
+
   it("retry keyboard events do not select cmdk options or change filters", async () => {
     const change = vi.fn()
     const retry = vi.fn()

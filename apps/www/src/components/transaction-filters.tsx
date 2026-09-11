@@ -55,6 +55,7 @@ function FilterMenu({
   failed?: boolean
   onRetry?: () => void
 }) {
+  const selectedIds = new Set(selected)
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -100,7 +101,7 @@ function FilterMenu({
                   key={choice.id}
                   value={choice.id}
                   keywords={[choice.label, choice.detail ?? ""]}
-                  data-checked={selected.includes(choice.id)}
+                  data-checked={selectedIds.has(choice.id)}
                   onSelect={() => onToggle(choice.id)}
                   className="min-h-11"
                 >
@@ -112,7 +113,7 @@ function FilterMenu({
                       </span>
                     ) : null}
                     <span className="sr-only">
-                      {selected.includes(choice.id)
+                      {selectedIds.has(choice.id)
                         ? m["app.transactionFilters.selected"]()
                         : m["app.transactionFilters.notSelected"]()}
                     </span>
@@ -160,22 +161,24 @@ export function TransactionFilterControls({
     if (event.detail === 0) triggers.current.get(group)?.focus()
   }
   const labels = categoryLabels()
+  const sourceNameCounts = new Map<string, number>()
+  for (const source of sources) {
+    sourceNameCounts.set(source.name, (sourceNameCounts.get(source.name) ?? 0) + 1)
+  }
   const sourceChoices = sources.map((source) => ({
     id: source.id,
     label: source.name,
-    detail: sources.some((other) => other.id !== source.id && other.name === source.name)
-      ? source.id
-      : undefined,
+    detail: (sourceNameCounts.get(source.name) ?? 0) > 1 ? source.id : undefined,
   }))
+  const assetMetadataKey = (asset: TransactionFilterChoices["assets"][number]) =>
+    JSON.stringify([asset.symbol, asset.name, asset.type, asset.coingeckoCoinId])
+  const assetMetadataCounts = new Map<string, number>()
+  for (const asset of assets ?? []) {
+    const key = assetMetadataKey(asset)
+    assetMetadataCounts.set(key, (assetMetadataCounts.get(key) ?? 0) + 1)
+  }
   const assetChoices = (assets ?? []).map((asset) => {
-    const indistinguishable = assets?.some(
-      (other) =>
-        other.assetId !== asset.assetId &&
-        other.symbol === asset.symbol &&
-        other.name === asset.name &&
-        other.type === asset.type &&
-        other.coingeckoCoinId === asset.coingeckoCoinId
-    )
+    const indistinguishable = (assetMetadataCounts.get(assetMetadataKey(asset)) ?? 0) > 1
     const metadata = [
       asset.type === "nft"
         ? m["app.transactionFilters.nft"]()
@@ -287,12 +290,17 @@ export function TransactionFilterControls({
         ) : null}
       </div>
       <div className="flex flex-wrap gap-2">
-        {groups.flatMap((group) =>
-          group.selected.map((id) => {
-            const choice: Choice | undefined = group.choices.find((choice) => choice.id === id)
-            const duplicate =
-              choice &&
-              group.choices.some((other) => other.id !== id && other.label === choice.label)
+        {groups.flatMap((group) => {
+          const choicesById = new Map<string, Choice>(
+            group.choices.map((choice) => [choice.id, choice])
+          )
+          const labelCounts = new Map<string, number>()
+          for (const choice of group.choices) {
+            labelCounts.set(choice.label, (labelCounts.get(choice.label) ?? 0) + 1)
+          }
+          return group.selected.map((id) => {
+            const choice = choicesById.get(id)
+            const duplicate = choice && (labelCounts.get(choice.label) ?? 0) > 1
             const label = choice
               ? `${choice.label}${duplicate ? ` · ${choice.detail ?? id}` : ""}`
               : `${group.label} · ${id}`
@@ -313,7 +321,7 @@ export function TransactionFilterControls({
               </Button>
             )
           })
-        )}
+        })}
       </div>
       {!filters.categories?.length ? (
         <div className="flex flex-wrap items-center gap-2">
