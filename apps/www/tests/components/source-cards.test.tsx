@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { SourceCards } from "#/components/source-cards"
@@ -73,6 +73,32 @@ describe("SourceCards shared selection", () => {
       <SourceCards sources={sources} selectedSourceIds={["A", "B"]} onSourceSelect={select} />
     )
     expect(screen.getAllByRole("button", { pressed: true })).toHaveLength(2)
+  })
+
+  it("does not move a card when its nested sync button receives focus", async () => {
+    const select = vi.fn()
+    const sync = vi.fn()
+    render(
+      <SourceCards
+        sources={sources}
+        selectedSourceIds={["A", "B"]}
+        onSourceSelect={select}
+        onSourceSync={sync}
+      />
+    )
+    const a = screen.getByRole("button", { name: "Show A" })
+    const before = a.style.transform
+    act(() => screen.getByRole("button", { name: "Sync A" }).focus())
+    // Let Motion apply the focus-triggered target; a bubbled focus must not lift the card.
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    })
+    expect(a.style.transform).toBe(before)
+    expect(select).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole("button", { name: "Sync A" }))
+    expect(sync).toHaveBeenCalledExactlyOnceWith(sources[0])
+    act(() => a.focus())
+    await waitFor(() => expect(a.style.transform).not.toBe(before))
   })
 
   it.each(["Enter", " "])("selects a singleton with %s and keeps nested sync separate", (key) => {
