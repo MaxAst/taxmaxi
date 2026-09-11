@@ -44,6 +44,8 @@ const SOURCE_STACK = {
   tapScale: 0.98,
   spring: { type: "spring" as const, stiffness: 230, damping: 28, mass: 0.9 },
   reducedTransition: { duration: 0 },
+  reducedGap: 16,
+  reducedPadding: 8,
 }
 
 const stressSourceNetworks = ["Ethereum", "Solana", "Base", "Arbitrum", "Optimism"] as const
@@ -218,8 +220,9 @@ function SourceCardRail({
   const reduceMotion = useReducedMotion()
   const totalSlots = sources.length + (onAddWallet === undefined ? 0 : 1)
   const stackLayout = useMemo(
-    () => getStackLayout({ containerWidth, total: totalSlots }),
-    [containerWidth, totalSlots]
+    () =>
+      getStackLayout({ containerWidth, total: totalSlots, reducedMotion: reduceMotion === true }),
+    [containerWidth, totalSlots, reduceMotion]
   )
 
   useEffect(() => {
@@ -262,7 +265,10 @@ function SourceCardRail({
     >
       <ContentContainer className="h-full overflow-visible" width="2xl">
         <div
-          className="relative -mx-10 h-[21.5rem] overflow-x-auto overflow-y-clip overscroll-x-contain sm:-mx-12"
+          className={cn(
+            "relative h-[21.5rem] overflow-x-auto overflow-y-clip overscroll-x-contain",
+            !reduceMotion && "-mx-10 sm:-mx-12"
+          )}
           ref={scrollerRef}
         >
           {/* The stack mounts only after the scroller is measured, so cards
@@ -554,7 +560,7 @@ function FanCard({
       }}
       className={cn("absolute left-0 top-0 will-change-transform", className)}
       initial={
-        initialPlacement === false
+        reduceMotion || initialPlacement === false
           ? false
           : {
               opacity: 1,
@@ -576,6 +582,7 @@ function FanCard({
 }
 
 type SourceStackLayout = {
+  reducedMotion: boolean
   align: "center" | "measured"
   left: number
   ready: boolean
@@ -603,6 +610,17 @@ function getCardPlacement({
   selectedIndex: number
   total: number
 }): CardPlacement {
+  // Keep every reduced-motion control above the sheet without moving cards on focus or selection.
+  if (layout.reducedMotion) {
+    return {
+      x: layout.startX + index * layout.stepX,
+      y: SOURCE_STACK.fan.selectedY,
+      rotate: 0,
+      scale: 1,
+      zIndex: index + 1,
+    }
+  }
+
   const basePlacement = getRestingPlacement({ index, layout, total })
 
   if (selectedIndex < 0) {
@@ -658,7 +676,7 @@ function getAddCardPlacement({
     total: totalSlots,
   })
 
-  if (selectedSlot >= 0 || totalSlots <= 2) {
+  if (layout.reducedMotion || selectedSlot >= 0 || totalSlots <= 2) {
     return placement
   }
 
@@ -692,16 +710,34 @@ function getRestingPlacement({
 function getStackLayout({
   containerWidth,
   total,
+  reducedMotion,
 }: {
   containerWidth: number
   total: number
+  reducedMotion: boolean
 }): SourceStackLayout {
   const cardWidth = SOURCE_STACK.cardWidthPx
   const sidePadding = SOURCE_STACK.fan.sidePadding
   const startX = SOURCE_STACK.fan.startX
 
+  if (reducedMotion) {
+    const stepX = cardWidth + SOURCE_STACK.reducedGap
+    const rowPadding = SOURCE_STACK.reducedPadding
+    const stackWidth = rowPadding * 2 + Math.max(0, total - 1) * stepX + cardWidth
+    return {
+      reducedMotion: true,
+      align: "measured",
+      left: Math.max(0, (containerWidth - stackWidth) / 2),
+      ready: containerWidth > 0,
+      stackWidth,
+      startX: rowPadding,
+      stepX,
+    }
+  }
+
   if (total <= 1) {
     return {
+      reducedMotion: false,
       align: "center",
       left: 0,
       ready: true,
@@ -720,6 +756,7 @@ function getStackLayout({
   const stackWidth = startX + Math.max(0, total - 1) * stepX + cardWidth + sidePadding
 
   return {
+    reducedMotion: false,
     align: "measured",
     left: Math.max(0, (maxStackWidth - stackWidth) / 2),
     ready,

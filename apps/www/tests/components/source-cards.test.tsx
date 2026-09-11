@@ -107,7 +107,32 @@ describe("SourceCards shared selection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sync A" }))
     expect(sync).toHaveBeenCalledExactlyOnceWith(sources[0])
     keyboardFocus(a)
-    await waitFor(() => expect(a.style.transform).not.toBe(before))
+    await waitFor(() => expect(a.style.transform).toBe(before))
+  })
+
+  it("keeps reduced-motion placements fixed through focus and source selection", async () => {
+    const select = vi.fn()
+    const view = render(
+      <SourceCards sources={sources} selectedSourceIds={["A", "B"]} onSourceSelect={select} />
+    )
+    const cards = [
+      screen.getByRole("button", { name: "Show A" }),
+      screen.getByRole("button", { name: "Show B" }),
+    ]
+    const placements = cards.map((card) => card.style.transform)
+    const first = cards[0]
+    keyboardFocus(first)
+    fireEvent.keyDown(first, { key: "Enter" })
+    view.rerender(
+      <SourceCards sources={sources} selectedSourceIds={["A"]} onSourceSelect={select} />
+    )
+    fireEvent.keyDown(first, { key: "Escape" })
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    })
+    expect(cards.map((card) => card.style.transform)).toEqual(placements)
+    expect(first.getAttribute("aria-pressed")).toBe("true")
+    expect(cards[1].getAttribute("aria-pressed")).toBe("false")
   })
 
   it.each(["Enter", " "])("selects a singleton with %s and keeps nested sync separate", (key) => {
